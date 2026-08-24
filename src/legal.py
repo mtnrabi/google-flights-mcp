@@ -58,7 +58,9 @@ nav a { margin-right: 1rem; }
 _NAV = (
     '<nav><a href="/privacy">Privacy</a><a href="/terms">Terms</a>'
     '<a href="/support">Support</a>'
-    '<a href="https://google-flights-mcp.flightpowers.com/health">Status</a></nav>'
+    # Relative, so the hotels deployment's nav reports the hotels
+    # deployment's health rather than the flights one's.
+    '<a href="/health">Status</a></nav>'
 )
 
 
@@ -284,3 +286,56 @@ def support_html(products: str = "flights") -> str:
     return page(f"Support — {ctx['PRODUCT']}", markdown_to_html(md))
 
 
+
+INDEX_MD = """# {{PRODUCT}}
+
+A hosted Model Context Protocol server returning real-time {{DATA_NOUN}} data.
+**No advertising, no sponsored content, no paid placement** anywhere in a tool
+result.
+
+## Connect
+
+**Endpoint:** `{{MCP_URL}}` — transport: streamable HTTP.
+
+Every search is billed to the caller's own RapidAPI subscription, supplied per
+request as an `x-rapidapi-key` header. This server holds no upstream
+credential of its own and stores no key. Get a key, free tier available, at
+`{{SIGNUP_URL}}`.
+
+## Tools
+
+{{TOOL_BULLETS}}
+
+Both are read-only. They cannot book, hold, pay for or cancel anything.
+
+## Policies and contact
+
+- Privacy policy: `{{SITE}}/privacy`
+- Terms of service: `{{SITE}}/terms`
+- Support: `{{SITE}}/support` — mtnrabi@gmail.com
+- Health and current configuration: `{{SITE}}/health`
+
+## Non-affiliation
+
+This is an independent service returning publicly available {{DATA_NOUN}}
+pricing. It is not affiliated with, endorsed by, or sponsored by
+{{NOT_AFFILIATED}}.
+"""
+
+
+def index_html(products: str, site: str, signup_url: str) -> str:
+    """The landing page at `/`.
+
+    Deliberately a summary of facts a reviewer checks -- transport, auth model,
+    tool list, the four policy links, the ad-free statement -- rather than
+    marketing copy. The one page on this domain that is read by a person
+    deciding whether to approve the listing should answer their checklist.
+    """
+    ctx = PRODUCT_CONTEXT.get(products) or PRODUCT_CONTEXT["flights"]
+    md = apply_context(INDEX_MD, products)
+    md = (
+        md.replace("{{SITE}}", site)
+        .replace("{{MCP_URL}}", f"{site}/mcp")
+        .replace("{{SIGNUP_URL}}", signup_url)
+    )
+    return page(ctx["PRODUCT"], markdown_to_html(md))

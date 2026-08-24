@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
+from .schema_docs import document_params
+
 
 def register_prompts(mcp: FastMCP) -> None:
     """Attach every prompt template to `mcp`."""
@@ -35,6 +37,7 @@ def register_prompts(mcp: FastMCP) -> None:
             "route and say whether the winner is actually a good price."
         ),
     )
+    @document_params
     def cheapest_dates(
         from_airport: str,
         to_airport: str,
@@ -71,6 +74,7 @@ def register_prompts(mcp: FastMCP) -> None:
             "rank them, to answer 'where can I go cheaply'."
         ),
     )
+    @document_params
     def compare_destinations(
         from_airport: str,
         destinations: str,
@@ -102,6 +106,7 @@ def register_prompts(mcp: FastMCP) -> None:
             "lengths, priced as paired legs, within a budget."
         ),
     )
+    @document_params
     def plan_trip(
         from_airport: str,
         to_airport: str,
@@ -140,6 +145,7 @@ def register_prompts(mcp: FastMCP) -> None:
             "band and answer book-now or wait."
         ),
     )
+    @document_params
     def is_this_fare_good(
         from_airport: str,
         to_airport: str,
