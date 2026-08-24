@@ -1,0 +1,6 @@
+fastmcp>=3.0.0
+httpx>=0.27.0
+# Only used by the Vercel entrypoint (api/index.py), to hand FastMCP's
+# lifespan to the host. Without lifespan the MCP session manager never
+# starts and every /mcp request 500s.
+fastapi>=0.115.0

@@ -1,0 +1,11 @@
+# The virtualenv is ~112 MB and is rebuilt from requirements.txt at build time.
+# Without this it is uploaded on every deploy, which stalls the CLI silently:
+# no progress output, no error, just an upload that never finishes.
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+.env
+.env*.local
+logs/
