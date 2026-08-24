@@ -98,6 +98,21 @@ class Settings:
     default_result_limit: int
     signup_url: str
 
+    def site_origin(self) -> str:
+        """The scheme+host the public pages are served from.
+
+        Derived from `public_url` rather than configured separately, because a
+        second env var is a second thing that can point somewhere the policy
+        pages are not. Directory reviewers follow these URLs; a privacy link
+        that 404s is a listed instant-rejection cause at Anthropic.
+        """
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(self.public_url)
+        if not parts.scheme or not parts.netloc:
+            return self.public_url.rstrip("/").removesuffix("/mcp")
+        return f"{parts.scheme}://{parts.netloc}"
+
     # Which product this deployment serves: "flights", "hotels", or "both".
     #
     # One codebase, three deployments. A subscriber to the Google Flights API

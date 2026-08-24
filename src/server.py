@@ -63,7 +63,7 @@ from .credentials import (
     redact,
     resolve_credential,
 )
-from .legal import support_html, render_document
+from .legal import CONTACT_EMAIL, index_html, support_html, render_document
 from .hotels_client import (
     VALID_FILTERS,
     HotelsClient,
@@ -72,6 +72,7 @@ from .hotels_client import (
     unknown_filters,
 )
 from .prompts import register_prompts
+from .schema_docs import document_params
 from .fanout import (
     FanoutResult,
     PlanError,
@@ -252,6 +253,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp = FastMCP(
         name=service_name(settings.products),
         version="1.0.0",
+        # Carried in `serverInfo` and shown by clients next to the server's
+        # name. Both directories ask for a documentation URL on the listing;
+        # advertising it on the wire as well means a reviewer connecting
+        # directly -- not through the listing -- can still reach the policies.
+        website_url=settings.site_origin(),
         instructions=(
             "Real-time Google Flights search, ad-free. Requires the caller's "
             "own RapidAPI key for the Google Flights Live API, supplied as an "
@@ -527,6 +533,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "remaining quota come back in `api_usage`."
         ),
     )
+    @document_params
     async def search_oneway_flights(
         from_airport: str,
         to_airport: str | list[str],
@@ -654,6 +661,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "remaining quota come back in `api_usage`."
         ),
     )
+    @document_params
     async def search_roundtrip_flights(
         from_airport: str,
         to_airport: str | list[str],
@@ -854,6 +862,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "search again."
         ),
     )
+    @document_params
     async def search_hotels(
         destination: str,
         checkin_date: str,
@@ -865,6 +874,29 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         price_as_seen_from: str | None = None,
         filters: list[str] | None = None,
     ) -> dict[str, Any]:
+        """
+        Args:
+            destination: Where to stay, in free text the way a person would
+                say it, e.g. "Rome" or "Tokyo Shibuya". A city, district,
+                landmark or region all work; no internal location ID is needed.
+            checkin_date: First night of the stay, "YYYY-MM-DD".
+            checkout_date: Departure morning, "YYYY-MM-DD". Must be after
+                checkin_date.
+            adults: Number of adult guests. Defaults to the upstream default
+                when omitted.
+            children: Number of children sharing the room.
+            currency: ISO currency code for the prices returned, e.g. "usd".
+            budget_per_night: Only return properties at or below this nightly
+                price, in `currency`.
+            price_as_seen_from: Two-letter country code, e.g. "de". Prices the
+                stay through a residential connection in that country, so the
+                result is what a shopper resident there would be quoted. This
+                is what makes rate-parity and geo-pricing checks possible;
+                omit it for a neutral price.
+            filters: Property filters to apply, e.g. ["free_cancellation",
+                "breakfast_included"]. An unknown name is rejected with the
+                list of valid ones rather than being ignored.
+        """
         bad = unknown_filters(filters)
         if bad:
             raise ToolError(
@@ -907,6 +939,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Rates go stale within minutes: never reuse an earlier result."
         ),
     )
+    @document_params
     async def find_hotel_by_name(
         hotel_name: str,
         checkin_date: str,
@@ -916,6 +949,21 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         currency: str | None = None,
         price_as_seen_from: str | None = None,
     ) -> dict[str, Any]:
+        """
+        Args:
+            hotel_name: The property name a person would type, e.g. "Hotel
+                Artemide". Adding the city ("Hotel Artemide Rome") disambiguates
+                a chain with many properties. No internal property ID is needed.
+            checkin_date: First night of the stay, "YYYY-MM-DD".
+            checkout_date: Departure morning, "YYYY-MM-DD". Must be after
+                checkin_date.
+            adults: Number of adult guests.
+            children: Number of children sharing the room.
+            currency: ISO currency code for the prices returned, e.g. "usd".
+            price_as_seen_from: Two-letter country code, e.g. "de". Prices the
+                stay as a shopper resident in that country would see it, which
+                is what makes a rate-parity check on one property possible.
+        """
         payload = build_hotel_by_name_payload(
             hotel_name=hotel_name,
             checkin_date=checkin_date,
@@ -962,6 +1010,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     # ── operational routes ───────────────────────────────────────────────
 
+    site = settings.site_origin()
+
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:
         """Public, unauthenticated, and cheap -- registries poll it, and a
@@ -973,11 +1023,31 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "ads": False,
                 "mcp_endpoint": settings.public_url,
                 "signup_url": settings.signup_url,
+                # Directory reviews check that a privacy policy, terms and a
+                # support channel all resolve for an anonymous visitor.
+                # Emitting them from the same process that serves them means
+                # they cannot drift apart.
+                "privacy_url": f"{site}/privacy",
+                "terms_url": f"{site}/terms",
+                "support_url": f"{site}/support",
+                "contact_email": CONTACT_EMAIL,
                 # Stated out loud because a fallback key left set in
                 # production silently bills its owner for every anonymous
                 # caller, and nothing else would ever surface it.
                 "server_side_key_configured": bool(settings.fallback_rapidapi_key),
             }
+        )
+
+    @mcp.custom_route("/", methods=["GET"])
+    async def index(_request: Request) -> Response:
+        """The base URL a reviewer types before they read anything else.
+
+        FastMCP mounts nothing at `/`, so without this the first page a human
+        opens on the submitted domain is a bare 404 -- which reads as an
+        abandoned deployment next to a listing that claims the service is
+        live. Links out to the policies, support and health instead."""
+        return HTMLResponse(
+            index_html(settings.products, site, settings.signup_url)
         )
 
     @mcp.custom_route("/privacy", methods=["GET"])
