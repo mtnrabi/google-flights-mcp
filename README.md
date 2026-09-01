@@ -19,6 +19,20 @@ cannot render the sponsored card may be capped further.) Come back here when the
 
 ---
 
+## Cursor Marketplace
+
+Once listed, install directly from the [Cursor Marketplace](https://cursor.com/marketplace). Until
+then, add the remote MCP server manually:
+
+```bash
+# In Cursor, add via Settings → MCP Servers → Add Server
+# URL: https://google-flights-mcp.flightpowers.com/mcp
+# Header: x-rapidapi-key: YOUR_RAPIDAPI_KEY
+```
+
+Or use the `mcp.json` at the root of this repo, which references `${RAPIDAPI_KEY}` as a plugin
+variable.
+
 ## What your agent gets
 
 Two tools that answer a *fare question*, not a *date lookup*.

@@ -1,0 +1,33 @@
+{
+  "name": "google-flights",
+  "version": "1.0.0",
+  "description": "Hosted Google Flights MCP for Cursor: live fares with Google's own low/typical/high verdict. BYO RapidAPI key. Ad-free.",
+  "author": {
+    "name": "Matan Rabi",
+    "email": "mtnrabi@gmail.com"
+  },
+  "homepage": "https://flightpowers.com",
+  "repository": "https://github.com/mtnrabi/google-flights-mcp",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "flights",
+    "google-flights",
+    "travel",
+    "rapidapi"
+  ],
+  "logo": "https://flightpowers.com/apple-icon.png",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "RAPIDAPI_KEY": {
+        "type": "string",
+        "title": "RapidAPI key",
+        "description": "Subscribe at https://rapidapi.com/mtnrabi/api/google-flights-live-api to get your key. Free tier available."
+      }
+    },
+    "required": [
+      "RAPIDAPI_KEY"
+    ]
+  }
+}
