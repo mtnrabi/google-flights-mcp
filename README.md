@@ -65,6 +65,18 @@ back to you.
 First non-empty source wins, in that order. The key is never logged, never echoed into an error
 message, and never returned in a tool response.
 
+## Gemini CLI
+
+Install via the Gemini extensions CLI:
+
+```bash
+gemini extensions install https://github.com/mtnrabi/google-flights-mcp
+```
+
+The installer will prompt for your RapidAPI key. Subscribe at
+https://rapidapi.com/mtnrabi/api/google-flights-live-api (free tier available) and copy your
+`x-rapidapi-key`.
+
 ## Tools
 
 | Tool | What it does |

@@ -1,0 +1,23 @@
+{
+  "name": "google-flights",
+  "version": "1.0.0",
+  "description": "Hosted Google Flights MCP: live fares with Google's own low/typical/high verdict. BYO RapidAPI key. Ad-free.",
+  "settings": [
+    {
+      "key": "RAPIDAPI_KEY",
+      "envVar": "RAPIDAPI_KEY",
+      "displayName": "RapidAPI key",
+      "description": "Subscribe to the Google Flights Live API at https://rapidapi.com/mtnrabi/api/google-flights-live-api and copy your x-rapidapi-key",
+      "sensitive": true
+    }
+  ],
+  "mcpServers": {
+    "google-flights": {
+      "httpUrl": "https://google-flights-mcp.flightpowers.com/mcp",
+      "headers": {
+        "x-rapidapi-key": "$RAPIDAPI_KEY"
+      },
+      "timeout": 30000
+    }
+  }
+}
