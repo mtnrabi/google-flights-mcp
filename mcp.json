@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "google-flights": {
+      "url": "https://google-flights-mcp.flightpowers.com/mcp",
+      "headers": {
+        "x-rapidapi-key": "${RAPIDAPI_KEY}"
+      }
+    }
+  }
+}
