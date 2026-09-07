@@ -16,20 +16,16 @@ every search is billed to your own RapidAPI subscription. See section 2.
 
 ## 1. What you get
 
-A hosted Model Context Protocol server exposing two tools:
+A hosted Model Context Protocol server exposing these tools:
 
 {{TOOL_BULLETS}}
 
-Both take a date range and a list of destinations and expand them internally
-into individual searches. One user intent is one tool call. The fan-out cap is
-30 searches per call. A per-call `max_searches` argument can lower that cap for
-a single call but cannot raise it; 60 is the hard ceiling that the
-deployment-wide setting itself cannot exceed.
+{{TOOL_BEHAVIOUR}} One user intent is one tool call.
 
 The server serves no advertising.
 
 **Non-affiliation.** This is an independent service that returns publicly
-available {{DATA_NOUN}} pricing. It is not affiliated with, endorsed by, or sponsored by {{NOT_AFFILIATED}}. Airline, airport and travel-brand names appear only as factual
+available {{DATA_NOUN}} pricing. It is not affiliated with, endorsed by, or sponsored by {{NOT_AFFILIATED}}. {{BRAND_NOUNS}} appear only as factual
 descriptions of search results.
 
 ---
@@ -49,9 +45,8 @@ Every search is billed to **your own RapidAPI subscription** for the {{UPSTREAM_
   `requests_used_by_this_call`, and adds `plan_requests_remaining` and
   `plan_requests_limit` whenever RapidAPI returns its rate-limit headers for
   your plan — so the cost of a call is visible in the call itself.
-- You are responsible for your RapidAPI plan, its quota, and its charges. Cost
-  of a fan-out is roughly one billed upstream request per date/destination
-  combination searched; check `api_usage` for the actual figure.
+- You are responsible for your RapidAPI plan, its quota, and its charges.
+  {{COST_SENTENCE}}; check `api_usage` for the actual figure.
 - Your relationship with RapidAPI and with the underlying API provider is
   governed by their terms, not these.
 
@@ -83,20 +78,13 @@ threatens the stability of the service.
 
 ## 4. About the data returned
 
-- **Fares change constantly and go stale within minutes.** Every result is a
-  snapshot of the moment it was fetched. Do not cache fares, do not reuse an
-  earlier result, and do not present a previously fetched fare as current. If
-  you display a fare, display when it was fetched.
+- {{STALENESS_BULLET}}
 - **Results are informational, not an offer.** This service does not sell
   tickets, hold inventory, take payment, or make bookings. Availability and
-  price are confirmed only at the airline or booking site, via the `buy_link`
+  price are confirmed only at {{CONFIRMATION_SITES}}, via the booking link
   in each result.
-- **An empty result set is a valid answer**, meaning no flights were found for
-  that route and those dates. It is not an error.
-- **Price insight fields** (`price_range_in_relation_to_other_periods`,
-  `price_insights_low`, `price_insights_high`) are the upstream provider's
-  historical characterisation of a route and period. They are context, not a
-  prediction or financial advice.
+- {{EMPTY_RESULT_BULLET}}
+- {{PRICE_CONTEXT_BULLET}}
 - Data is passed through from the upstream API. Its accuracy, completeness and
   availability are not warranted by this service.
 

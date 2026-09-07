@@ -36,6 +36,9 @@ from typing import Any, Literal
 
 import httpx
 
+from .fanout import split_airport_codes
+from .settings import DEFAULT_TIMEOUT_SECONDS
+
 ENDPOINT_MAP = {
     "oneway": "/api/google_flights/oneway/v1",
     "roundtrip": "/api/google_flights/roundtrip/v1",
@@ -62,7 +65,15 @@ class QuotaError(RapidAPIError):
 
 
 def _compact(payload: dict[str, Any]) -> dict[str, Any]:
-    """Drop None values so we never send an explicit null."""
+    """Drop None values so we never send an explicit null.
+
+    `use_fallback` depends on this. The backend field is tri-state -- true runs
+    the fallback client inline on every attempt, false forbids it outright, and
+    an absent value lets the backend escalate to it once after every retry for a
+    combination has failed. Omitting the key is therefore the only way to ask for
+    the last-resort behaviour, and sending `false` (which is what these tools did
+    before) opts the caller out of it.
+    """
     return {k: v for k, v in payload.items() if v is not None}
 
 
@@ -78,16 +89,26 @@ def invalid_airports(*values: str | list[str] | None) -> list[str]:
 
     An IATA airport or city code is exactly three letters. `""` is reported as
     `(empty)` so the message names something the caller can actually see.
+
+    Each value is split with `split_airport_codes` first, so the three shapes a
+    model might use for a destination list -- `["BCN","LIS"]`, `"BCN,LIS"`,
+    `"BCN LIS"` -- are all checked code by code. Before that split lived here,
+    `"BCN,LIS,ATH"` was rejected whole as a single 11-character "code" while
+    the free server happily fanned the same string out.
     """
     bad: list[str] = []
     for value in values:
         if value is None:
             continue
-        candidates = value if isinstance(value, list) else [value]
-        for code in candidates:
-            text = (code or "").strip()
-            if not _IATA_CODE.fullmatch(text):
-                bad.append(text or "(empty)")
+        # Iterated element by element rather than splitting the whole list at
+        # once, so an empty element in `["LCA", "", "ATH"]` is still named.
+        candidates = list(value) if isinstance(value, (list, tuple)) else [value]
+        for candidate in candidates:
+            codes = split_airport_codes(candidate)
+            if not codes:
+                bad.append("(empty)")
+                continue
+            bad.extend(code for code in codes if not _IATA_CODE.fullmatch(code))
     return bad
 
 
@@ -205,6 +226,44 @@ QUOTA_HEADERS = {
 }
 
 
+# The backend reports the outcome of a search in headers under this prefix.
+# `X-Search-Status: degraded` means the search did not complete, so the `[]` it
+# came with says nothing about flight availability. Matched by prefix so a
+# counter added upstream arrives here without an edit.
+SEARCH_HEADER_PREFIX = "x-search-"
+SEARCH_STATUS_HEADER = "x-search-status"
+SEARCH_REASON_HEADER = "x-search-reason"
+
+#: The search did not complete. An empty list carrying this is not an answer.
+SEARCH_STATUS_DEGRADED = "degraded"
+#: Some combinations answered and some did not; the list is incomplete.
+SEARCH_STATUS_PARTIAL = "partial"
+
+#: Statuses that mean "do not report this result as a fact about flights".
+INCOMPLETE_SEARCH_STATUSES = frozenset(
+    {SEARCH_STATUS_DEGRADED, SEARCH_STATUS_PARTIAL}
+)
+
+
+def read_search_status(response: httpx.Response) -> dict[str, str]:
+    """Extract the backend's `X-Search-*` outcome headers, lower-cased.
+
+    Absent headers produce an empty dict, which every caller reads as "the
+    backend did not say" -- deliberately *not* as "the search was fine". A
+    backend that predates these headers must not be assumed healthy.
+    """
+    return {
+        name.lower(): str(value)
+        for name, value in response.headers.items()
+        if name.lower().startswith(SEARCH_HEADER_PREFIX)
+    }
+
+
+def search_is_incomplete(outcome: dict[str, str]) -> bool:
+    """True when this response's result list is known not to be an answer."""
+    return outcome.get(SEARCH_STATUS_HEADER, "") in INCOMPLETE_SEARCH_STATUSES
+
+
 def read_quota(response: httpx.Response) -> dict[str, int]:
     """Extract plan usage from RapidAPI's rate-limit headers.
 
@@ -255,7 +314,14 @@ class RapidAPIClient:
         self,
         base_url: str,
         rapidapi_host: str,
-        timeout_seconds: float = 105.0,
+        # The deployed function's ``Timeout`` plus an edge-relay margin; see
+        # ``settings.DEFAULT_TIMEOUT_SECONDS``. There is one ceiling here, not
+        # two: measured on 2026-08-27 the RapidAPI edge relays the verdict about
+        # a quarter-second after the function's own kill, so the number to clear
+        # is the function ``Timeout``. Waiting *less* than it discards answers
+        # that were on their way, which is what a stale 45.0 did after the
+        # function was raised to 60.
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -281,16 +347,24 @@ class RapidAPIClient:
         *,
         api_key: str,
         quota_sink: dict[str, int] | None = None,
+        outcome_sink: list[dict[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """POST one search. Returns the (possibly empty) result list.
 
         Raises AuthError, QuotaError, or RapidAPIError. Never returns None --
-        an empty search is `[]`, which is a valid answer and not a failure.
+        an empty search is `[]`, which is a valid answer *only when the backend
+        says the search completed*; see `outcome_sink`.
 
         `quota_sink`, when given, is overwritten in place with the plan usage
         read off the response. Every request in one fan-out carries the same
         key, so last-writer-wins is not a race to avoid but the behaviour we
         want: the final value is the most recent view of that plan's usage.
+
+        `outcome_sink`, when given, gets one appended entry per answered
+        request: that response's `X-Search-*` headers. A list rather than a
+        dict, because unlike the quota this is *not* one fact about the
+        request -- each date and destination combination has its own outcome,
+        and last-writer-wins would hide a failed one behind a healthy one.
         """
         if self._client is None:
             raise RapidAPIError("RapidAPIClient used outside its async context")
@@ -319,6 +393,8 @@ class RapidAPIClient:
                 quota_sink.update(read_quota(response))
 
             if response.status_code == 200:
+                if outcome_sink is not None:
+                    outcome_sink.append(read_search_status(response))
                 return self._parse(response)
 
             detail = _upstream_message(response)

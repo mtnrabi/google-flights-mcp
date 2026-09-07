@@ -190,6 +190,49 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
         "TOOL_BULLETS": "- `search_oneway_flights`\n- `search_roundtrip_flights`",
         "NOT_AFFILIATED": "Google",
         "SIGNUP_URL": "https://rapidapi.com/mtnrabi/api/google-flights-live-api",
+        # What the tools actually do with a request. Was a fixed paragraph
+        # describing the flight fan-out, which is not what the hotel tools do
+        # and not a cap that applies to them.
+        "TOOL_BEHAVIOUR": (
+            "Both accept a date range and a list of destinations, expand them "
+            "internally into individual searches (30 per call by default; a "
+            "per-call `max_searches` argument can lower that figure for a "
+            "single call but cannot raise it, and 60 is the hard ceiling the "
+            "deployment-wide setting itself cannot exceed), and forward each "
+            "search to the Google Flights Live API on RapidAPI."
+        ),
+        "SEARCH_PARAM_NOUNS": (
+            "Origins, destinations, dates, passenger counts, cabin class, "
+            "price limits and airline filters"
+        ),
+        "RESULT_NOUN": "Flight results",
+        "RESULT_SENTENCE": (
+            "Fares are returned to you and not retained. Fares go stale "
+            "within minutes, so nothing is cached or reused."
+        ),
+        "COST_SENTENCE": (
+            "Cost of a fan-out is roughly one billed upstream request per "
+            "date/destination combination searched"
+        ),
+        "BRAND_NOUNS": "Airline, airport and travel-brand names",
+        "STALENESS_BULLET": (
+            "**Fares change constantly and go stale within minutes.** Every "
+            "result is a snapshot of the moment it was fetched. Do not cache "
+            "fares, do not reuse an earlier result, and do not present a "
+            "previously fetched fare as current. If you display a fare, "
+            "display when it was fetched."
+        ),
+        "CONFIRMATION_SITES": "the airline or booking site",
+        "EMPTY_RESULT_BULLET": (
+            "**An empty result set is a valid answer**, meaning no flights "
+            "were found for that route and those dates. It is not an error."
+        ),
+        "PRICE_CONTEXT_BULLET": (
+            "**Price insight fields** (`price_range_in_relation_to_other_"
+            "periods`, `price_insights_low`, `price_insights_high`) are the "
+            "upstream provider's historical characterisation of a route and "
+            "period. They are context, not a prediction or financial advice."
+        ),
     },
     "hotels": {
         "PRODUCT": "Booking.com Hotels MCP",
@@ -201,13 +244,123 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
         "TOOL_BULLETS": "- `search_hotels`\n- `find_hotel_by_name`",
         "NOT_AFFILIATED": "Booking.com",
         "SIGNUP_URL": "https://rapidapi.com/mtnrabi/api/booking-live-api",
+        "TOOL_BEHAVIOUR": (
+            "Both take a stay -- a destination or a property name, plus "
+            "check-in and check-out dates -- and forward it to the Booking "
+            "Live API on RapidAPI as a single request. There is no fan-out: "
+            "one tool call is exactly one upstream request. An optional "
+            "two-letter country code prices the stay through a residential "
+            "connection in that country, so the result is what a shopper "
+            "resident there would be quoted."
+        ),
+        "SEARCH_PARAM_NOUNS": (
+            "Destinations, property names, stay dates, guest counts, currency, "
+            "nightly budget, property filters and the country a price is "
+            "requested from"
+        ),
+        "RESULT_NOUN": "Hotel results",
+        "RESULT_SENTENCE": (
+            "Room rates are returned to you and not retained. Rates go stale "
+            "within minutes, so nothing is cached or reused."
+        ),
+        "COST_SENTENCE": (
+            "There is no fan-out here: each tool call is exactly one billed "
+            "upstream request"
+        ),
+        "BRAND_NOUNS": "Property, chain and travel-brand names",
+        "STALENESS_BULLET": (
+            "**Room rates change constantly and go stale within minutes.** "
+            "Every result is a snapshot of the moment it was fetched. Do not "
+            "cache a rate, do not reuse an earlier result, and do not present "
+            "a previously fetched rate as current. If you display a rate, "
+            "display when it was fetched, and the country it was priced from "
+            "if one was given."
+        ),
+        "CONFIRMATION_SITES": "the property or booking site",
+        "EMPTY_RESULT_BULLET": (
+            "**An empty result set is a valid answer**, meaning no bookable "
+            "property matched that destination, those dates and any filters "
+            "applied. It is not an error."
+        ),
+        "PRICE_CONTEXT_BULLET": (
+            "**A price requested from a given country** is what a shopper "
+            "resident there was quoted at that moment, not a guarantee that "
+            "the same rate is available to you. Rates differ by country, by "
+            "currency and over time; treat a difference between two countries "
+            "as an observation, not as advice."
+        ),
     },
 }
+# The combined deployment sells both listings, so it inherits neither product's
+# upstream, non-affiliation or tool list wholesale: a policy naming only the
+# Google Flights Live API, and disclaiming affiliation only with Google, is not
+# a policy for the hotel half of the same server.
 PRODUCT_CONTEXT["both"] = dict(
     PRODUCT_CONTEXT["flights"],
     PRODUCT="Flight & Hotel Data MCP",
     HOST="google-flights-mcp.flightpowers.com",
     DATA_NOUN="flight and hotel",
+    UPSTREAM_API="Google Flights Live API and the Booking Live API",
+    NOT_AFFILIATED="Google or Booking.com",
+    TOOL_NAMES=(
+        "`search_oneway_flights`, `search_roundtrip_flights`, "
+        "`search_hotels` or `find_hotel_by_name`"
+    ),
+    TOOL_BULLETS=(
+        "- `search_oneway_flights`\n- `search_roundtrip_flights`\n"
+        "- `search_hotels`\n- `find_hotel_by_name`"
+    ),
+    # Written out rather than concatenated: the two single-product paragraphs
+    # each open with "Both", which is four tools between them, and one denies
+    # the fan-out the other has just described.
+    TOOL_BEHAVIOUR=(
+        "The two flight tools accept a date range and a list of destinations "
+        "and expand them internally into individual searches (30 per call by "
+        "default; a per-call `max_searches` argument can lower that figure "
+        "for a single call but cannot raise it, and 60 is the hard ceiling "
+        "the deployment-wide setting itself cannot exceed), forwarding each "
+        "search to the Google Flights Live API on RapidAPI. The two hotel "
+        "tools take one stay -- a destination or a property name, plus "
+        "check-in and check-out dates -- and forward it to the Booking Live "
+        "API on RapidAPI as a single request, with no fan-out: one hotel tool "
+        "call is exactly one upstream request. An optional two-letter country "
+        "code prices a stay through a residential connection in that country, "
+        "so the result is what a shopper resident there would be quoted."
+    ),
+    SEARCH_PARAM_NOUNS=(
+        "Origins, destinations, property names, dates, guest and passenger "
+        "counts, cabin class, currency, price limits, airline filters and "
+        "property filters"
+    ),
+    RESULT_NOUN="Flight and hotel results",
+    RESULT_SENTENCE=(
+        "Fares and room rates are returned to you and not retained. Both go "
+        "stale within minutes, so nothing is cached or reused."
+    ),
+    COST_SENTENCE=(
+        "Cost of a flight fan-out is roughly one billed upstream request per "
+        "date/destination combination searched, and a hotel call is exactly "
+        "one"
+    ),
+    BRAND_NOUNS="Airline, airport, property and travel-brand names",
+    STALENESS_BULLET=(
+        "**Fares and room rates change constantly and go stale within "
+        "minutes.** Every result is a snapshot of the moment it was fetched. "
+        "Do not cache a price, do not reuse an earlier result, and do not "
+        "present a previously fetched price as current. If you display a "
+        "price, display when it was fetched."
+    ),
+    CONFIRMATION_SITES="the airline, property or booking site",
+    EMPTY_RESULT_BULLET=(
+        "**An empty result set is a valid answer**, meaning nothing matched "
+        "the route or destination, the dates and any filters applied. It is "
+        "not an error."
+    ),
+    PRICE_CONTEXT_BULLET=(
+        PRODUCT_CONTEXT["flights"]["PRICE_CONTEXT_BULLET"]
+        + " "
+        + PRODUCT_CONTEXT["hotels"]["PRICE_CONTEXT_BULLET"]
+    ),
 )
 
 

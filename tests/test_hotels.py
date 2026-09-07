@@ -223,7 +223,7 @@ class TestHotelTools:
                     "checkout_date": "2026-05-10",
                 },
             )
-        data = out.data
+        data = out.structured_content
         assert data["result_count"] == 1
         assert data["results"][0]["name"] == "Kremlin Palace"
         assert data["applied_filters"] == ["gym"]
@@ -247,8 +247,8 @@ class TestHotelTools:
                     "checkout_date": "2026-05-10",
                 },
             )
-        assert out.data["result_count"] == 1
-        assert out.data["results"][0]["name"] == "Kremlin Palace"
+        assert out.structured_content["result_count"] == 1
+        assert out.structured_content["results"][0]["name"] == "Kremlin Palace"
 
     @pytest.mark.asyncio
     async def test_bad_filter_is_rejected_before_spending_a_request(self):
@@ -290,29 +290,38 @@ class TestHotelTools:
                     "checkout_date": "2026-05-04",
                 },
             )
-        assert out.data["needs_api_key"] is True
+        assert out.structured_content["needs_api_key"] is True
         assert calls == []
 
     @pytest.mark.asyncio
     async def test_unsubscribed_key_says_to_subscribe_not_no_results(self):
         """A flights-only subscriber must not be shown an empty hotel list --
-        that reads as 'no hotels', not 'you have not bought this'."""
+        that reads as 'no hotels', not 'you have not bought this'.
+
+        Returned as data (`needs_api_key`), not raised, and carrying
+        `how_to_get_a_key` -- the same shape and reasoning as the flights
+        no-key/invalid-key replies: a rejected key is functionally the same
+        problem as no key, and a structured result survives the trip to a
+        human more reliably than an exception string."""
 
         def handler(_r):
             return httpx.Response(403, json={"message": "You are not subscribed"})
 
         mcp = build_with_upstream(handler, fallback_rapidapi_key=KEY)
         async with Client(mcp) as client:
-            with pytest.raises(ToolError) as exc:
-                await client.call_tool(
-                    "search_hotels",
-                    {
-                        "destination": "Rome",
-                        "checkin_date": "2026-05-01",
-                        "checkout_date": "2026-05-04",
-                    },
-                )
-        assert "Subscribe" in str(exc.value)
+            out = await client.call_tool(
+                "search_hotels",
+                {
+                    "destination": "Rome",
+                    "checkin_date": "2026-05-01",
+                    "checkout_date": "2026-05-04",
+                },
+            )
+        result = out.structured_content
+        assert result["needs_api_key"] is True
+        assert "Subscribe" in result["message"]
+        assert result["how_to_get_a_key"]["signup_url"]
+        assert len(result["how_to_get_a_key"]["how"]) == 3
 
     @pytest.mark.asyncio
     async def test_proxy_country_reaches_the_upstream_body(self):

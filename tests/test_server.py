@@ -9,12 +9,14 @@ concern that matters -- pulling a key out of headers and query params -- is
 covered in test_credentials.py against the pure function.
 """
 
+import json
+
 import httpx
 import pytest
 from fastmcp import Client
 
 from src.rapidapi_client import AuthError, QuotaError
-from src.server import _dedupe, _sort_results, _usage_block, build_server
+from src.server import _dedupe, _row_sort_key, _usage_block, build_server
 from src.settings import HARD_MAX_SEARCHES, Settings
 
 KEY = "test-key-that-is-long-enough-to-pass"
@@ -67,6 +69,18 @@ async def call(mcp, tool: str, **kwargs):
     async with Client(mcp) as client:
         result = await client.call_tool(tool, kwargs)
         return result.structured_content
+
+
+async def call_result(mcp, tool: str, **kwargs):
+    """The whole CallToolResult, errors included.
+
+    `call` cannot reach a degraded search any more: that result now carries
+    `isError: true`, and the client raises on it by default. Anything
+    asserting on the error flag, or on a payload that rides alongside it,
+    has to look at the result rather than just the structured content.
+    """
+    async with Client(mcp) as client:
+        return await client.call_tool(tool, kwargs, raise_on_error=False)
 
 
 class TestToolRegistration:
@@ -127,9 +141,9 @@ class TestToolRegistration:
 
     @pytest.mark.asyncio
     async def test_sort_type_is_not_exposed(self):
-        """It is silently dropped for one-way upstream, so offering it would
-        be a parameter that does nothing -- which is what the generated
-        passthrough server does today."""
+        """Upstream ordering is per-search, and this server merges up to `cap`
+        searches and re-sorts the merged set via `sort_by` -- so a passed-through
+        `sort_type` would be a parameter whose effect the merge discards."""
         mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
         async with Client(mcp) as client:
             for tool in await client.list_tools():
@@ -461,11 +475,13 @@ class TestHelpers:
 
     def test_sort_puts_missing_prices_last(self):
         rows = [{"price_as_number": None}, {"price_as_number": 100}]
-        assert _sort_results(rows, "price")[0]["price_as_number"] == 100
+        ordered = sorted(rows, key=_row_sort_key("price"))
+        assert ordered[0]["price_as_number"] == 100
 
     def test_sort_falls_back_to_roundtrip_keys(self):
         rows = [{"total_price_as_number": 300}, {"total_price_as_number": 100}]
-        assert _sort_results(rows, "price")[0]["total_price_as_number"] == 100
+        ordered = sorted(rows, key=_row_sort_key("price"))
+        assert ordered[0]["total_price_as_number"] == 100
 
     def test_usage_block_without_quota_headers_still_states_the_cost(self):
         block = _usage_block(7, {})
@@ -685,3 +701,390 @@ class TestProductSelection:
         assert service_name("flights") == "google-flights-mcp"
         assert service_name("hotels") == "booking-hotels-mcp"
         assert service_name("both") == "flightpowers-travel-mcp"
+
+
+class TestSearchStatusIsBelieved:
+    """The backend answers a failed scrape and a genuine empty with the same
+    HTTP 200 and the same `[]`, and says which in `X-Search-Status`. Until that
+    header was read, the tool answered both with "No flights were found ... try
+    a different date" -- a confident, checkable, wrong claim about the world
+    that a model repeats to the user as fact.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_search_is_not_reported_as_no_flights(self):
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(
+                200,
+                json=[],
+                headers={"X-Search-Status": "degraded", "X-Search-Reason": "blocked_page"},
+            )
+        )
+        result = await call_result(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+        )
+        # The failure is on the result itself, not only inside the payload.
+        assert result.is_error
+        out = result.structured_content
+        assert out["result_count"] == 0
+        assert out["search_status"] == "degraded"
+        assert "No flights were found" not in out["message"]
+        assert "did not complete" in out["message"]
+        assert "blocked_page" in out["message"]
+
+    @pytest.mark.asyncio
+    async def test_the_degraded_message_tells_the_model_what_not_to_say(self):
+        """The only consumer of this field is a language model, and it will act
+        on it. Naming the wrong action is worth the words."""
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(200, json=[], headers={"X-Search-Status": "degraded"})
+        )
+        result = await call_result(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+        )
+        assert result.is_error
+        out = result.structured_content
+        assert "do not tell the user that none exist" in out["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_empty_still_says_no_flights(self):
+        """The old message was not wrong, only unconditional. When the backend
+        says the search completed, it is exactly right."""
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(200, json=[], headers={"X-Search-Status": "empty"})
+        )
+        out = await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+        )
+        assert out["search_status"] == "empty"
+        assert "No flights were found" in out["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_silent_backend_does_not_get_the_benefit_of_the_doubt(self):
+        """A backend that predates the header, or a hop that dropped it. The
+        result is unchanged from today -- but no `search_status` is claimed,
+        because we do not know one."""
+        mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
+        out = await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+        )
+        assert "search_status" not in out
+        assert "No flights were found" in out["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_search_is_labelled_ok(self):
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(
+                200, json=[ONEWAY_ROW], headers={"X-Search-Status": "ok"}
+            )
+        )
+        out = await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+        )
+        assert out["search_status"] == "ok"
+        assert out["result_count"] == 1
+        assert "partial" not in out
+
+    @pytest.mark.asyncio
+    async def test_one_degraded_date_in_a_range_is_not_hidden_by_the_others(self):
+        """A fan-out is many independent searches. Recording the outcome as one
+        fact per request -- last writer wins, the way quota is recorded -- would
+        let a healthy date bury a failed one and quietly under-report the range.
+        """
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    200, json=[], headers={"X-Search-Status": "degraded"}
+                )
+            return httpx.Response(
+                200, json=[ONEWAY_ROW], headers={"X-Search-Status": "ok"}
+            )
+
+        mcp = build_with_upstream(handler)
+        out = await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date_from="2026-09-01",
+            departure_date_to="2026-09-03",
+        )
+        assert out["result_count"] > 0
+        assert out["search_status"] == "partial"
+        assert "did not complete" in out["partial"]
+
+    @pytest.mark.asyncio
+    async def test_an_incomplete_note_does_not_replace_the_failure_note(self):
+        """Both can be true at once: one combination raised, another answered
+        with a degraded empty. Losing either would understate the gap."""
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    200, json=[], headers={"X-Search-Status": "degraded"}
+                )
+            if calls["n"] == 2:
+                return httpx.Response(422, json={"message": "bad payload"})
+            return httpx.Response(
+                200, json=[ONEWAY_ROW], headers={"X-Search-Status": "ok"}
+            )
+
+        mcp = build_with_upstream(handler)
+        out = await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date_from="2026-09-01",
+            departure_date_to="2026-09-03",
+        )
+        assert "searches failed" in out["partial"]
+        assert "did not complete" in out["partial"]
+
+    @pytest.mark.asyncio
+    async def test_roundtrip_reports_the_same_way(self):
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(200, json=[], headers={"X-Search-Status": "degraded"})
+        )
+        result = await call_result(
+            mcp,
+            "search_roundtrip_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+            return_date="2026-09-27",
+        )
+        assert result.is_error
+        out = result.structured_content
+        assert out["search_status"] == "degraded"
+        assert "No flights were found" not in out["message"]
+
+
+class TestFallbackDefault:
+    """`use_fallback` is tri-state upstream, and the default has to be absent.
+
+    The backend reads the field as: true = run the fallback client inline on
+    every attempt; false = never, last-resort escalation included; absent =
+    escalate to it once, only after every retry for a combination has failed.
+    These tools used to declare `use_fallback: bool = False`, which sent an
+    explicit `false` on every call and excluded our own users from the
+    escalation -- the exact opposite of the intent.
+    """
+
+    @staticmethod
+    def _recording_upstream():
+        bodies: list[dict] = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json=[ONEWAY_ROW])
+
+        return bodies, build_with_upstream(handler)
+
+    @pytest.mark.asyncio
+    async def test_default_call_omits_the_key_entirely(self):
+        bodies, mcp = self._recording_upstream()
+        await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+        )
+        assert bodies, "the tool made no upstream call"
+        assert "use_fallback" not in bodies[0]
+
+    @pytest.mark.asyncio
+    async def test_roundtrip_default_omits_it_too(self):
+        bodies, mcp = self._recording_upstream()
+        await call(
+            mcp,
+            "search_roundtrip_flights",
+            from_airport="TLV",
+            to_airport="BUD",
+            departure_date="2026-09-20",
+            return_date="2026-09-27",
+        )
+        assert bodies
+        assert "use_fallback" not in bodies[0]
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_choice_still_reaches_the_backend(self):
+        """Absent is only the default; a caller who states a value keeps it."""
+        for requested in (True, False):
+            bodies, mcp = self._recording_upstream()
+            await call(
+                mcp,
+                "search_oneway_flights",
+                from_airport="TLV",
+                to_airport="BUD",
+                departure_date="2026-09-20",
+                use_fallback=requested,
+            )
+            assert bodies[0]["use_fallback"] is requested
+
+    @pytest.mark.asyncio
+    async def test_the_schema_offers_null_and_defaults_to_it(self):
+        mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
+        async with Client(mcp) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+
+        for name in ("search_oneway_flights", "search_roundtrip_flights"):
+            schema = tools[name].inputSchema
+            prop = schema["properties"]["use_fallback"]
+            assert prop["default"] is None
+            assert {"type": "null"} in prop["anyOf"]
+            assert "use_fallback" not in schema.get("required", [])
+
+    @pytest.mark.asyncio
+    async def test_the_model_is_told_what_the_flag_actually_does(self):
+        """FastMCP does not lift a docstring `Args:` entry into the schema, and
+        these tools pass an explicit `description=` which overrides the
+        docstring anyway -- so a parameter the model must reason about has to
+        carry a `Field(description=...)`. The old text ("Wait longer on hard
+        routes") was also simply wrong: it does not wait, it re-runs the search
+        through a different client."""
+        mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
+        async with Client(mcp) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+
+        for name in ("search_oneway_flights", "search_roundtrip_flights"):
+            text = tools[name].inputSchema["properties"]["use_fallback"]["description"]
+            assert "Wait longer" not in text
+            assert "Leave unset" in text
+            assert "can time out" in text
+
+    @pytest.mark.asyncio
+    async def test_an_empty_result_does_not_recommend_the_inline_path(self):
+        """Inline `true` hangs until the function's ``Timeout``, so the
+        message a model reads on an empty result must not point at it."""
+        mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
+        out = await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport="XXX",
+            departure_date="2026-09-20",
+        )
+        assert "set use_fallback to true" not in out["message"]
+
+
+class TestServerInstructions:
+    """The one paragraph every client reads before it calls anything.
+
+    hotels.flightpowers.com shipped with the flights text -- it opened
+    "Real-time Google Flights search" to every hotels client at connect
+    time. A model that is told the wrong thing at handshake either calls the
+    server wrong or does not reach for it at all, and nothing downstream
+    corrects it. These assertions are per product, because the bug was
+    exactly one deployment inheriting another's prose.
+    """
+
+    # A real per-product signup URL, because the fixture's default carries
+    # "google-flights" in the path and would smuggle the word "flight" into
+    # a hotels string the test is checking is flight-free.
+    SIGNUP = {
+        "flights": "https://rapidapi.test/google-flights",
+        "hotels": "https://rapidapi.test/booking",
+        "both": "https://rapidapi.test/google-flights",
+    }
+
+    def _settings(self, products: str):
+        return make_settings(products=products, signup_url=self.SIGNUP[products])
+
+    def _instructions(self, products: str) -> str:
+        from src.server import build_instructions
+
+        return build_instructions(self._settings(products))
+
+    def test_hotels_deployment_does_not_call_itself_a_flights_server(self):
+        text = self._instructions("hotels")
+        assert "Google Flights" not in text
+        assert "flight" not in text.lower()
+        assert "hotel" in text.lower()
+
+    def test_hotels_names_both_of_its_tools(self):
+        text = self._instructions("hotels")
+        assert "search_hotels" in text
+        assert "find_hotel_by_name" in text
+
+    def test_hotels_sells_the_per_country_pricing(self):
+        """`price_as_seen_from` is the capability rivals do not have, and it
+        is the reason a business buyer rather than a hobbyist subscribes.
+
+        The instructions sell it as a repeat-sampled per-country view -- one
+        property and its dates held fixed, each country called a few times --
+        not as a one-shot country comparison (#381). Match case-insensitively
+        so a copy edit that starts the sentence with "Rate parity" does not
+        fail a test about the claim being present.
+        """
+        text = self._instructions("hotels")
+        assert "price_as_seen_from" in text
+        assert "rate parity" in text.lower()
+
+    def test_flights_deployment_says_nothing_about_hotels(self):
+        text = self._instructions("flights")
+        assert "hotel" not in text.lower()
+        assert "search_oneway_flights" in text
+
+    def test_flights_states_the_real_fan_out_cap(self):
+        """Same defect class as the free server's upgrade note: a cap that is
+        real must not be described as absent."""
+        text = self._instructions("flights")
+        assert str(HARD_MAX_SEARCHES) in text
+        assert "max_searches" in text
+
+    def test_both_deployment_covers_both_products(self):
+        text = self._instructions("both")
+        assert "search_oneway_flights" in text
+        assert "search_hotels" in text
+
+    @pytest.mark.parametrize("products", ("flights", "hotels", "both"))
+    def test_every_deployment_warns_that_prices_go_stale(self, products):
+        text = self._instructions(products)
+        assert "stale" in text
+
+    @pytest.mark.parametrize("products", ("flights", "hotels", "both"))
+    def test_every_deployment_explains_how_to_pass_a_key(self, products):
+        text = self._instructions(products)
+        assert "x-rapidapi-key" in text
+        assert self.SIGNUP[products] in text
+
+    @pytest.mark.asyncio
+    async def test_the_string_reaches_the_client_over_the_wire(self):
+        """Asserting the builder is not enough -- the bug was that the value
+        never came from a builder at all."""
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(200, json=[]),
+            products="hotels",
+            signup_url=self.SIGNUP["hotels"],
+        )
+        async with Client(mcp) as client:
+            text = client.initialize_result.instructions or ""
+        assert "hotel" in text.lower()
+        assert "flight" not in text.lower()

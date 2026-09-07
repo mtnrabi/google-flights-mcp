@@ -162,13 +162,26 @@ class TestMissingKeyMessage:
     def test_names_every_supported_mechanism(self):
         """The message is the only documentation a user in a chat window
         gets, so it has to cover the mechanism their client happens to use."""
-        text = missing_key_message("https://example.test/api")
+        text = missing_key_message("https://example.test/api", "Example API")
         assert "x-rapidapi-key" in text
         assert "?rapidapi_key=" in text
         assert "https://example.test/api" in text
 
     def test_warns_about_keys_in_urls(self):
-        assert "logs" in missing_key_message("https://example.test/api")
+        assert "logs" in missing_key_message(
+            "https://example.test/api", "Example API"
+        )
+
+    def test_names_the_api_the_key_must_be_subscribed_to(self):
+        """The sentence used to read "billed to the caller's own Google
+        Flights API subscription" for every product, so a hotels caller was
+        told to pay for a flights subscription they had no reason to own."""
+        text = missing_key_message(
+            "https://rapidapi.com/mtnrabi/api/booking-live-api",
+            "Booking Live API",
+        )
+        assert "Booking Live API subscription" in text
+        assert "Google Flights" not in text
 
 
 class TestGatewayOwnKeyIsNotMistakenForOurs:

@@ -1,7 +1,9 @@
-__pycache__/
-*.py[cod]
 .venv/
-venv/
+__pycache__/
+*.pyc
 .env
+logs/
 .pytest_cache/
 .vercel
+.env*.local
+venv/

@@ -1,8 +1,30 @@
-# Pinned below 4: fastmcp 4.0.0 moved `ToolResult` out of `fastmcp.tools.tool`,
-# so an unpinned build resolves to 4.x and dies on import at first request.
+# CAPPED BELOW 4. fastmcp 4.0.0 (2026-08-31) moved `ToolResult` out of
+# `fastmcp.tools.tool` and into `fastmcp.tools`, and src/server.py imports it
+# from the old path. The floor alone was not a constraint: every build after
+# 08-31 resolved to 4.0.x, the import raised at module load, and the function
+# answered FUNCTION_INVOCATION_FAILED on every route -- a build that Vercel
+# still marks Ready, so the failure only shows up in production traffic.
+# Verified live on mcp_server_lulu on 2026-09-02 and rolled back.
+#
+# The cap is what makes this file describe the runtime that the suite actually
+# runs against (3.4.7). To move to 4.x, change the import to
+# `from fastmcp.tools import ToolResult` (present in 3.x too), re-run the
+# suite, and raise the cap in the same commit.
 fastmcp>=3.0.0,<4
 httpx>=0.27.0
-# Only used by the Vercel entrypoint (api/index.py), to hand FastMCP's
-# lifespan to the host. Without lifespan the MCP session manager never
-# starts and every /mcp request 500s.
+# KEPT ON PURPOSE THOUGH NOTHING IMPORTS IT. Vercel picks the Python
+# framework preset from the dependency list, and a project that resolves to
+# `framework: null` 404s every route -- so removing this line does not save a
+# millisecond of runtime and can take the deployment down.
+#
+# api/index.py used to import it, to hand FastMCP's lifespan to the host.
+# That wrapper is now Starlette (already a FastMCP dependency), because
+# importing FastAPI costs ~110 ms of CPU on every cold start and this app
+# serves no OpenAPI schema. The wrapper itself is still load-bearing: without
+# a lifespan the MCP session manager never starts and every /mcp request
+# 500s. See api/index.py and tests/test_entrypoint.py.
 fastapi>=0.115.0
+# Imported directly by src/server.py for `Field(description=...)` on
+# use_fallback. Already a hard dependency of both fastmcp and fastapi;
+# declared here because it is now imported by our own code.
+pydantic>=2

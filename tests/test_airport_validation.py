@@ -143,5 +143,5 @@ class TestToolsRejectBeforeSpending:
                     "departure_date": "2026-10-15",
                 },
             )
-        assert out.data["result_count"] == 0
+        assert out.structured_content["result_count"] == 0
         assert len(calls) == 1

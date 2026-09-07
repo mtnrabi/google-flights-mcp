@@ -14,15 +14,11 @@ policy says nothing is collected rather than reserving a right we do not use.
 
 ## 1. What the service is
 
-A hosted Model Context Protocol (MCP) server exposing two tools:
+A hosted Model Context Protocol (MCP) server exposing these tools:
 
 {{TOOL_BULLETS}}
 
-Both accept a date range and a list of destinations, expand them internally
-into individual searches (30 per call by default; a per-call `max_searches`
-argument can lower that figure for a single call but cannot raise it, and 60 is
-the hard ceiling the deployment-wide setting itself cannot exceed), and forward
-each search to the {{UPSTREAM_API}} on RapidAPI. Search results are
+{{TOOL_BEHAVIOUR}} Search results are
 returned to the caller in the tool response and are not retained.
 
 **Non-affiliation.** This is an independent service that returns publicly
@@ -112,15 +108,13 @@ The server does not collect, log, store, or transmit any of the following:
   see section 6.)
 - **Any user identity** — no account, no user ID, no session ID, no name, no
   email address, no device or client identifier.
-- **Your search parameters.** Origins, destinations, dates, passenger counts,
-  cabin class, price limits and airline filters are used to perform the search
-  and are then discarded. Only the *count* of requested combinations is
+- **Your search parameters.** {{SEARCH_PARAM_NOUNS}} are used to perform the
+  search and are then discarded. Only the *count* of requested combinations is
   recorded, not the values — with one exception: when a request is rejected as
   invalid before any search runs, the validation message goes into the `error`
   field described in section 3, and that message quotes the single value that
   failed (a malformed date or trip length, for example).
-- **Flight results.** Fares are returned to you and not retained. Fares go stale
-  within minutes, so nothing is cached or reused.
+- **{{RESULT_NOUN}}.** {{RESULT_SENTENCE}}
 - **Cookies, trackers, analytics SDKs, fingerprinting, advertising.** This
   server serves no ads and embeds no third-party tracking of any kind.
 

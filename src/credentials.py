@@ -227,24 +227,84 @@ def resolve_credential(
     return NO_CREDENTIAL
 
 
-def missing_key_message(signup_url: str) -> str:
+def key_howto_steps(signup_url: str, api_name: str) -> list[str]:
+    """The self-serve path for a caller who reached this server with no
+    working key, as three numbered steps: where to get one, the three ways
+    to pass it, and that the spend is theirs, not ours.
+
+    One function so the same three sentences cannot drift apart the way
+    `missing_key_message` once did across products (see its docstring) --
+    `missing_key_message`, `key_howto_block` (the structured error field) and
+    `key_howto_tail` (the instructions/description tail) all build on this.
+    """
+    return [
+        f"1. Get a RapidAPI key (free tier available): subscribe to the "
+        f"{api_name} at {signup_url}.",
+        "2. Pass it to this server in any ONE of three ways, first "
+        "non-empty wins: an `x-rapidapi-key` header (preferred -- stays out "
+        "of URLs and logs), a `?rapidapi_key=<your key>` query parameter on "
+        "the server URL for hosts that only accept a URL, or your client's "
+        "own API key field.",
+        "3. Usage counts against your own RapidAPI plan, not ours: every "
+        "response reports what the call spent and what is left, in "
+        "`api_usage`.",
+    ]
+
+
+def key_howto_block(signup_url: str, api_name: str) -> dict[str, Any]:
+    """The `how_to_get_a_key` object attached to a missing/invalid-key
+    result.
+
+    Structured, not just prose, so a model can act on it -- read the URL off
+    a field, pick a passing method -- without re-parsing a sentence out of
+    `message`. Same reasoning as the free server's
+    `mcp_server/src/fair_use.upgrade_block`, adapted for a caller who is
+    already on the ad-free, paid server and only needs a key.
+    """
+    return {
+        "signup_url": signup_url,
+        "how": key_howto_steps(signup_url, api_name),
+    }
+
+
+def key_howto_tail(signup_url: str, api_name: str) -> str:
+    """The short version, for the server `instructions` string and the tail
+    of every tool description -- the two places a client reads before it has
+    called anything. A model that only learns how to pass a key from inside
+    a refusal has already failed the user's first request."""
+    return (
+        f"Requires the caller's own RapidAPI key for the {api_name}. Get one "
+        f"(free tier available) at {signup_url}, then pass it as an "
+        "`x-rapidapi-key` header (preferred), a `?rapidapi_key=` query "
+        "parameter on the server URL, or your client's own API key field -- "
+        "first non-empty wins. Usage counts against the caller's own "
+        "RapidAPI plan, not ours; every response reports what it spent and "
+        "what is left in `api_usage`."
+    )
+
+
+def missing_key_message(signup_url: str, api_name: str) -> str:
     """What the model is told when no key arrived.
 
     Written to be read aloud to a human by an assistant, because that is
     exactly what will happen to it. It names the three ways to supply a key
     because we cannot know which of them the caller's host supports.
+
+    `api_name` is the RapidAPI listing the caller's key must be subscribed to,
+    and it is a REQUIRED argument rather than a default for one reason: this
+    text used to hard-code "Google Flights API", so every keyless caller of
+    the hotels deployment was told their hotel search would be billed to a
+    flights subscription they had no reason to own -- and sent to the wrong
+    listing to buy one. A parameter with a default would have let the same
+    mistake back in silently at the next call site. Pass the name that matches
+    `signup_url`; `server.upstream_api_name` derives both from one product.
     """
+    steps = "\n".join(key_howto_steps(signup_url, api_name))
     return (
         "No RapidAPI key was supplied, so this search cannot run. This server "
-        "is free to use but each search is billed to the caller's own Google "
-        "Flights API subscription.\n\n"
-        f"1. Get a key (free tier available): {signup_url}\n"
-        "2. Supply it in any ONE of these ways:\n"
-        "   - add the header `x-rapidapi-key: <your key>` to the connection, or\n"
-        "   - append `?rapidapi_key=<your key>` to the server URL, or\n"
-        "   - fill in the API key field if your client shows one.\n\n"
-        "Prefer the header where your client supports it: a key in a URL ends "
-        "up in server and proxy logs."
+        f"is free to use but each search is billed to the caller's own "
+        f"{api_name} subscription.\n\n"
+        f"{steps}"
     )
 
 

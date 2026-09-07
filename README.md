@@ -121,7 +121,7 @@ search_oneway_flights(
     sort_by: str = "best",                 # "best" | "price" | "duration"
     limit: int = 10,                       # results returned after merge + sort
     max_searches: int | None = None,       # cap the billed requests this call may make
-    use_fallback: bool = False,            # slower, fewer empty results on hard routes
+    use_fallback: bool | None = None,      # leave unset: accepted upstream, currently inert
 )
 ```
 
@@ -147,7 +147,7 @@ search_roundtrip_flights(
     sort_by: str = "best",
     limit: int = 10,
     max_searches: int | None = None,
-    use_fallback: bool = False,
+    use_fallback: bool | None = None,
 )
 ```
 
@@ -231,8 +231,13 @@ run the call to get live fares):
 Other response shapes to expect, all of them normal:
 
 - **No flights on those dates.** `results: []` with a `message` — Google Flights genuinely
-  returns nothing for some route/date combinations. Not an error. Try nearby dates, a nearby
-  airport, or `use_fallback: true`.
+  returns nothing for some route/date combinations. Not an error. Try nearby dates or a
+  nearby airport. `use_fallback` will not change this and is left unset by default: the
+  backend accepts the field, but the second flight-data source it selects is gated behind
+  `USE_FALLBACK_FLI` (`fallback_available()`), which is not switched on for this API — so
+  none of its three values has any observable effect on a search today. The automatic
+  retries the backend does on an unreadable page are unconditional and are not affected
+  by it.
 - **Some searches failed.** A `partial` field says how many of the executed searches failed, and
   the results cover the rest.
 - **Range too wide.** `search_coverage.truncated: true` plus a `note`. The range is sampled
@@ -243,6 +248,55 @@ Other response shapes to expect, all of them normal:
   key that is not subscribed to *this* API is the most common cause.
 - **Plan exhausted.** `quota_exhausted: true` with `api_usage`, plus a reminder that narrowing
   the range makes remaining quota go further.
+
+## Structured output (`outputSchema`, `structuredContent`, `isError`)
+
+Every tool declares an `outputSchema`, and every result carries the payload
+twice: once as `structuredContent`, once as the serialized JSON in a text
+content block. The MCP spec asks for the duplicate --
+
+> For backwards compatibility, a tool that returns structured content SHOULD
+> also return the serialized JSON in a TextContent block.
+
+-- and it is load-bearing here rather than ceremonial, because clients that
+predate structured output read the text block and nothing else. (Verified
+against spec revision **2026-07-28**; structured output arrived in
+2025-06-18.)
+
+The schemas are deliberately `additionalProperties: true` with only `results`
+required. The spec puts the obligation on the server -- "Servers MUST provide
+structured results that conform to this schema" -- and these tools have
+several legitimate exits that carry different keys -- a zero-result answer, the keyless
+`needs_api_key` reply and the `quota_exhausted` reply. A tighter
+schema would look better and would make the server non-conformant on a path
+it ships on purpose.
+
+### `search_status`, and why `degraded` is an error
+
+Flight results carry `search_status`, mirroring the backend's own
+`X-Search-Status` vocabulary:
+
+| value | meaning |
+|---|---|
+| `ok` | every combination searched returned results |
+| `empty` | the search completed; Google genuinely has no itineraries. A real answer |
+| `partial` | some combinations returned results, some failed. The list is incomplete |
+| `degraded` | every combination failed. The search did not happen; an empty list means nothing |
+
+A `degraded` result is **also flagged `isError: true`**. It is the only one
+that is. The spec classifies "API failures" as tool execution errors and says
+clients "SHOULD provide tool execution errors to language models to enable
+self-correction", while nothing in the spec obliges a host to show
+`structuredContent` to the model at all. A failure carried only by a field
+inside the payload is therefore a failure the model may never see, which was
+the whole problem `search_status` was added to solve.
+
+The payload still rides along with the error -- `structuredContent` and the
+text block are both present, so nothing is lost. `api_usage` in particular: a degraded
+search still spent the caller's own RapidAPI requests, and hiding that would
+hide a charge they have to pay. `empty` and
+`partial` are not errors: one is a true negative and the other carries
+results a caller can use.
 
 ## Spend reporting (`api_usage`)
 
@@ -303,7 +357,7 @@ claude mcp add --transport http google-flights-local http://localhost:8000/mcp -
 ```
 <!-- untested — developer verify -->
 
-Tests (124 passing, verified):
+Tests (498 passing, verified):
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -316,10 +370,12 @@ Configuration lives in `example.env`; every variable is documented there. The on
 | `MAX_SEARCHES_PER_TOOL_CALL` | `30` | Per-call fan-out cap. Clamped to a hard maximum of 60. |
 | `MAX_CONCURRENT_SEARCHES` | `10` | Concurrency of the fan-out. |
 | `MAX_HTTP_CONNECTIONS` | `60` | Connection-pool ceiling; serverless instances share a file-descriptor pool. |
-| `REQUEST_TIMEOUT_SECONDS` | `105` | Matches the upstream ceiling, so this side never times out first. |
+| `REQUEST_TIMEOUT_SECONDS` | `75` | The upstream function's `Timeout` (60) plus a 15s edge-relay margin, so this side never gives up on an answer that is still coming. |
 | `DEFAULT_RESULT_LIMIT` | `10` | Results requested per individual upstream search. |
-| `SIGNUP_URL` | RapidAPI listing | Quoted back to users who arrive without a key. |
-| `MCP_PUBLIC_URL` | `http://localhost:8000/mcp` | Reported by `/health`. |
+| `MCP_PRODUCTS` | `both` | Which product this deployment serves: `flights`, `hotels` or `both`. Selects the tool set, the server instructions, the service name, the policy pages and the RapidAPI listing a keyless or unsubscribed caller is sent to. A hotels deployment left on the default introduces itself as a flights server. |
+| `SIGNUP_URL` | listing matching `MCP_PRODUCTS` | Quoted back to users who arrive without a key. On `both`, the hotel tools quote the Booking listing regardless — one URL cannot be the Subscribe button for two APIs. |
+| `MCP_PRODUCTS_BY_HOST` | `default` | Which product each hostname serves, so one deployment can carry both paid domains and each listing still gets exactly its own tool set. `default` is the built-in map of flightpowers.com aliases; `off` disables host routing entirely (the no-code rollback); or an explicit `host=product,…` map. An unmapped hostname falls back to `MCP_PRODUCTS`. |
+| `MCP_PUBLIC_URL` | `http://localhost:8000/mcp` | Reported by `/health` and the origin of every policy-page link. `MCP_PUBLIC_URL_FLIGHTS` / `MCP_PUBLIC_URL_HOTELS` override it per product on a deployment serving both — without them the hotels hostname would advertise the flights one. `SIGNUP_URL_FLIGHTS` / `SIGNUP_URL_HOTELS` work the same way. |
 | `RAPIDAPI_KEY` | *(empty)* | **Leave empty in production.** If set, every keyless caller is served on — and billed to — that subscription. The server logs a warning at startup and `/health` reports `server_side_key_configured`. |
 | `METRICS_TOKEN` | *(empty)* | When set, `/metrics` requires an `x-metrics-token` header. |
 | `LOG_PATH` | *(empty)* | Empty disables the file sink; stdout `MCP_CALL` lines remain the record. Correct on serverless. |

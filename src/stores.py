@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 import httpx
@@ -137,12 +138,28 @@ class RedisCounterStore:
     durable = True
 
     def __init__(
-        self, url: str, token: str, client: httpx.AsyncClient | None = None
+        self,
+        url: str,
+        token: str,
+        client: httpx.AsyncClient | None = None,
+        client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self._url = url.rstrip("/")
         self._token = token
         self._client = client
+        # Deferred on purpose. Constructing an httpx.AsyncClient costs ~24 ms
+        # of CPU on a cold start (it pulls in httpcore, h11, h2, socksio and
+        # certifi and builds the transport), and a cold start that only
+        # answers `initialize` or `tools/list` never touches the store. The
+        # factory hands back the same process-wide client the tools use, so
+        # connection reuse is unchanged once a real request arrives.
+        self._client_factory = client_factory
         self._degraded = False
+
+    def _resolve_client(self) -> httpx.AsyncClient | None:
+        if self._client is None and self._client_factory is not None:
+            self._client = self._client_factory()
+        return self._client
 
     @property
     def degraded(self) -> bool:
@@ -155,7 +172,7 @@ class RedisCounterStore:
             return []
         payload = [[str(part) for part in command] for command in commands]
         try:
-            client = self._client or httpx.AsyncClient(timeout=5.0)
+            client = self._resolve_client() or httpx.AsyncClient(timeout=5.0)
             response = await client.post(
                 f"{self._url}/pipeline",
                 json=payload,
@@ -235,7 +252,10 @@ class RedisCounterStore:
         return {"totals": totals}
 
 
-def build_counter_store(client: httpx.AsyncClient | None = None) -> CounterStore:
+def build_counter_store(
+    client: httpx.AsyncClient | None = None,
+    client_factory: Callable[[], httpx.AsyncClient] | None = None,
+) -> CounterStore:
     """Pick a store from the environment.
 
     Recognises both credential names: Vercel's Upstash marketplace integration
@@ -255,7 +275,9 @@ def build_counter_store(client: httpx.AsyncClient | None = None) -> CounterStore
 
     if url and token:
         logger.info("using Upstash Redis counter store (durable, shared)")
-        return RedisCounterStore(url, token, client=client)
+        return RedisCounterStore(
+            url, token, client=client, client_factory=client_factory
+        )
 
     logger.info("using in-process counter store (not shared between instances)")
     return MemoryCounterStore()
