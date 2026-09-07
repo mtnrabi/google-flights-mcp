@@ -18,6 +18,8 @@ from src.rapidapi_client import (
     build_oneway_payload,
     build_roundtrip_payload,
     read_quota,
+    read_search_status,
+    search_is_incomplete,
 )
 
 KEY = "test-key-that-is-long-enough-to-pass"
@@ -61,6 +63,28 @@ class TestPayloadBuilding:
         )
         assert payload["max_stops"] == 0
         assert payload["use_fallback"] is False
+
+    def test_use_fallback_none_is_omitted_so_the_backend_can_escalate(self):
+        """The upstream field is tri-state and absent is not the same as false.
+
+        Absent lets the backend escalate to the fallback client once, after
+        every retry for a combination has failed; `false` forbids the fallback
+        outright, escalation included. Sending `false` by default -- which is
+        what these tools did -- opted our own users out of the reliability fix.
+        """
+        oneway = build_oneway_payload(
+            departure_date="2026-10-01",
+            from_airport="TLV",
+            to_airport="BUD",
+        )
+        roundtrip = build_roundtrip_payload(
+            departure_date="2026-10-01",
+            return_date="2026-10-08",
+            from_airport="TLV",
+            to_airport="BUD",
+        )
+        assert "use_fallback" not in oneway
+        assert "use_fallback" not in roundtrip
 
     def test_roundtrip_carries_both_dates(self):
         payload = build_roundtrip_payload(
@@ -338,3 +362,70 @@ class TestLifecycle:
             pass
         assert not shared.is_closed
         await shared.aclose()
+
+
+class TestSearchStatus:
+    """`X-Search-Status` is the only thing that separates "Google has no
+    flights" from "the scrape was blocked". Both arrive as HTTP 200 with `[]`.
+    """
+
+    def test_reads_the_search_headers_and_nothing_else(self):
+        got = read_search_status(
+            httpx.Response(
+                200,
+                headers={
+                    "X-Search-Status": "degraded",
+                    "X-Search-Reason": "blocked_page",
+                    "x-ratelimit-requests-remaining": "19997",
+                },
+            )
+        )
+        assert got == {
+            "x-search-status": "degraded",
+            "x-search-reason": "blocked_page",
+        }
+
+    def test_a_header_we_have_never_heard_of_is_still_captured(self):
+        got = read_search_status(httpx.Response(200, headers={"X-Search-New": "1"}))
+        assert got == {"x-search-new": "1"}
+
+    def test_absent_headers_are_empty_not_healthy(self):
+        """An empty dict must read as "the backend did not say", never as "the
+        search was fine" -- that assumption is the bug being fixed."""
+        outcome = read_search_status(httpx.Response(200))
+        assert outcome == {}
+        assert not outcome.get("x-search-status")
+
+    def test_degraded_and_partial_are_incomplete(self):
+        assert search_is_incomplete({"x-search-status": "degraded"})
+        assert search_is_incomplete({"x-search-status": "partial"})
+
+    def test_ok_and_empty_are_complete_answers(self):
+        assert not search_is_incomplete({"x-search-status": "ok"})
+        assert not search_is_incomplete({"x-search-status": "empty"})
+        assert not search_is_incomplete({})
+
+    @pytest.mark.asyncio
+    async def test_the_sink_gets_one_entry_per_answered_request(self):
+        """A list, not a dict: each date and destination has its own outcome,
+        and last-writer-wins would hide a failed search behind a healthy one."""
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            status = "degraded" if calls["n"] == 1 else "ok"
+            return httpx.Response(200, json=[], headers={"X-Search-Status": status})
+
+        sink: list[dict[str, str]] = []
+        async with make_client(handler) as client:
+            await client.search("oneway", {}, api_key=KEY, outcome_sink=sink)
+            await client.search("oneway", {}, api_key=KEY, outcome_sink=sink)
+
+        assert [entry["x-search-status"] for entry in sink] == ["degraded", "ok"]
+
+    @pytest.mark.asyncio
+    async def test_a_request_with_no_sink_still_works(self):
+        async with make_client(
+            lambda _r: httpx.Response(200, json=[], headers={"X-Search-Status": "ok"})
+        ) as client:
+            assert await client.search("oneway", {}, api_key=KEY) == []

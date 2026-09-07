@@ -31,6 +31,7 @@ month.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Literal
@@ -91,22 +92,95 @@ def evenly_sample(items: list[Any], k: int) -> list[Any]:
     return [items[i] for i in picked_indices]
 
 
-def normalise_destinations(to_airport: str | list[str]) -> list[str]:
-    if isinstance(to_airport, str):
-        codes = [c.strip().upper() for c in to_airport.split(",")]
-    else:
-        codes = [str(c).strip().upper() for c in to_airport]
-    codes = [c for c in codes if c]
-    if not codes:
-        raise PlanError("at least one destination airport is required")
-    # Preserve caller order, drop duplicates.
+#: Delimiters a caller may put between codes inside one string. Whitespace is
+#: deliberately not in here -- see `_codes_in`.
+_CODE_DELIMITERS = re.compile(r"[,;|/]+")
+#: What an IATA airport or city code looks like. Used only to decide whether a
+#: space-separated string is a list of codes; real validation lives with the
+#: client that talks to the backend.
+_LOOKS_LIKE_CODE = re.compile(r"[A-Za-z]{3}")
+
+
+def _codes_in(text: str) -> list[str]:
+    """Split one already-delimited chunk on whitespace, when that is safe.
+
+    "BCN LIS ATH" is three codes. "Tel Aviv" is one (bad) value, and splitting
+    it would make the error name `AVIV` instead of what the caller actually
+    wrote -- so whitespace separates only when every piece already looks like
+    a code.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    pieces = text.split()
+    if len(pieces) > 1 and all(_LOOKS_LIKE_CODE.fullmatch(p) for p in pieces):
+        return pieces
+    return [text]
+
+
+def split_airport_codes(value: Any) -> list[str]:
+    """Every airport code in one argument, in caller order, case preserved.
+
+    Models do not agree on the shape of a multi-airport argument. One host
+    sends `["BCN","LIS","ATH"]`, another sends `"BCN,LIS,ATH"`, a third sends
+    `"BCN LIS ATH"` -- all three mean the same search, and until 2026-09-06
+    the free server took the string and the paid server took only the list, so
+    an LLM that had learned one of them failed against the other. All shapes
+    are accepted here, including a list whose own elements are separated
+    strings.
+
+    Returns `[]` for None or a blank value, and validates nothing: a bad code
+    is still a bad code and is reported by whoever checks codes.
+    """
+    if value is None:
+        return []
+    items = list(value) if isinstance(value, (list, tuple, set)) else [value]
+    codes: list[str] = []
+    for item in items:
+        if item is None:
+            continue
+        for chunk in _CODE_DELIMITERS.split(str(item)):
+            codes.extend(_codes_in(chunk))
+    return codes
+
+
+def normalise_airport_codes(value: Any) -> list[str]:
+    """`split_airport_codes`, upper-cased, duplicates dropped, order kept."""
     seen: set[str] = set()
     unique: list[str] = []
-    for code in codes:
+    for code in split_airport_codes(value):
+        code = code.upper()
         if code not in seen:
             seen.add(code)
             unique.append(code)
     return unique
+
+
+def normalise_destinations(to_airport: str | list[str]) -> list[str]:
+    codes = normalise_airport_codes(to_airport)
+    if not codes:
+        raise PlanError("at least one destination airport is required")
+    return codes
+
+
+def normalise_origin(from_airport: str | list[str]) -> str:
+    """The one origin code, accepting the same shapes as a destination list.
+
+    The backend takes a single origin per call and the fan-out is planned over
+    dates and destinations only, so several origins cannot be honoured -- say
+    so. Before this, `"TLV,JFK"` was upper-cased and sent whole; the upstream
+    answered `200 []`, which reads as "no flights on this route".
+    """
+    codes = normalise_airport_codes(from_airport)
+    if not codes:
+        raise PlanError("an origin airport is required")
+    if len(codes) > 1:
+        raise PlanError(
+            "one origin airport per search, got "
+            + ", ".join(codes)
+            + " -- make one call per origin"
+        )
+    return codes[0]
 
 
 @dataclass
@@ -171,6 +245,10 @@ def plan_oneway(
     departure_date_to: str | None = None,
     cap: int,
 ) -> SearchPlan:
+    # Raised here, not ignored: both planners took an origin they never
+    # used, so a multi-origin or blank string reached the payload builder
+    # untouched.
+    normalise_origin(from_airport)
     destinations = normalise_destinations(to_airport)
     dates = _resolve_departure_dates(
         departure_date, departure_date_from, departure_date_to
@@ -195,6 +273,10 @@ def plan_roundtrip(
     nights: int | list[int] | None = None,
     cap: int,
 ) -> SearchPlan:
+    # Raised here, not ignored: both planners took an origin they never
+    # used, so a multi-origin or blank string reached the payload builder
+    # untouched.
+    normalise_origin(from_airport)
     destinations = normalise_destinations(to_airport)
     dates = _resolve_departure_dates(
         departure_date, departure_date_from, departure_date_to
@@ -316,6 +398,26 @@ class FanoutResult:
     backend_calls_made: int
     backend_failures: int
     first_error: str | None = None
+    #: The combos that raised, in plan order. `backend_failures` counts them;
+    #: this says *which*, so the coverage line in the text block can name the
+    #: dates a caller asked for and did not get instead of only counting them.
+    #: Kept as the combo dicts the plan was built from -- no reformatting here,
+    #: because the wording belongs to src/status_text.py, not to the fan-out.
+    failed_combos: list[dict[str, str]] = field(default_factory=list)
+    #: The rows each answering combination returned, in plan order, as
+    #: `(combo, rows)`. `results` is exactly these rows merged -- and merging
+    #: is what throws away the one thing a per-combination guarantee needs:
+    #: which search a row came from. Without it, a `limit` applied to the
+    #: merged list can drop every row of a destination that was searched,
+    #: answered, and is still named in `search_coverage`.
+    #:
+    #: A parallel field rather than a replacement for `results`: several
+    #: callers count or scan the merged list and none of them care about the
+    #: grouping. Combinations that raised are not in here -- they are in
+    #: `failed_combos`, which is a different fact about a different failure.
+    results_by_combo: list[tuple[dict[str, str], list[dict[str, Any]]]] = field(
+        default_factory=list
+    )
 
 
 async def execute_plan(
@@ -333,30 +435,41 @@ async def execute_plan(
     """
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
 
-    async def run_one(combo: dict[str, str]) -> tuple[list[dict[str, Any]], str | None]:
+    async def run_one(
+        combo: dict[str, str]
+    ) -> tuple[dict[str, str], list[dict[str, Any]], str | None]:
         async with semaphore:
             try:
                 rows = await run_search(plan.endpoint, build_payload(combo))
-                return rows, None
+                return combo, rows, None
             except Exception as exc:  # noqa: BLE001 - reported, never swallowed
-                return [], f"{combo}: {exc}"
+                return combo, [], f"{combo}: {exc}"
 
     outcomes = await asyncio.gather(*(run_one(c) for c in plan.combos))
 
     merged: list[dict[str, Any]] = []
     failures = 0
     first_error: str | None = None
-    for rows, error in outcomes:
+    failed_combos: list[dict[str, str]] = []
+    results_by_combo: list[tuple[dict[str, str], list[dict[str, Any]]]] = []
+    for combo, rows, error in outcomes:
         if error is not None:
             failures += 1
+            failed_combos.append(combo)
             if first_error is None:
                 first_error = error
             continue
         merged.extend(rows)
+        # Kept even when `rows` is empty: "this combination was searched and
+        # found nothing" is a different answer from "this combination was
+        # never searched", and only the caller can tell them apart.
+        results_by_combo.append((combo, list(rows)))
 
     return FanoutResult(
         results=merged,
         backend_calls_made=len(plan.combos),
         backend_failures=failures,
         first_error=first_error,
+        failed_combos=failed_combos,
+        results_by_combo=results_by_combo,
     )

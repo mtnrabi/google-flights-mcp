@@ -9,9 +9,12 @@ should not have to learn a second vocabulary for hotels.
 
 The one thing genuinely specific to hotels is `proxy_country`. It prices a
 stay the way a shopper resident in that country would see it, which is what
-makes rate-parity and geo-pricing monitoring possible. It is the most
-under-sold capability in the whole product, so it is surfaced as a first-class
-argument rather than buried in a passthrough dict.
+makes rate-parity and geo-pricing monitoring possible. Measured gaps are real
+but modest, and repeat calls to the same country are not always identical, so
+an honest comparison holds one named property fixed and takes several samples
+per country. It is the most under-sold capability in the whole product, so it
+is surfaced as a first-class argument rather than buried in a passthrough
+dict.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ import random
 from typing import Any, Literal
 
 import httpx
+
+from .settings import DEFAULT_TIMEOUT_SECONDS
 
 from .rapidapi_client import (
     AuthError,
@@ -155,7 +160,14 @@ class HotelsClient:
         self,
         base_url: str = f"https://{HOTELS_HOST}",
         rapidapi_host: str = HOTELS_HOST,
-        timeout_seconds: float = 105.0,
+        # The deployed function's ``Timeout`` plus an edge-relay margin; see
+        # ``settings.DEFAULT_TIMEOUT_SECONDS``. There is one ceiling here, not
+        # two: measured on 2026-08-27 the RapidAPI edge relays the verdict about
+        # a quarter-second after the function's own kill, so the number to clear
+        # is the function ``Timeout``. Waiting *less* than it discards answers
+        # that were on their way, which is what a stale 45.0 did after the
+        # function was raised to 60.
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")

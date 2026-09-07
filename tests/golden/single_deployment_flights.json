@@ -1,0 +1,738 @@
+{
+  "health": {
+    "ads": false,
+    "contact_email": "mtnrabi@gmail.com",
+    "mcp_endpoint": "https://flights.golden.test/mcp",
+    "privacy_url": "https://flights.golden.test/privacy",
+    "server_side_key_configured": false,
+    "service": "google-flights-mcp",
+    "signup_url": "https://rapidapi.com/mtnrabi/api/google-flights-live-api",
+    "status": "ok",
+    "support_url": "https://flights.golden.test/support",
+    "terms_url": "https://flights.golden.test/terms"
+  },
+  "instructions": "Real-time Google Flights fare search, ad-free. Requires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.\n\nReach for `search_oneway_flights` and `search_roundtrip_flights` for live fares, not schedules. Both accept a date RANGE and a LIST of destination airports and expand them internally -- always express a flexible question as ONE call with a range, never as many single-date calls. Round trips take a `nights` value instead of a fixed return date.\n\nEvery result carries Google's own historical range for that route and period (`price_insights_low`, `price_insights_high`, and a `price_range_in_relation_to_other_periods` verdict of low / typical / high), so judge a fare against that band rather than quoting a bare number, and a `buy_link` to book it. `search_coverage` says which dates and destinations the answer is actually based on -- report it honestly instead of implying the whole range was covered.\n\nFan-out is capped at 30 date/destination combinations per call; `max_searches` raises or lowers it per call, up to a hard maximum of 60. A request that expands past the cap is sampled evenly across the range and says so in `search_coverage`.\n\nResults are live prices and go stale within minutes. Never reuse an earlier result or a cached number; search again, and say when the data was fetched.\n\nEvery response carries `api_usage`: what this call spent on the caller's own RapidAPI plan and what is left of it.",
+  "serverInfo": {
+    "name": "google-flights-mcp",
+    "version": "1.0.0",
+    "websiteUrl": "https://flights.golden.test"
+  },
+  "tools": [
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true,
+        "title": "Search one-way flights"
+      },
+      "description": "Search real-time one-way flights on Google Flights. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- plus either one departure date or a date range. Returns each flight's price, airline, duration, stops, a bookable buy_link, and Google's historical price range (price_insights_low / price_insights_high) so you can say whether a fare is actually a good deal.\n\nUse it for any one-way fare question, including open-ended ones. For a flexible search make ONE call with a date range and/or several destinations -- do NOT call it once per date. 'Cheapest flight to Sri Lanka anywhere in October' is one call, not thirty.\n\nEach date/destination combination is one billed request; the count and the plan's remaining quota come back in `api_usage`.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "airline_codes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Restrict to these airline codes, e.g. [\"LY\"]."
+          },
+          "arrival_time_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Latest arrival hour, 0-23."
+          },
+          "arrival_time_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Earliest arrival hour, 0-23."
+          },
+          "currency": {
+            "default": "usd",
+            "description": "ISO currency code, default \"usd\".",
+            "type": "string"
+          },
+          "departure_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Single departure date, \"YYYY-MM-DD\"."
+          },
+          "departure_date_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "First date of a departure range."
+          },
+          "departure_date_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Last date of a departure range."
+          },
+          "departure_time_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Latest departure hour, 0-23."
+          },
+          "departure_time_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Earliest departure hour, 0-23."
+          },
+          "exclude_airline_codes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Exclude these airline codes."
+          },
+          "from_airport": {
+            "description": "Origin IATA code, e.g. \"TLV\". One origin per search; a second one is refused rather than searched.",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "description": "Maximum flights to return, after merging and sorting.",
+            "type": "integer"
+          },
+          "max_price": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only return flights at or below this price."
+          },
+          "max_searches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Cap the billed requests this call may make. Lower it to spend less of the plan's quota on a wide search; the range is then sampled evenly rather than cut short."
+          },
+          "max_stops": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum stops per flight. 0 means non-stop only."
+          },
+          "passengers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Passenger counts as [adults, children, infants]."
+          },
+          "seat_type": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "1 economy, 2 premium economy, 3 business, 4 first."
+          },
+          "sort_by": {
+            "default": "best",
+            "description": "\"best\", \"price\", or \"duration\". Applied across all results.",
+            "type": "string"
+          },
+          "to_airport": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "description": "Destination airport. One IATA code (\"BCN\"), several separated by commas (\"BCN,LIS,ATH\"), or a list ([\"BCN\",\"LIS\",\"ATH\"]) -- every shape is accepted and the destinations are compared in the same search."
+          },
+          "use_fallback": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Leave unset. Switches the search to a second, independent flight data source instead of the usual Google Flights page read. Unset already escalates to that source once, automatically, after a search's retries have failed. true forces it inline on every attempt -- much slower, and it can time out. false disables it entirely, that automatic retry included."
+          }
+        },
+        "required": [
+          "from_airport",
+          "to_airport"
+        ],
+        "type": "object"
+      },
+      "name": "search_oneway_flights",
+      "outputSchema": {
+        "additionalProperties": true,
+        "description": "A completed flight search. Read search_status before reading results: an empty array means 'no flights' only when search_status is 'empty'.",
+        "properties": {
+          "api_usage": {
+            "additionalProperties": true,
+            "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
+            "properties": {
+              "note": {
+                "description": "The same figures as a sentence, for the model to relay.",
+                "type": "string"
+              },
+              "plan_requests_limit": {
+                "type": "integer"
+              },
+              "plan_requests_remaining": {
+                "type": "integer"
+              },
+              "requests_used_by_this_call": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "message": {
+            "description": "Present when there is something the model must relay to the user rather than silently absorb -- no results, a degraded search, a missing key or a spent quota.",
+            "type": "string"
+          },
+          "needs_api_key": {
+            "description": "True when no usable RapidAPI key arrived with the call, or the upstream rejected the one that did. No search was run and nothing was billed; signup_url and message say how to fix it.",
+            "type": "boolean"
+          },
+          "partial": {
+            "description": "Present when some searches failed but others succeeded. Plain text saying how much of the request the results cover.",
+            "type": "string"
+          },
+          "quota_exhausted": {
+            "description": "True when the caller's RapidAPI plan has no requests left for the current period.",
+            "type": "boolean"
+          },
+          "result_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "results": {
+            "description": "The itineraries or properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "search_coverage": {
+            "additionalProperties": true,
+            "description": "What was actually searched. Present whether or not the request was truncated, so a model can state honestly what its answer rests on.",
+            "properties": {
+              "departure_dates_searched": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "destinations_searched": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "max_searches_per_request": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "note": {
+                "type": "string"
+              },
+              "requested_combinations": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "searched_combinations": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "truncated": {
+                "description": "True when the request expanded past this call's spend ceiling and was sampled. A date absent from departure_dates_searched was never searched, which is not the same as having no flights.",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "search_status": {
+            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry.",
+            "enum": [
+              "ok",
+              "empty",
+              "partial",
+              "degraded"
+            ],
+            "type": "string"
+          },
+          "signup_url": {
+            "description": "Where the caller subscribes or changes plan.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "Flight search result",
+        "type": "object"
+      },
+      "title": "Search one-way flights"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": true,
+        "title": "Search round-trip flights"
+      },
+      "description": "Search real-time round-trip flights on Google Flights, priced as paired legs rather than two separate one-ways. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure date or range, and either a return date or a trip length in nights. Returns the total price for both legs, per-leg airline, stops and duration, and a single bookable buy_link for the trip.\n\nUse it for any return-trip fare question. For a flexible search make ONE call: pass departure_date_from / departure_date_to for the outbound range and `nights` instead of return_date to compare trip lengths -- '5 to 7 nights in Rome sometime in May' is one call.\n\nEach date/destination combination is one billed request; the count and the plan's remaining quota come back in `api_usage`.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "currency": {
+            "default": "usd",
+            "description": "ISO currency code, default \"usd\".",
+            "type": "string"
+          },
+          "departure_airline_codes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Restrict the outbound leg to these airlines."
+          },
+          "departure_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Single outbound date, \"YYYY-MM-DD\"."
+          },
+          "departure_date_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "First date of an outbound range."
+          },
+          "departure_date_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Last date of an outbound range."
+          },
+          "from_airport": {
+            "description": "Origin IATA code, e.g. \"TLV\". One origin per search; a second one is refused rather than searched.",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "description": "Maximum trips to return, after merging and sorting.",
+            "type": "integer"
+          },
+          "max_departure_stops": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum stops on the outbound leg."
+          },
+          "max_price": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only return trips at or below this total price."
+          },
+          "max_return_stops": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum stops on the return leg."
+          },
+          "max_searches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Cap the billed requests this call may make. Lower it to spend less of the plan's quota on a wide search; the range is then sampled evenly rather than cut short."
+          },
+          "nights": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Trip length in nights; a number, or a list like [5, 6, 7]. The return date is derived from each departure date."
+          },
+          "passengers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Passenger counts as [adults, children, infants]."
+          },
+          "return_airline_codes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Restrict the return leg to these airlines."
+          },
+          "return_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Fixed return date. Use this OR nights, not both."
+          },
+          "seat_type": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "1 economy, 2 premium economy, 3 business, 4 first."
+          },
+          "sort_by": {
+            "default": "best",
+            "description": "\"best\", \"price\", or \"duration\". Applied across all results.",
+            "type": "string"
+          },
+          "to_airport": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "description": "Destination airport. One IATA code (\"BCN\"), several separated by commas (\"BCN,LIS,ATH\"), or a list ([\"BCN\",\"LIS\",\"ATH\"]) -- every shape is accepted and the destinations are compared in the same search."
+          },
+          "use_fallback": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Leave unset. Switches the search to a second, independent flight data source instead of the usual Google Flights page read. Unset already escalates to that source once, automatically, after a search's retries have failed. true forces it inline on every attempt -- much slower, and it can time out. false disables it entirely, that automatic retry included."
+          }
+        },
+        "required": [
+          "from_airport",
+          "to_airport"
+        ],
+        "type": "object"
+      },
+      "name": "search_roundtrip_flights",
+      "outputSchema": {
+        "additionalProperties": true,
+        "description": "A completed flight search. Read search_status before reading results: an empty array means 'no flights' only when search_status is 'empty'.",
+        "properties": {
+          "api_usage": {
+            "additionalProperties": true,
+            "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
+            "properties": {
+              "note": {
+                "description": "The same figures as a sentence, for the model to relay.",
+                "type": "string"
+              },
+              "plan_requests_limit": {
+                "type": "integer"
+              },
+              "plan_requests_remaining": {
+                "type": "integer"
+              },
+              "requests_used_by_this_call": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "message": {
+            "description": "Present when there is something the model must relay to the user rather than silently absorb -- no results, a degraded search, a missing key or a spent quota.",
+            "type": "string"
+          },
+          "needs_api_key": {
+            "description": "True when no usable RapidAPI key arrived with the call, or the upstream rejected the one that did. No search was run and nothing was billed; signup_url and message say how to fix it.",
+            "type": "boolean"
+          },
+          "partial": {
+            "description": "Present when some searches failed but others succeeded. Plain text saying how much of the request the results cover.",
+            "type": "string"
+          },
+          "quota_exhausted": {
+            "description": "True when the caller's RapidAPI plan has no requests left for the current period.",
+            "type": "boolean"
+          },
+          "result_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "results": {
+            "description": "The itineraries or properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "search_coverage": {
+            "additionalProperties": true,
+            "description": "What was actually searched. Present whether or not the request was truncated, so a model can state honestly what its answer rests on.",
+            "properties": {
+              "departure_dates_searched": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "destinations_searched": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "max_searches_per_request": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "note": {
+                "type": "string"
+              },
+              "requested_combinations": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "searched_combinations": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "truncated": {
+                "description": "True when the request expanded past this call's spend ceiling and was sampled. A date absent from departure_dates_searched was never searched, which is not the same as having no flights.",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "search_status": {
+            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry.",
+            "enum": [
+              "ok",
+              "empty",
+              "partial",
+              "degraded"
+            ],
+            "type": "string"
+          },
+          "signup_url": {
+            "description": "Where the caller subscribes or changes plan.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "Flight search result",
+        "type": "object"
+      },
+      "title": "Search round-trip flights"
+    }
+  ]
+}

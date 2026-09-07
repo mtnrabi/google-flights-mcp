@@ -27,6 +27,7 @@ def clean_env(monkeypatch):
         "MCP_PUBLIC_URL",
         "SIGNUP_URL",
         "REQUEST_TIMEOUT_SECONDS",
+        "MCP_PRODUCTS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -90,3 +91,102 @@ class TestSearchCap:
         """The free server caps at 15 because the fan-out is our money. Here
         it is the caller's, so the ceiling is theirs to raise."""
         assert DEFAULT_MAX_SEARCHES > 15
+
+
+class TestSignupUrlFollowsTheProduct:
+    """Where a keyless caller is sent.
+
+    The URL is quoted back verbatim in `needs_api_key` replies, on /health and
+    on the public index. Defaulting a hotels deployment to the flights listing
+    hands a paying user the Subscribe button for the wrong API -- and makes
+    the hotels 403 handler say "Subscribe to the Booking Live API at
+    <flights URL>", which contradicts itself.
+    """
+
+    def test_hotels_deployment_points_at_the_booking_listing(self, monkeypatch):
+        monkeypatch.setenv("MCP_PRODUCTS", "hotels")
+        assert load_settings().signup_url.endswith("booking-live-api")
+
+    def test_flights_deployment_points_at_the_flights_listing(self, monkeypatch):
+        monkeypatch.setenv("MCP_PRODUCTS", "flights")
+        assert load_settings().signup_url.endswith("google-flights-live-api")
+
+    def test_both_keeps_the_flights_listing(self, monkeypatch):
+        monkeypatch.setenv("MCP_PRODUCTS", "both")
+        assert load_settings().signup_url.endswith("google-flights-live-api")
+
+    def test_an_explicit_signup_url_still_wins(self, monkeypatch):
+        monkeypatch.setenv("MCP_PRODUCTS", "hotels")
+        monkeypatch.setenv("SIGNUP_URL", "https://rapidapi.test/custom")
+        assert load_settings().signup_url == "https://rapidapi.test/custom"
+
+
+class TestTimeoutAlignment:
+    """The read timeout cannot give up on an answer the upstream can still send.
+
+    There is one ceiling on this hop, not two. It used to be documented as two
+    -- "the search function is killed at ``Timeout: 45``, and the RapidAPI
+    gateway in front of it was observed returning 502 at ~45.4s on 2026-08-25"
+    -- and that second one does not exist. Measured through the edge on
+    2026-08-27: at ``Timeout`` 45, 22 requests, max 45.2s, none above 45s; after
+    the raise to 60, 46 requests, successful 200s at 48.7s and 59.7s and 502s at
+    60.21s and 60.23s. The wall moved with the function ``Timeout``, so the ~45s
+    502s recorded as a gateway ceiling were our own Lambda kill relayed by the
+    edge about a quarter-second later.
+
+    Which turns the property upside down. Stated as a ceiling it became a live
+    bug the moment the ``Timeout`` was raised and the 45.0 here did not follow:
+    the client abandoned searches that were about to succeed. Stated correctly
+    it is a floor -- clear the function ``Timeout``, and clear the edge's relay
+    of the verdict too, so the caller gets RapidAPI's specific 502 rather than a
+    generic local timeout fired a fraction of a second earlier.
+    """
+
+    #: The deployed ``flyMyGApi`` ``Timeout``, read from the live configuration
+    #: on 2026-08-27.
+    DEPLOYED_FUNCTION_TIMEOUT_SECONDS = 60.0
+
+    #: The slowest verdict the edge relayed in that measurement.
+    SLOWEST_MEASURED_EDGE_VERDICT_SECONDS = 60.23
+
+    def test_the_code_agrees_with_the_deployed_function_timeout(self):
+        from src import settings as settings_mod
+
+        assert (settings_mod.UPSTREAM_FUNCTION_TIMEOUT_SECONDS
+                == self.DEPLOYED_FUNCTION_TIMEOUT_SECONDS)
+
+    def test_the_default_outlives_the_upstream(self):
+        assert (load_settings().request_timeout_seconds
+                > self.DEPLOYED_FUNCTION_TIMEOUT_SECONDS)
+
+    def test_the_default_also_clears_the_edge_relay(self):
+        assert (load_settings().request_timeout_seconds
+                > self.SLOWEST_MEASURED_EDGE_VERDICT_SECONDS)
+
+    def test_the_default_is_derived_rather_than_restated(self):
+        from src import settings as settings_mod
+
+        assert (load_settings().request_timeout_seconds
+                == settings_mod.UPSTREAM_FUNCTION_TIMEOUT_SECONDS
+                + settings_mod.UPSTREAM_RELAY_MARGIN_SECONDS)
+
+    def test_the_client_default_matches_the_settings_default(self):
+        """A client constructed without settings must not be more patient.
+
+        ``RapidApiClient`` carries its own default for direct use, and a
+        divergence there is exactly how 105 survived in two places at once.
+        """
+        import inspect
+
+        from src.hotels_client import HotelsClient
+        from src.rapidapi_client import RapidAPIClient
+
+        expected = load_settings().request_timeout_seconds
+        for client in (RapidAPIClient, HotelsClient):
+            default = inspect.signature(
+                client.__init__).parameters["timeout_seconds"].default
+            assert default == expected, client.__name__
+
+    def test_it_is_still_tunable_without_a_deploy(self, monkeypatch):
+        monkeypatch.setenv("REQUEST_TIMEOUT_SECONDS", "20")
+        assert load_settings().request_timeout_seconds == 20.0
