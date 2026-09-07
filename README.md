@@ -332,6 +332,40 @@ Deployment target is Vercel via `api/index.py` (FastAPI wrapper handing FastMCP 
 
 Never commit a real key. `example.env` ships with placeholders; keep it that way.
 
+## Run it in a container
+
+The hosted server needs nothing installed. This is for self-hosting, and it is what lets
+[Glama](https://glama.ai/mcp/servers/mtnrabi/google-flights-mcp) run its build test and cut a
+release.
+
+```bash
+docker build -t flightpowers-mcp .
+docker run --rm -p 8000:8000 flightpowers-mcp
+curl http://localhost:8000/health
+```
+<!-- untested in CI — no Docker daemon on the machine that wrote this; the exact file set the
+     image copies (requirements.txt, src/, legal/) and the exact start command were installed
+     into a clean venv on Python 3.12 and booted: /health 200, /privacy and /terms 200,
+     MCP initialize + tools/list returned all four tools. -->
+
+The container serves streamable HTTP on `${PORT}/mcp` — the same transport as the hosted
+deployment — via `python -m src`. `api/index.py` is the Vercel wrapper and is not used here.
+
+**No secret is baked into the image.** Every search is billed to the caller's own RapidAPI
+subscription and their key travels with the request as `x-rapidapi-key`. `RAPIDAPI_KEY` is
+optional and is a server-side *fallback*: when set, a caller who sends no key of their own is
+served on, and billed to, that subscription. Leave it unset unless that is what you want;
+`/health` reports `server_side_key_configured` either way.
+
+```bash
+# optional, local development only
+docker run --rm -p 8000:8000 -e RAPIDAPI_KEY=your_key flightpowers-mcp
+```
+
+Every variable in the table above works as `-e NAME=value`. `HOST` defaults to `0.0.0.0` and
+`PORT` to `8000` inside the image. The `HEALTHCHECK` polls `/health` on `$PORT`, so overriding
+`PORT` keeps working.
+
 ## Non-affiliation
 
 This is an independent API that returns publicly available flight pricing. It is **not affiliated

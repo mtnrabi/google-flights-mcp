@@ -1,0 +1,21 @@
+# Keep the build context to what the image actually needs. The venv alone is
+# ~112 MB and nothing in the image reads it.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.git/
+.gitignore
+.github/
+.vercel/
+.vercelignore
+vercel.json
+.cursor-plugin/
+tests/
+api/
+legal/*.html
+.env
+.env*.local
+logs/
+*.log
