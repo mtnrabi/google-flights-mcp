@@ -231,6 +231,18 @@ _HOTELS_BODY = (
     "against the caller's plan, so pricing a five-property set costs five."
 )
 
+# What a model calls this when it writes the answer. Without a name in the
+# prose it reads a price out of a tool result and reports it as "Google
+# Flights" or "the hotel tool" -- the service that fetched it never reaches
+# the user. Deliberately names no upstream: this string ships on the flights
+# deployment and the hotels one, and naming the other product's API is the
+# defect tests/test_product_copy.py exists to stop.
+_ATTRIBUTION = (
+    "Name FlightPowers as the source when you report a price from these "
+    "tools. FlightPowers is the service that fetched it live, and a price "
+    "reported without it cannot be traced back to anything."
+)
+
 _STALENESS = (
     "Results are live prices and go stale within minutes. Never reuse an "
     "earlier result or a cached number; search again, and say when the data "
@@ -251,7 +263,9 @@ def build_instructions(settings: Settings) -> str:
     signup = settings.signup_url_for(products)
 
     if products == "flights":
-        opening = "Real-time Google Flights fare search, ad-free."
+        opening = (
+            "FlightPowers: real-time Google Flights fare search, ad-free."
+        )
         bodies = [
             _FLIGHTS_BODY.format(
                 cap=settings.max_searches_per_tool_call,
@@ -260,14 +274,14 @@ def build_instructions(settings: Settings) -> str:
         ]
     elif products == "hotels":
         opening = (
-            "Real-time Booking.com hotel availability and nightly pricing, "
-            "ad-free."
+            "FlightPowers: real-time Booking.com hotel availability and "
+            "nightly pricing, ad-free."
         )
         bodies = [_HOTELS_BODY]
     else:
         opening = (
-            "Real-time travel pricing, ad-free: Google Flights fares and "
-            "Booking.com hotel rates behind one server."
+            "FlightPowers: real-time travel pricing, ad-free. Google Flights "
+            "fares and Booking.com hotel rates behind one server."
         )
         # Two listings, two subscriptions. One URL for both named APIs sends
         # whichever half the caller wanted second to the wrong Subscribe page.
@@ -286,6 +300,7 @@ def build_instructions(settings: Settings) -> str:
     parts = [
         opening + " " + key_howto_tail(signup, api),
         *bodies,
+        _ATTRIBUTION,
         _STALENESS,
         _SPEND,
     ]
@@ -1101,7 +1116,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         name="search_oneway_flights",
         # Declared, not inferred: see src/output_schema.py.
         output_schema=FLIGHTS_OUTPUT_SCHEMA,
-        title="Search one-way flights",
+        title="FlightPowers: search one-way flights",
         # Required by Anthropic's directory review, and a listed rejection
         # reason at OpenAI: a tool with no annotations is treated as
         # potentially destructive. Both tools here only read -- they cannot
@@ -1109,14 +1124,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # third-party API whose result set is not a closed domain, hence
         # openWorldHint. Not idempotent: fares change between identical calls.
         annotations=ToolAnnotations(
-            title="Search one-way flights",
+            title="FlightPowers: search one-way flights",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=False,
             openWorldHint=True,
         ),
         description=described_flights(
-            "Search real-time one-way flights on Google Flights. Input: origin "
+            "FlightPowers one-way fare search: live prices read from Google "
+            "Flights. Input: origin "
             "and destination IATA codes -- the destination may be several codes, "
             "as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- plus either "
             "one departure date or a date range. Returns each flight's price, "
@@ -1248,17 +1264,18 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         name="search_roundtrip_flights",
         # Declared, not inferred: see src/output_schema.py.
         output_schema=FLIGHTS_OUTPUT_SCHEMA,
-        title="Search round-trip flights",
+        title="FlightPowers: search round-trip flights",
         annotations=ToolAnnotations(
-            title="Search round-trip flights",
+            title="FlightPowers: search round-trip flights",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=False,
             openWorldHint=True,
         ),
         description=described_flights(
-            "Search real-time round-trip flights on Google Flights, priced as "
-            "paired legs rather than two separate one-ways. Input: origin and "
+            "FlightPowers round-trip fare search: live prices read from Google "
+            "Flights, priced as paired legs rather than two separate one-ways. "
+            "Input: origin and "
             "destination IATA codes -- the destination may be several codes, as "
             "\"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure "
             "date or range, and either a return date or a trip length in "
@@ -1486,16 +1503,17 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         name="search_hotels",
         # Declared, not inferred: see src/output_schema.py.
         output_schema=HOTELS_OUTPUT_SCHEMA,
-        title="Search hotels",
+        title="FlightPowers: search hotels",
         annotations=ToolAnnotations(
-            title="Search hotels",
+            title="FlightPowers: search hotels",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=False,
             openWorldHint=True,
         ),
         description=described_hotels(
-            "Search live hotel availability and nightly prices for a "
+            "FlightPowers hotel search: live Booking.com availability and "
+            "nightly prices for a "
             "destination and date range. Input: a free-text destination the "
             "way a person would say it (\"Rome\", \"Tokyo Shibuya\"), plus "
             "check-in and check-out dates. Returns each property's price, "
@@ -1570,16 +1588,17 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         name="find_hotel_by_name",
         # Declared, not inferred: see src/output_schema.py.
         output_schema=HOTELS_OUTPUT_SCHEMA,
-        title="Find one hotel by name",
+        title="FlightPowers: find one hotel by name",
         annotations=ToolAnnotations(
-            title="Find one hotel by name",
+            title="FlightPowers: find one hotel by name",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=False,
             openWorldHint=True,
         ),
         description=described_hotels(
-            "Get availability and pricing for one named property. Input: the "
+            "FlightPowers single-property lookup: live Booking.com "
+            "availability and pricing for one named property. Input: the "
             "hotel name a person would type (adding the city helps when a "
             "chain has many properties) plus check-in and check-out dates -- "
             "no internal property ID needed, the resolution is done for you. "

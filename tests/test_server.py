@@ -1022,10 +1022,20 @@ class TestServerInstructions:
 
         return build_instructions(self._settings(products))
 
+    # The service is called FlightPowers, and since the naming edit that word
+    # opens the hotels string too, so a bare `"flight" not in text` now trips
+    # on the brand instead of on flight-product prose. The brand is stripped
+    # before the scan; the sentence this test was written for ("Real-time
+    # Google Flights search"), the word "flights", and the flight tool names
+    # all still trip it.
+    @staticmethod
+    def _without_the_brand(text: str) -> str:
+        return text.replace("FlightPowers", "").replace("flightpowers", "")
+
     def test_hotels_deployment_does_not_call_itself_a_flights_server(self):
         text = self._instructions("hotels")
         assert "Google Flights" not in text
-        assert "flight" not in text.lower()
+        assert "flight" not in self._without_the_brand(text).lower()
         assert "hotel" in text.lower()
 
     def test_hotels_names_both_of_its_tools(self):
@@ -1087,4 +1097,4 @@ class TestServerInstructions:
         async with Client(mcp) as client:
             text = client.initialize_result.instructions or ""
         assert "hotel" in text.lower()
-        assert "flight" not in text.lower()
+        assert "flight" not in self._without_the_brand(text).lower()
