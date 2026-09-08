@@ -156,6 +156,16 @@ class TestPerProductDocuments:
     """
 
     def test_hotels_documents_never_mention_flights(self):
+        """The bar used to be "the word Google does not appear".
+
+        That was a good proxy while the only Google in these documents was
+        the flights PRODUCT. It stopped being one when /connect added Google
+        as an identity provider, which is the same provider on both products
+        and belongs in both policies. So the bar is now the thing it was
+        always standing in for: no flights product, no flights listing, no
+        flights tool -- and, separately, that the only Google left on a
+        hotels page is the sign-in one.
+        """
         from src.legal import render_document, support_html
 
         for doc in (
@@ -164,8 +174,28 @@ class TestPerProductDocuments:
             support_html("hotels"),
         ):
             assert doc
-            assert "Google" not in doc, "hotels docs must not name Google at all"
+            assert "Google Flights" not in doc
+            assert "google-flights-live-api" not in doc
+            assert "google-flights-mcp" not in doc
             assert "search_oneway_flights" not in doc
+
+    def test_google_on_a_hotels_page_is_only_ever_the_sign_in(self):
+        """Named separately so the reason survives. A hotels policy that
+        drifts back into naming the flights API would pass the assertions
+        above only by not using those exact strings; this one reads every
+        line that says Google and requires it to be about signing in."""
+        from src.legal import render_document, support_html
+
+        allowed = ("sign", "account", "consent", "identifier", "privacy policy")
+        for doc in (
+            render_document("privacy", "hotels"),
+            render_document("terms", "hotels"),
+            support_html("hotels"),
+        ):
+            for line in doc.splitlines():
+                if "Google" not in line:
+                    continue
+                assert any(word in line.lower() for word in allowed), line
 
     def test_flights_documents_never_mention_hotels(self):
         from src.legal import render_document, support_html

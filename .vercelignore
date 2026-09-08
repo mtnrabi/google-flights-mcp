@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 tests/
+migrations/
 .env
 .env*.local
 logs/

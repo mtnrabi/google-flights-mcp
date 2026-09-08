@@ -10,8 +10,11 @@ mechanism gets an explicit test rather than being covered by inference.
 import base64
 import json
 
+import pytest
+
 from src.credentials import (
     Credential,
+    find_connect_token,
     key_looks_malformed,
     missing_key_message,
     redact,
@@ -233,5 +236,72 @@ class TestGatewayOwnKeyIsNotMistakenForOurs:
     def test_header_still_beats_a_gateway_query_key(self):
         got = resolve_credential(
             {"x-rapidapi-key": KEY}, self._smithery_query(OTHER)
+        )
+        assert got.key == KEY
+
+
+class TestOurOwnConnectTokenIsNeverForwarded:
+    """The other half of the gateway-collision rule, one release later.
+
+    /connect hands a user an `fpk_...` token to paste INSTEAD of their key.
+    Users paste it where the key used to go -- the Authorization header, the
+    `rapidapi_key` parameter, a client's generic "API key" box. Every one of
+    those is a channel this module reads, so without a prefix filter the
+    token would be forwarded to RapidAPI, rejected, and reported to the user
+    as "the key you just connected is wrong". That is the worst possible
+    first-run experience for the feature, and it is one `startswith` away.
+    """
+
+    TOKEN = "fpk_eyJhIjoxfQ.c2ln"
+
+    @pytest.mark.parametrize(
+        "headers, params",
+        [
+            ({"x-rapidapi-key": TOKEN}, {}),
+            ({"x-api-key": TOKEN}, {}),
+            ({"authorization": f"Bearer {TOKEN}"}, {}),
+            ({"authorization": TOKEN}, {}),
+            ({}, {"rapidapi_key": TOKEN}),
+            ({}, {"api_key": TOKEN}),
+            ({}, {"key": TOKEN}),
+            ({}, {"config.rapidApiKey": TOKEN}),
+        ],
+    )
+    def test_never_resolved_as_a_rapidapi_key(self, headers, params):
+        assert not resolve_credential(headers, params).present
+
+    @pytest.mark.parametrize(
+        "headers, params",
+        [
+            ({"x-rapidapi-key": TOKEN}, {}),
+            ({"authorization": f"Bearer {TOKEN}"}, {}),
+            ({}, {"fp_token": TOKEN}),
+            ({}, {"connect_token": TOKEN}),
+            ({}, {"rapidapi_key": TOKEN}),
+            ({}, {"api_key": TOKEN}),
+        ],
+    )
+    def test_is_found_as_a_token(self, headers, params):
+        assert find_connect_token(headers, params) == self.TOKEN
+
+    def test_a_real_key_is_not_read_as_a_token(self):
+        """The inverse direction. A key looked up as a token would be a
+        database round trip on every keyed request, and a miss would tell a
+        paying caller to go and connect."""
+        assert find_connect_token({"x-rapidapi-key": KEY}, {}) == ""
+        assert find_connect_token({}, {"rapidapi_key": KEY}) == ""
+
+    def test_a_key_still_resolves_when_a_token_rides_along(self):
+        """Both present is the normal state for someone migrating: the URL
+        still has the token, the client now has the key. The key wins, and
+        nothing about the token interferes."""
+        got = resolve_credential({"x-rapidapi-key": KEY}, {"fp_token": self.TOKEN})
+        assert got.key == KEY
+
+    def test_smithery_config_plus_a_token_still_finds_the_user_key(self):
+        """The 2026-08-17 collision and this prefix filter in one request."""
+        blob = base64.b64encode(json.dumps({"rapidApiKey": KEY}).encode()).decode()
+        got = resolve_credential(
+            {}, {"api_key": "smithery-gateway-key", "config": blob}
         )
         assert got.key == KEY

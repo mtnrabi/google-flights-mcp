@@ -54,17 +54,35 @@ from starlette.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
+    RedirectResponse,
     Response,
 )
 
+from .connect import (
+    build_connect_support,
+    check_rapidapi_key,
+    signed_in_html,
+    signed_out_html,
+)
 from .credentials import (
+    NO_CREDENTIAL,
     Credential,
+    find_connect_token,
     key_howto_block,
     key_howto_tail,
     key_looks_malformed,
     missing_key_message,
     redact,
     resolve_credential,
+)
+from .keystore import KeyStoreError
+from .webauth import (
+    COOKIE_PATH,
+    OAUTH_COOKIE,
+    OAUTH_STATE_TTL_SECONDS,
+    SESSION_COOKIE,
+    SESSION_TTL_SECONDS,
+    WebAuthError,
 )
 from .legal import CONTACT_EMAIL, index_html, support_html, render_document
 from .hotels_client import (
@@ -955,6 +973,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # the 403 -- sent a hotels caller to a Subscribe button for the flights
     # API. The flights pair still resolves to `settings.signup_url`, so an
     # explicit SIGNUP_URL keeps working.
+    site_origin = settings.site_origin()
     flights_signup = settings.signup_url_for("flights")
     hotels_signup = settings.signup_url_for("hotels")
 
@@ -1006,6 +1025,104 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             redact(settings.fallback_rapidapi_key),
         )
 
+    # ── connected keys (optional) ────────────────────────────────────────
+    # None on any deployment that has not been given GOOGLE_OAUTH_CLIENT_ID,
+    # GOOGLE_OAUTH_CLIENT_SECRET, MCP_KEY_MASTER and DATABASE_URL -- which is
+    # every deployment until ops sets them. When it is None no route is
+    # registered and `_resolve` is byte-for-byte the call that was here
+    # before, so this whole feature is off by absence rather than by a flag
+    # somebody has to remember to leave alone.
+    connect = build_connect_support(
+        settings.products, site_origin, settings.public_url
+    )
+    if connect is not None:
+        logger.info("/connect is enabled for %s", settings.products)
+
+    async def _resolve(headers: dict[str, str], params: dict[str, str]) -> Credential:
+        """The caller's key, in the order credentials.py documents.
+
+        The request always wins. A caller who sent a key in a header gets
+        that key even if they are also carrying a connect token -- that is
+        the rule that makes this feature safe to turn on: no existing,
+        working, keyed integration can start being billed to somebody else's
+        stored subscription because a token leaked into a URL.
+
+        Only after every request-supplied channel comes up empty does the
+        stored key get looked up, and only then the `RAPIDAPI_KEY`
+        environment fallback. `resolve_credential` is deliberately called
+        with an empty fallback here so that order holds; passing
+        `settings.fallback_rapidapi_key` into it would put the deployment's
+        own key AHEAD of the caller's stored one.
+        """
+        credential = resolve_credential(headers, params, fallback="")
+        if credential.present:
+            return credential
+
+        if connect is not None:
+            token = find_connect_token(headers, params)
+            if token:
+                sub = connect.auth.read_connect_token(token)
+                if sub:
+                    try:
+                        stored = await connect.store.get(sub)
+                    except KeyStoreError as exc:
+                        # A database that is down, or a row written under a
+                        # master key that has since been rotated. Never
+                        # reported as "your key is wrong": it is ours that is
+                        # wrong. The token is dropped and the request falls
+                        # through to the keyless reply.
+                        logger.warning("stored key lookup failed: %s", exc)
+                        stored = None
+                    if stored is not None:
+                        return Credential(key=stored.key, source="store:google")
+                    # A well-formed, unexpired token whose row is gone is
+                    # Disconnect having been pressed (or a master-key
+                    # rotation). Distinct source so the reply can say
+                    # "connect again" instead of walking a user who already
+                    # has a key through getting one.
+                    return Credential(key="", source="store:disconnected")
+
+        if settings.fallback_rapidapi_key:
+            return Credential(
+                key=settings.fallback_rapidapi_key, source="env:RAPIDAPI_KEY"
+            )
+        return NO_CREDENTIAL
+
+    def _howto(signup: str, api_name: str) -> dict[str, Any]:
+        """`how_to_get_a_key`, plus the sign-in route when there is one.
+
+        Additive: the three steps and their wording are untouched, so a model
+        that already knows how to relay this reply keeps working. The extra
+        field only appears on a deployment where /connect exists, because a
+        URL that 404s is worse than no URL at all.
+        """
+        block = key_howto_block(signup, api_name)
+        if connect is not None:
+            block["connect_url"] = f"{site_origin}/connect"
+        return block
+
+    def _reconnect_message(signup: str, api_name: str) -> dict[str, Any]:
+        """The reply for a connect token whose stored key is gone."""
+        connect_url = f"{site_origin}/connect"
+        return {
+            "needs_api_key": True,
+            "results": [],
+            "result_count": 0,
+            "signup_url": signup,
+            "message": (
+                "This connect link is no longer attached to a RapidAPI key -- "
+                "it was disconnected, or the key was removed. Open "
+                f"{connect_url}, sign in with the same Google account, and "
+                "paste your key again. Nothing was searched and nothing was "
+                "billed."
+            ),
+            "how_to_get_a_key": {
+                "connect_url": connect_url,
+                "signup_url": signup,
+                "how": key_howto_block(signup, api_name)["how"],
+            },
+        }
+
     # ── shared execution path ────────────────────────────────────────────
 
     async def _run(
@@ -1018,9 +1135,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     ) -> dict[str, Any] | ToolResult:
         started = time.perf_counter()
         headers, params = _request_context()
-        credential: Credential = resolve_credential(
-            headers, params, fallback=settings.fallback_rapidapi_key
-        )
+        credential: Credential = await _resolve(headers, params)
 
         async def log(
             *,
@@ -1057,8 +1172,16 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 failures=0,
                 results=0,
                 truncated=False,
-                error="no_api_key",
+                error=(
+                    "disconnected_key"
+                    if credential.source == "store:disconnected"
+                    else "no_api_key"
+                ),
             )
+            if credential.source == "store:disconnected":
+                return _reconnect_message(
+                    flights_signup, upstream_api_name("flights")
+                )
             return {
                 "needs_api_key": True,
                 "results": [],
@@ -1067,7 +1190,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "message": missing_key_message(
                     flights_signup, upstream_api_name("flights")
                 ),
-                "how_to_get_a_key": key_howto_block(
+                "how_to_get_a_key": _howto(
                     flights_signup, upstream_api_name("flights")
                 ),
             }
@@ -1168,7 +1291,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     "subscribed to this specific API. Subscribing to the free "
                     f"tier at {flights_signup} fixes it."
                 ),
-                "how_to_get_a_key": key_howto_block(
+                "how_to_get_a_key": _howto(
                     flights_signup, upstream_api_name("flights")
                 ),
             }
@@ -1676,11 +1799,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         """Shared body for the hotel tools: resolve key, call, shape result."""
         started = time.perf_counter()
         headers, params = _request_context()
-        credential: Credential = resolve_credential(
-            headers, params, fallback=settings.fallback_rapidapi_key
-        )
+        credential: Credential = await _resolve(headers, params)
 
         if not credential.present:
+            if credential.source == "store:disconnected":
+                return _reconnect_message(
+                    hotels_signup, upstream_api_name("hotels")
+                )
             return {
                 "needs_api_key": True,
                 "results": [],
@@ -1689,7 +1814,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "message": missing_key_message(
                     hotels_signup, upstream_api_name("hotels")
                 ),
-                "how_to_get_a_key": key_howto_block(
+                "how_to_get_a_key": _howto(
                     hotels_signup, upstream_api_name("hotels")
                 ),
             }
@@ -1720,7 +1845,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                         f"{upstream_api_name('hotels')} at {hotels_signup} -- a "
                         "flights-only subscription does not cover hotel search."
                     ),
-                    "how_to_get_a_key": key_howto_block(
+                    "how_to_get_a_key": _howto(
                         hotels_signup, upstream_api_name("hotels")
                     ),
                 }
@@ -1945,7 +2070,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     # ── operational routes ───────────────────────────────────────────────
 
-    site = settings.site_origin()
+    site = site_origin
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:
@@ -1970,6 +2095,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 # production silently bills its owner for every anonymous
                 # caller, and nothing else would ever surface it.
                 "server_side_key_configured": bool(settings.fallback_rapidapi_key),
+                # Whether /connect exists on this deployment. Ops needs one
+                # place to see that the four env vars actually took effect:
+                # the page 404ing is otherwise indistinguishable from a
+                # routing problem, and a half-set configuration disables the
+                # feature silently on purpose.
+                "connect_enabled": connect is not None,
             }
         )
 
@@ -2006,6 +2137,273 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     async def support(_request: Request) -> Response:
         """Both platforms require reachable support details."""
         return HTMLResponse(support_html(settings.products))
+
+    # ── /connect ─────────────────────────────────────────────────────────
+    # Registered only when the feature is configured. An unconfigured
+    # deployment 404s these paths exactly as it does today, which is the
+    # honest answer: there is nothing behind them.
+    if connect is not None:
+        _cookie_secure = site_origin.lower().startswith("https://")
+
+        def _set_cookie(
+            response: Response, name: str, value: str, max_age: int
+        ) -> None:
+            """HttpOnly, SameSite=Lax, scoped to /connect.
+
+            Lax rather than Strict because the sign-in ends in a top-level
+            GET navigation back from Google, and Strict would drop the state
+            cookie on exactly that hop -- the flow would fail for every user
+            with an error that looks like a Google misconfiguration.
+            Path=/connect so the cookie is never attached to a /mcp request:
+            a session cookie is not a credential this server accepts there,
+            and the cheapest way to prove that is for it not to arrive.
+            """
+            response.set_cookie(
+                name,
+                value,
+                max_age=max_age,
+                httponly=True,
+                secure=_cookie_secure,
+                samesite="lax",
+                path=COOKIE_PATH,
+            )
+
+        _canonical_host = site_origin.split("://", 1)[-1].rstrip("/").lower()
+
+        def _wrong_host(request: Request) -> Response | None:
+            """Send an alias to the canonical origin before anything is set.
+
+            `flights.flightpowers.com` and `google-flights-mcp.flightpowers.com`
+            are the same deployment, but they are different COOKIE origins and
+            Google compares `redirect_uri` literally. A sign-in started on the
+            alias would set its state cookie on the alias, come back to the
+            canonical host, find no cookie, and fail with a message that
+            reads like a Google misconfiguration. One 302 up front costs a
+            round trip and removes a whole class of support thread -- and it
+            is why only ONE redirect URI per product has to be registered.
+            """
+            host = (request.headers.get("host") or "").strip().lower()
+            if not host or host == _canonical_host:
+                return None
+            return RedirectResponse(f"{site_origin}/connect", status_code=302)
+
+        @mcp.custom_route("/connect", methods=["GET"])
+        async def connect_page(request: Request) -> Response:
+            redirect = _wrong_host(request)
+            if redirect is not None:
+                return redirect
+            identity = connect.auth.read_session(request.cookies.get(SESSION_COOKIE))
+            if identity is None:
+                return HTMLResponse(signed_out_html(settings.products))
+            try:
+                summary = await connect.store.summary(identity.sub)
+            except KeyStoreError as exc:
+                logger.warning("connect page could not read the store: %s", exc)
+                return HTMLResponse(
+                    signed_out_html(
+                        settings.products,
+                        banner=(
+                            "The key store is not reachable right now. Nothing "
+                            "was changed; try again in a minute."
+                        ),
+                    ),
+                    status_code=503,
+                )
+            return HTMLResponse(
+                signed_in_html(
+                    email=identity.email,
+                    product=settings.products,
+                    mcp_url=settings.public_url,
+                    summary=summary,
+                    token=(
+                        connect.auth.issue_connect_token(identity.sub)
+                        if summary is not None
+                        else None
+                    ),
+                    csrf=connect.csrf(identity.sub),
+                )
+            )
+
+        @mcp.custom_route("/connect/start", methods=["GET"])
+        async def connect_start(request: Request) -> Response:
+            redirect = _wrong_host(request)
+            if redirect is not None:
+                return redirect
+            url, state_cookie = connect.auth.start()
+            response = RedirectResponse(url, status_code=302)
+            _set_cookie(response, OAUTH_COOKIE, state_cookie, OAUTH_STATE_TTL_SECONDS)
+            return response
+
+        @mcp.custom_route("/connect/callback", methods=["GET"])
+        async def connect_callback(request: Request) -> Response:
+            error = request.query_params.get("error")
+            if error:
+                # The user pressed Cancel on Google's consent screen, most
+                # of the time. Not an error page: send them back to the
+                # start with a sentence, not a stack trace.
+                return HTMLResponse(
+                    signed_out_html(
+                        settings.products,
+                        banner="Google sign-in was cancelled. Nothing was changed.",
+                    )
+                )
+            code = request.query_params.get("code", "")
+            state = request.query_params.get("state", "")
+            state_cookie = request.cookies.get(OAUTH_COOKIE, "")
+            if not code or not state or not state_cookie:
+                return HTMLResponse(
+                    signed_out_html(
+                        settings.products,
+                        banner=(
+                            "That sign-in link was incomplete or had expired. "
+                            "Start again."
+                        ),
+                    ),
+                    status_code=400,
+                )
+            try:
+                identity = await connect.auth.finish(
+                    code, state, state_cookie, client=get_shared_client(settings)
+                )
+            except WebAuthError as exc:
+                logger.info("sign-in rejected: %s", exc)
+                return HTMLResponse(
+                    signed_out_html(
+                        settings.products,
+                        banner="That sign-in could not be completed. Start again.",
+                    ),
+                    status_code=400,
+                )
+            response = RedirectResponse("/connect", status_code=303)
+            _set_cookie(
+                response,
+                SESSION_COOKIE,
+                connect.auth.issue_session(identity),
+                SESSION_TTL_SECONDS,
+            )
+            response.delete_cookie(OAUTH_COOKIE, path=COOKIE_PATH)
+            return response
+
+        async def _render_signed_in(
+            identity, *, notice: str = "", error: str = ""
+        ) -> Response:
+            try:
+                summary = await connect.store.summary(identity.sub)
+            except KeyStoreError as exc:
+                # Reached when the store goes away between the write and the
+                # render. The page still has to come back with a sentence
+                # rather than a 500, because the user has just pressed a
+                # button and needs to know whether it worked.
+                logger.warning("could not read the store while rendering: %s", exc)
+                summary = None
+                error = error or (
+                    "The key store is not reachable right now, so this page "
+                    "may not reflect your latest change."
+                )
+            return HTMLResponse(
+                signed_in_html(
+                    email=identity.email,
+                    product=settings.products,
+                    mcp_url=settings.public_url,
+                    summary=summary,
+                    token=(
+                        connect.auth.issue_connect_token(identity.sub)
+                        if summary is not None
+                        else None
+                    ),
+                    csrf=connect.csrf(identity.sub),
+                    notice=notice,
+                    error=error,
+                )
+            )
+
+        @mcp.custom_route("/connect/save", methods=["POST"])
+        async def connect_save(request: Request) -> Response:
+            identity = connect.auth.read_session(request.cookies.get(SESSION_COOKIE))
+            if identity is None:
+                return RedirectResponse("/connect", status_code=303)
+            form = await request.form()
+            if not connect.csrf_ok(identity.sub, str(form.get("csrf", ""))):
+                return await _render_signed_in(
+                    identity,
+                    error="That form had expired. Nothing was saved -- try again.",
+                )
+            key = str(form.get("rapidapi_key", "")).strip()
+            if len(key) >= 2 and key[0] == key[-1] and key[0] in {'"', "'"}:
+                key = key[1:-1].strip()
+            if not key:
+                return await _render_signed_in(
+                    identity, error="Paste a key before pressing Save."
+                )
+            if key_looks_malformed(key):
+                return await _render_signed_in(
+                    identity,
+                    error=(
+                        "That does not look like a RapidAPI key -- they are "
+                        "around 50 characters. Nothing was saved and no "
+                        "request was spent."
+                    ),
+                )
+            if connect.validate:
+                check = await check_rapidapi_key(
+                    key, settings.products, client=get_shared_client(settings)
+                )
+                if not check.ok:
+                    return await _render_signed_in(identity, error=check.message)
+            else:
+                check = None
+            try:
+                await connect.store.put(identity.sub, identity.email, key)
+            except KeyStoreError as exc:
+                logger.warning("could not store a key: %s", exc)
+                return await _render_signed_in(
+                    identity,
+                    error=(
+                        "The key could not be saved just now. Nothing was "
+                        "stored; try again in a minute."
+                    ),
+                )
+            # NEVER log the key, and never echo it back. The only trace this
+            # leaves is the account it belongs to.
+            logger.info("stored a key for sub=%s", identity.sub)
+            notice = (
+                check.message
+                if check is not None and check.message
+                else "Key saved. Copy the connect URL below into your MCP client."
+            )
+            return await _render_signed_in(identity, notice=notice)
+
+        @mcp.custom_route("/connect/disconnect", methods=["POST"])
+        async def connect_disconnect(request: Request) -> Response:
+            identity = connect.auth.read_session(request.cookies.get(SESSION_COOKIE))
+            if identity is None:
+                return RedirectResponse("/connect", status_code=303)
+            form = await request.form()
+            if not connect.csrf_ok(identity.sub, str(form.get("csrf", ""))):
+                return await _render_signed_in(
+                    identity,
+                    error="That form had expired. Nothing was changed -- try again.",
+                )
+            try:
+                removed = await connect.store.revoke(identity.sub)
+            except KeyStoreError as exc:
+                logger.warning("could not revoke a key: %s", exc)
+                return await _render_signed_in(
+                    identity,
+                    error=(
+                        "The key could not be removed just now. Nothing was "
+                        "changed; try again in a minute."
+                    ),
+                )
+            return await _render_signed_in(
+                identity,
+                notice=(
+                    "Key removed. Every connect URL for this account has "
+                    "stopped working."
+                    if removed
+                    else "There was no stored key to remove."
+                ),
+            )
 
     @mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"])
     async def openai_challenge(_request: Request) -> Response:

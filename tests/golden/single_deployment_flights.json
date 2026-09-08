@@ -1,6 +1,7 @@
 {
   "health": {
     "ads": false,
+    "connect_enabled": false,
     "contact_email": "mtnrabi@gmail.com",
     "mcp_endpoint": "https://flights.golden.test/mcp",
     "privacy_url": "https://flights.golden.test/privacy",

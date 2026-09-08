@@ -28,3 +28,18 @@ fastapi>=0.115.0
 # use_fallback. Already a hard dependency of both fastmcp and fastapi;
 # declared here because it is now imported by our own code.
 pydantic>=2
+# Imported by src/keystore.py for AES-256-GCM on stored RapidAPI keys.
+# Already an install-time dependency of authlib (which fastmcp pulls in), so
+# this line adds nothing to the deployment; it is here because our own code
+# imports it directly and a dependency that only arrives transitively is one
+# `pip install` resolution away from disappearing.
+cryptography>=42
+# Imported LAZILY by src/keystore.PostgresKeyStore, inside the first call
+# that touches a stored key -- most invocations on this server never do, and
+# the import is pure cold-start cost for them. Only reached when
+# DATABASE_URL and MCP_KEY_MASTER are both set; a deployment with neither
+# never loads it. Point DATABASE_URL at Neon's POOLED endpoint (the
+# `-pooler` host): this store opens one connection per operation and closes
+# it, which is the right shape for a serverless invocation and the wrong
+# thing to point at a direct Postgres endpoint at any volume.
+asyncpg>=0.29
