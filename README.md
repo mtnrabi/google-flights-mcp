@@ -362,309 +362,81 @@ curl -s -X POST $BASE/mcp -H 'content-type: application/json' \
 #    needs_api_key, and the client must be logged out.
 ```
 
-## Tools
+### Keeping the registration table honest
 
-| Tool | What it does |
-|---|---|
-| `search_oneway_flights` | Real-time one-way fares. Input: origin IATA, destination IATA **or a list**, and either one departure date or a date range. Returns price, airline, duration, stops, `buy_link`, and Google's historical price range so you can judge the fare. Use for any one-way question, including open-ended ones, one call with a range, never one call per date. |
-| `search_roundtrip_flights` | Real-time round-trip fares priced as **paired legs**, not two one-ways. Input: origin, destination(s), a departure date or range, and either a `return_date` or a trip length in `nights` (a number or a list like `[5,6,7]`). Returns total price, per-leg airline/stops/duration, and one `buy_link` for the trip. |
+`/oauth/register` is open, because the MCP spec requires it and because a `client_id` on its own
+authorises nothing: every flow through one still ends at a consent page a signed-in human has to
+press a button on. Open is not the same as unlimited, so three things stand behind it.
 
-### `search_oneway_flights`
-
-```python
-search_oneway_flights(
-    from_airport: str,                     # origin IATA, e.g. "TLV"
-    to_airport: str | list[str],           # destination IATA, or a list to compare
-    departure_date: str | None = None,     # "YYYY-MM-DD"
-    departure_date_from: str | None = None,# first date of a range
-    departure_date_to: str | None = None,  # last date of a range
-    max_stops: int | None = None,          # 0 = non-stop only
-    airline_codes: list[str] | None = None,
-    exclude_airline_codes: list[str] | None = None,
-    departure_time_min: int | None = None, # hour, 0-23
-    departure_time_max: int | None = None,
-    arrival_time_min: int | None = None,
-    arrival_time_max: int | None = None,
-    currency: str = "usd",
-    max_price: int | None = None,
-    seat_type: int | None = None,          # 1 economy, 2 premium economy, 3 business, 4 first
-    passengers: list[int] | None = None,   # [adults, children, infants]
-    sort_by: str = "best",                 # "best" | "price" | "duration"
-    limit: int = 10,                       # results returned after merge + sort
-    max_searches: int | None = None,       # cap the billed requests this call may make
-    use_fallback: bool | None = None,      # leave unset: accepted upstream, currently inert
-)
-```
-
-### `search_roundtrip_flights`
-
-```python
-search_roundtrip_flights(
-    from_airport: str,
-    to_airport: str | list[str],
-    departure_date: str | None = None,
-    departure_date_from: str | None = None,
-    departure_date_to: str | None = None,
-    return_date: str | None = None,        # use this OR nights, not both
-    nights: int | list[int] | None = None, # e.g. 7, or [5, 6, 7]
-    max_departure_stops: int | None = None,
-    max_return_stops: int | None = None,
-    departure_airline_codes: list[str] | None = None,
-    return_airline_codes: list[str] | None = None,
-    currency: str = "usd",
-    max_price: int | None = None,
-    seat_type: int | None = None,
-    passengers: list[int] | None = None,
-    sort_by: str = "best",
-    limit: int = 10,
-    max_searches: int | None = None,
-    use_fallback: bool | None = None,
-)
-```
-
-`sort_by` is applied by this server across the merged result set from every search it ran, so it
-is predictable regardless of how many combinations were expanded.
-
-## A worked example
-
-> **User:** "I'm in Tel Aviv. Cheapest week-long trip to Rome or Athens, leaving any day in the
-> first half of May."
-
-One call:
-
-```json
-{
-  "name": "search_roundtrip_flights",
-  "arguments": {
-    "from_airport": "TLV",
-    "to_airport": ["FCO", "ATH"],
-    "departure_date_from": "2026-05-01",
-    "departure_date_to": "2026-05-15",
-    "nights": 7,
-    "sort_by": "price",
-    "limit": 5
-  }
-}
-```
-
-That expands to 15 dates × 2 destinations = 30 combinations, which is exactly the per-call cap.
-The response shape (field names are real; **the values below are illustrative, not a quote** , 
-run the call to get live fares):
-
-```json
-{
-  "results": [
-    {
-      "from_airport": "Tel Aviv (TLV)",
-      "to_airport": "Rome (FCO)",
-      "departure_date": "2026-05-05",
-      "return_date": "2026-05-12",
-      "total_price": "$XXX",
-      "total_price_as_number": 0,
-      "total_duration_seconds": 0,
-      "total_stops": 0,
-      "price_range_in_relation_to_other_periods": "low",
-      "price_insights_low": 0,
-      "price_insights_high": 0,
-      "departure_flight_airline": "...",
-      "departure_flight_departure_description": "...",
-      "departure_flight_arrival_description": "...",
-      "departure_flight_duration": "...",
-      "departure_flight_stops": 0,
-      "departure_stops_info": [],
-      "return_flight_airline": "...",
-      "return_flight_departure_description": "...",
-      "return_flight_arrival_description": "...",
-      "return_flight_duration": "...",
-      "return_flight_stops": 0,
-      "return_stops_info": [],
-      "buy_link": "https://www.google.com/travel/flights?tfs=..."
-    }
-  ],
-  "result_count": 5,
-  "search_coverage": {
-    "requested_combinations": 30,
-    "searched_combinations": 30,
-    "truncated": false,
-    "max_searches_per_request": 30,
-    "departure_dates_searched": ["2026-05-01", "..."],
-    "destinations_searched": ["ATH", "FCO"]
-  },
-  "api_usage": {
-    "requests_used_by_this_call": 30,
-    "plan_requests_remaining": 0,
-    "plan_requests_limit": 0,
-    "note": "This search used 30 of your RapidAPI plan's requests; ... remain in the current period. Each date and destination combination is one billed request."
-  }
-}
-```
-
-Other response shapes to expect, all of them normal:
-
-- **No flights on those dates.** `results: []` with a `message`, Google Flights genuinely
-  returns nothing for some route/date combinations. Not an error. Try nearby dates or a
-  nearby airport. `use_fallback` will not change this and is left unset by default: the
-  backend accepts the field, but the second flight-data source it selects is gated behind
-  `USE_FALLBACK_FLI` (`fallback_available()`), which is not switched on for this API, so
-  none of its three values has any observable effect on a search today. The automatic
-  retries the backend does on an unreadable page are unconditional and are not affected
-  by it.
-- **Some searches failed.** A `partial` field says how many of the executed searches failed, and
-  the results cover the rest.
-- **Range too wide.** `search_coverage.truncated: true` plus a `note`. The range is sampled
-  **evenly across the whole window** (first and last kept), not cut short, so the sample is
-  representative, not the first N days. Raise `max_searches` or narrow the range for fuller
-  coverage.
-- **No key / rejected key.** `needs_api_key: true`, zero spend, with the fix. A valid RapidAPI
-  key that is not subscribed to *this* API is the most common cause.
-- **Plan exhausted.** `quota_exhausted: true` with `api_usage`, plus a reminder that narrowing
-  the range makes remaining quota go further.
-
-## Structured output (`outputSchema`, `structuredContent`, `isError`)
-
-Every tool declares an `outputSchema`, and every result carries the payload
-twice: once as `structuredContent`, once as the serialized JSON in a text
-content block. The MCP spec asks for the duplicate --
-
-> For backwards compatibility, a tool that returns structured content SHOULD
-> also return the serialized JSON in a TextContent block.
-
--- and it is load-bearing here rather than ceremonial, because clients that
-predate structured output read the text block and nothing else. (Verified
-against spec revision **2026-07-28**; structured output arrived in
-2025-06-18.)
-
-The schemas are deliberately `additionalProperties: true` with only `results`
-required. The spec puts the obligation on the server -- "Servers MUST provide
-structured results that conform to this schema" -- and these tools have
-several legitimate exits that carry different keys -- a zero-result answer, the keyless
-`needs_api_key` reply and the `quota_exhausted` reply. A tighter
-schema would look better and would make the server non-conformant on a path
-it ships on purpose.
-
-### `search_status`, and why `degraded` is an error
-
-Flight results carry `search_status`, mirroring the backend's own
-`X-Search-Status` vocabulary:
-
-| value | meaning |
-|---|---|
-| `ok` | every combination searched returned results |
-| `empty` | the search completed; Google genuinely has no itineraries. A real answer |
-| `partial` | some combinations returned results, some failed. The list is incomplete |
-| `degraded` | every combination failed. The search did not happen; an empty list means nothing |
-
-A `degraded` result is **also flagged `isError: true`**. It is the only one
-that is. The spec classifies "API failures" as tool execution errors and says
-clients "SHOULD provide tool execution errors to language models to enable
-self-correction", while nothing in the spec obliges a host to show
-`structuredContent` to the model at all. A failure carried only by a field
-inside the payload is therefore a failure the model may never see, which was
-the whole problem `search_status` was added to solve.
-
-The payload still rides along with the error -- `structuredContent` and the
-text block are both present, so nothing is lost. `api_usage` in particular: a degraded
-search still spent the caller's own RapidAPI requests, and hiding that would
-hide a charge they have to pay. `empty` and
-`partial` are not errors: one is a true negative and the other carries
-results a caller can use.
-
-## Spend reporting (`api_usage`)
-
-The money is yours, so the meter is visible. Every successful response carries:
-
-| Field | Meaning |
-|---|---|
-| `requests_used_by_this_call` | Billed upstream requests this one tool call consumed. |
-| `plan_requests_remaining` | What is left on your RapidAPI plan this period. |
-| `plan_requests_limit` | Your plan's limit for the period. |
-| `note` | The same thing in a sentence, so the model can relay it to you before you ask. |
-
-`plan_requests_remaining` and `plan_requests_limit` come from the upstream response and are
-omitted when upstream does not report them; the `note` adapts. The rule the model should state
-out loud: **one date × one destination = one billed request.**
-
-Cost control knobs, in order of bluntness: `max_searches` per call (lower it to spend less on a
-wide question), a narrower date range, a shorter destination list.
-
-## One call vs thirty
-
-The underlying REST API takes exactly one `(origin, destination, date)` tuple per call. Against a
-one-date-per-call passthrough, "cheapest to Sri Lanka anywhere in October" is 31 separate tool
-calls, 31 round trips through the model, 31 chances to lose the thread, and a bill the user only
-discovers afterwards.
-
-Here it is **one** tool call. The fan-out happens server-side, concurrently, capped, evenly
-sampled, deduplicated on `buy_link`, merged, sorted by your `sort_by`, and reported honestly in
-`search_coverage` and `api_usage`.
-
-| | This server (paid) | Free server |
+| Mechanism | Where it lives | What it stops |
 |---|---|---|
-| Fan-out per call | 30 (hard max 60; raise or lower per call with `max_searches`) | 15 |
-| Ads | none | one disclosed sponsored card per result |
-| Key | your own RapidAPI key | none needed |
-| Spend reporting | `api_usage` in every response | n/a |
-| Directory-listable | yes | no |
+| Rate limit | in memory, per instance | a burst: 10 registrations per address per 10 minutes, 60 token requests per minute, 10 `/connect/save` per hour. Over the limit is `429` with `Retry-After`. |
+| Daily caps | Postgres, so every instance agrees | a slow drip: 30 registrations per address per day. The global cap is 5,000 a day -- a backstop against unbounded rows, not a defence: a global number set near real traffic is a lever an attacker pulls to refuse every new Claude or Cursor user for a day. Crossing 500 in a day logs and refuses nothing. `MCP_OAUTH_DCR_MAX_PER_IP_PER_DAY`, `MCP_OAUTH_DCR_MAX_PER_DAY` and `MCP_OAUTH_DCR_WARN_PER_DAY` move them without a deploy. |
+| Sweep | on `/oauth/register`, at most once every 15 minutes per instance | the litter: expired codes and tokens, and registrations that never became an authorization within **7 days**. A client with a live token, an outstanding code, or a consent page that has been rendered for it is never swept. |
 
-**This server carries no ads at all**, not by taste but by constraint: Anthropic's connector
-directory policy and OpenAI's app guidelines both prohibit advertising and sponsored content in
-tool results, so an ad-carrying server can never be listed there and this one can.
+The rate limit is per INSTANCE. On Vercel that means N warm instances allow up to N times those
+numbers between them, and a cold start starts the counters at zero. That is why the durable caps
+exist as well: they are counted in the database, where the number is the same everywhere.
 
-## Local development
+The address every one of these is keyed on comes from `x-real-ip` first -- Vercel sets it to the
+peer it accepted -- and otherwise from the LAST usable entry of `x-forwarded-for`, skipping hops
+that can only be internal. Never entry 0: proxies append on the right, so the left-most entry is
+whatever the caller wrote, and reading it would make every limit here one header away from being
+bypassed. A request with neither header shares one bucket named `unknown`, which is rate limited
+as a single caller and is not subject to the durable per-address cap (one missing header on the
+edge must not lock the whole server out for a day).
 
-```bash
-git clone <this repo> && cd mcp_server_paid
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp example.env .env          # fill it in; leave RAPIDAPI_KEY empty
-set -a && . .env && set +a
-.venv/bin/python -m src      # streamable HTTP on http://localhost:8000/mcp
-```
-<!-- untested, developer verify: clone/venv/run steps not executed in this environment -->
+A registration is stamped as in-use when its consent page is RENDERED, not only when the human
+presses Approve. MCP clients commonly register when they are installed and authorize days later,
+and the sweep must not delete a row while its consent page is on screen -- there is no foreign key
+from codes or tokens back to the client, so the exchange that followed would fail
+`invalid_client` with nothing naming the cause.
 
-Point a client at the local process the same way:
-
-```bash
-claude mcp add --transport http google-flights-local http://localhost:8000/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
-```
-<!-- untested, developer verify -->
-
-Tests (620 passing, verified):
+Requires one migration:
 
 ```bash
-.venv/bin/python -m pytest -q
+psql "$DATABASE_URL" -f migrations/003_mcp_oauth_hygiene.sql
 ```
 
-Configuration lives in `example.env`; every variable is documented there. The ones that matter:
+### Refresh tokens rotate, and a replay revokes the family
 
-| Variable | Default | Why it matters |
-|---|---|---|
-| `MAX_SEARCHES_PER_TOOL_CALL` | `30` | Per-call fan-out cap. Clamped to a hard maximum of 60. |
-| `MAX_CONCURRENT_SEARCHES` | `10` | Concurrency of the fan-out. |
-| `MAX_HTTP_CONNECTIONS` | `60` | Connection-pool ceiling; serverless instances share a file-descriptor pool. |
-| `REQUEST_TIMEOUT_SECONDS` | `75` | The upstream function's `Timeout` (60) plus a 15s edge-relay margin, so this side never gives up on an answer that is still coming. |
-| `DEFAULT_RESULT_LIMIT` | `10` | Results requested per individual upstream search. |
-| `MCP_PRODUCTS` | `both` | Which product this deployment serves: `flights`, `hotels` or `both`. Selects the tool set, the server instructions, the service name, the policy pages and the RapidAPI listing a keyless or unsubscribed caller is sent to. A hotels deployment left on the default introduces itself as a flights server. |
-| `SIGNUP_URL` | listing matching `MCP_PRODUCTS` | Quoted back to users who arrive without a key. On `both`, the hotel tools quote the Booking listing regardless, one URL cannot be the Subscribe button for two APIs. |
-| `MCP_PRODUCTS_BY_HOST` | `default` | Which product each hostname serves, so one deployment can carry both paid domains and each listing still gets exactly its own tool set. `default` is the built-in map of flightpowers.com aliases; `off` disables host routing entirely (the no-code rollback); or an explicit `host=product,…` map. An unmapped hostname falls back to `MCP_PRODUCTS`. |
-| `MCP_PUBLIC_URL` | `http://localhost:8000/mcp` | Reported by `/health` and the origin of every policy-page link. `MCP_PUBLIC_URL_FLIGHTS` / `MCP_PUBLIC_URL_HOTELS` override it per product on a deployment serving both, without them the hotels hostname would advertise the flights one. `SIGNUP_URL_FLIGHTS` / `SIGNUP_URL_HOTELS` work the same way. |
-| `RAPIDAPI_KEY` | *(empty)* | **Leave empty in production.** If set, every keyless caller is served on, and billed to, that subscription. The server logs a warning at startup and `/health` reports `server_side_key_configured`. |
-| `METRICS_TOKEN` | *(empty)* | When set, `/metrics` requires an `x-metrics-token` header. |
-| `LOG_PATH` | *(empty)* | Empty disables the file sink; stdout `MCP_CALL` lines remain the record. Correct on serverless. |
+A refresh token is single-use: exchanging it issues a new pair and retires the one presented.
+The retired row is **kept and stamped**, not deleted, because a deleted row and a token that was
+never issued look identical -- and telling those apart is the point. Presenting an
+already-rotated refresh token means either a client that lost the response or a copy in somebody
+else's hands, and OAuth 2.1 §4.14.2 says to assume the second: the answer is `invalid_grant`, and
+every token descended from that authorization is deleted. The honest client signs in again; the
+thief's access token stops working at the same moment.
 
-Operational routes: `GET /health` (public, unauthenticated, registries poll it),
-`GET /metrics`, `GET /metrics/calls?hours=24`.
+With one deliberate exception, for the case that is almost always the innocent one: the FIRST
+replay of the token we just rotated, from the same client, within 10 seconds, is answered with
+the pair that rotation already issued. It is an idempotent retry -- nothing new is created -- and
+it means a client whose response was lost to a dropped connection is not silently signed out. A
+second replay, or one after the window, is the real thing and still kills the family. The window
+is per instance and in memory, so a miss simply falls through to the conservative answer.
 
-Deployment target is Vercel via `api/index.py` (FastAPI wrapper handing FastMCP its lifespan,
-`stateless_http=True`). The canonical MCP path is `/mcp`, **no trailing slash**.
+Revoking a refresh token through `/oauth/revoke` takes its access tokens with it, for the same
+reason (RFC 7009 §2.1) -- and only if the token was issued to the client asking, which is the
+other half of that section. A client presenting somebody else's token still gets `200` (§2.2) and
+nothing is revoked.
 
-Never commit a real key. `example.env` ships with placeholders; keep it that way.
+### A client_id can be a URL
 
-## Non-affiliation
+`client_id_metadata_document_supported: true` is advertised in
+`/.well-known/oauth-authorization-server`. A client may use an **https URL** as its `client_id`;
+the document at that URL lists its `redirect_uris`, and we fetch and check it per flow instead of
+writing a registration row. Smithery asks for this before it will proxy a remote OAuth server.
 
-This is an independent API that returns publicly available flight pricing. It is **not affiliated
-with, endorsed by, or sponsored by Google**. "Google Flights" is used only to describe the public
-data source. Fares are supplied by the upstream provider, change constantly, and are not
-guaranteed, always confirm the price on the airline or booking site before purchase.
+What is checked, every time: https only, a public hostname (no IP literals, no `localhost`, no
+credentials in the URL), the hostname **resolved** and every address it answers with required to
+be public unicast (a name is not a control: `127.0.0.1.nip.io` has a dot in it and points at
+loopback), no redirect followed, a 5-second timeout, a 64 KB cap enforced while the body is read
+rather than after it is buffered, a `client_id` inside the document that matches the URL if it is
+present, and -- the one that matters -- the `redirect_uri` in the request must be listed in the
+document. The lookup is rate limited on its own (60 per address per 10 minutes), because it is
+the only outbound fetch in this server that a caller can trigger before signing in. Dynamic registration is unchanged
+and still the default: a `client_id` that is not an https URL is looked up in the table exactly as
+before.
 
 ## Tools
 
@@ -932,7 +704,7 @@ claude mcp add --transport http google-flights-local http://localhost:8000/mcp -
 ```
 <!-- untested, developer verify -->
 
-Tests (620 passing, verified):
+Tests (737 passing, verified):
 
 ```bash
 .venv/bin/python -m pytest -q

@@ -52,10 +52,66 @@ from .oauth import (
     error_html,
     redirect_with,
 )
+from . import cimd
 from .oauthstore import OAuthStoreError
+from .ratelimit import (
+    CIMD_FETCH,
+    LIMITER,
+    REGISTER,
+    TOKEN,
+    UNKNOWN_IP,
+    Limit,
+    client_ip,
+    usable_address,
+)
 from .webauth import SESSION_COOKIE, WebAuthError
 
 logger = logging.getLogger(__name__)
+
+
+def _too_many(limit: Limit) -> JSONResponse:
+    """The 429 both public POST endpoints answer with when they are flooded.
+
+    `Retry-After` is not decoration: an MCP client that gets a bare 429 with
+    no interval retries immediately, which is the behaviour the limit exists
+    to stop.
+    """
+    return JSONResponse(
+        {
+            "error": "temporarily_unavailable",
+            "error_description": (
+                "too many requests to this endpoint; wait and try again"
+            ),
+        },
+        status_code=429,
+        headers={
+            "Retry-After": str(limit.retry_after()),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def caller_ip(request: Request) -> str:
+    """The bucket key for this request: see `ratelimit.client_ip`.
+
+    The direct-peer fallback is only reached when the platform sent neither
+    header (a local uvicorn, a test), and it is filtered through the same
+    predicate, so a proxy chain can never talk us into an address by leaving
+    the headers off.
+    """
+    ip = client_ip({k.lower(): v for k, v in request.headers.items()})
+    if ip == UNKNOWN_IP and request.client is not None:
+        ip = usable_address(request.client.host or "") or UNKNOWN_IP
+    return ip
+
+
+def _rate_limited(request: Request, limit: Limit) -> JSONResponse | None:
+    """None when the request may proceed, a 429 when it may not."""
+    ip = caller_ip(request)
+    if LIMITER.allow(limit, ip):
+        return None
+    logger.warning("rate limit hit on %s by %s", limit.name, ip)
+    return _too_many(limit)
 
 #: Metadata is public, immutable per deployment, and polled by every client
 #: on every connect. Five minutes of caching is the difference between a
@@ -147,6 +203,12 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
 
     @mcp.custom_route(REGISTER_PATH, methods=["POST"])
     async def register(request: Request) -> Response:
+        # Two limits, in cheapness order: the per-instance rate limit costs a
+        # dictionary lookup, the durable per-day cap inside `oauth.register`
+        # costs a query.
+        throttled = _rate_limited(request, REGISTER)
+        if throttled is not None:
+            return throttled
         try:
             body = await request.json()
         except ValueError:
@@ -166,8 +228,17 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
                 400,
             )
         try:
-            response = await oauth.register(body)
+            response = await oauth.register(body, ip=caller_ip(request))
         except OAuthError as exc:
+            if exc.retry_after:
+                return JSONResponse(
+                    exc.as_dict(),
+                    status_code=exc.status,
+                    headers={
+                        "Retry-After": str(exc.retry_after),
+                        "Cache-Control": "no-store",
+                    },
+                )
             return _no_store(exc.as_dict(), exc.status)
         except OAuthStoreError as exc:
             logger.warning("client registration failed: %s", exc)
@@ -192,6 +263,22 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
             return redirect
 
         params = dict(request.query_params)
+        # A CIMD client_id is a URL this server fetches, and this route is
+        # reachable without signing in. Rate limited on its own so it cannot
+        # be used as an anonymous fetcher; a registered `fpcl_` client never
+        # reaches the network and is never limited here.
+        if cimd.is_cimd_client_id((params.get("client_id") or "").strip()):
+            if not LIMITER.allow(CIMD_FETCH, caller_ip(request)):
+                logger.warning(
+                    "rate limit hit on the CIMD lookup by %s", caller_ip(request)
+                )
+                return _error_page(
+                    "Too many sign-in attempts",
+                    "That is a lot of sign-in requests from one place in a "
+                    "short time. Nothing was approved; wait a few minutes "
+                    "and try again.",
+                    429,
+                )
         try:
             client, validated = await oauth.read_authorize_request(params)
         except OAuthError as exc:
@@ -240,6 +327,14 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
                 "approved; try again in a minute.",
                 503,
             )
+
+        # This registration is now in front of a human, which is as good a
+        # reason to keep the row as the approval that may follow it: the
+        # sweep deletes registrations that never got this far, and a client
+        # that registered at install and is signing in days later must not
+        # be deleted while the consent page is on screen. Best effort -- a
+        # store hiccup here must not stop the page rendering.
+        await oauth.note_consent_shown(client.client_id)
 
         return HTMLResponse(
             page(
@@ -299,7 +394,9 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
             )
 
         try:
-            code = await oauth.issue_code(validated, identity.sub)
+            code = await oauth.issue_code(
+                validated, identity.sub, email=identity.email
+            )
         except OAuthStoreError as exc:
             logger.warning("could not issue an authorization code: %s", exc)
             return _error_page(
@@ -320,6 +417,9 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
 
     @mcp.custom_route(TOKEN_PATH, methods=["POST"])
     async def token(request: Request) -> Response:
+        throttled = _rate_limited(request, TOKEN)
+        if throttled is not None:
+            return throttled
         form = await _form(request)
         try:
             issued = await oauth.token(form, request.headers.get("authorization"))

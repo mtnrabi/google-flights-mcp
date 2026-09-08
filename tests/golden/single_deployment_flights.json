@@ -298,21 +298,29 @@
               "additionalProperties": true,
               "properties": {
                 "cheapest": {
-                  "additionalProperties": true,
-                  "description": "The lowest-priced of this destination's rows in `results`, or null when it has none.",
-                  "type": [
-                    "object",
-                    "null"
-                  ]
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The lowest-priced of this destination's rows in `results`, or null when it has none."
                 },
                 "dates": {
                   "additionalProperties": {
                     "additionalProperties": true,
                     "properties": {
                       "cheapest_price": {
-                        "type": [
-                          "number",
-                          "null"
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
                         ]
                       },
                       "reason": {
@@ -730,21 +738,29 @@
               "additionalProperties": true,
               "properties": {
                 "cheapest": {
-                  "additionalProperties": true,
-                  "description": "The lowest-priced of this destination's rows in `results`, or null when it has none.",
-                  "type": [
-                    "object",
-                    "null"
-                  ]
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The lowest-priced of this destination's rows in `results`, or null when it has none."
                 },
                 "dates": {
                   "additionalProperties": {
                     "additionalProperties": true,
                     "properties": {
                       "cheapest_price": {
-                        "type": [
-                          "number",
-                          "null"
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
                         ]
                       },
                       "reason": {

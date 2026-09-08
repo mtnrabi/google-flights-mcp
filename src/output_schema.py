@@ -192,13 +192,22 @@ _BY_DESTINATION: dict[str, Any] = {
                 "type": "array",
                 "items": {"type": "object", "additionalProperties": True},
             },
+            # `anyOf` with one type per branch, not `"type": ["object",
+            # "null"]`. Both are valid JSON Schema and mean the same thing,
+            # but a type ARRAY is the form tools in the wild handle worst:
+            # the MCP Inspector flags it, and several client-side validators
+            # and code generators read only the first entry -- which would
+            # make a legitimate `null` here look like a schema violation to
+            # the caller. The wire format does not change at all.
             "cheapest": {
-                "type": ["object", "null"],
                 "description": (
                     "The lowest-priced of this destination's rows in "
                     "`results`, or null when it has none."
                 ),
-                "additionalProperties": True,
+                "anyOf": [
+                    {"type": "object", "additionalProperties": True},
+                    {"type": "null"},
+                ],
             },
             "searched": {
                 "type": "boolean",
@@ -226,7 +235,9 @@ _BY_DESTINATION: dict[str, Any] = {
                             "enum": list(DESTINATION_REASONS),
                         },
                         "row_count": {"type": "integer", "minimum": 0},
-                        "cheapest_price": {"type": ["number", "null"]},
+                        "cheapest_price": {
+                            "anyOf": [{"type": "number"}, {"type": "null"}]
+                        },
                     },
                     "additionalProperties": True,
                 },

@@ -164,10 +164,30 @@ def markdown_to_html(source: str) -> str:
     return "\n".join(out)
 
 
+#: The tab icon, inline rather than a file.
+#:
+#: Every browser that opens /connect, /privacy or the consent page asks for a
+#: favicon, and every one of those asks was a 404 in the logs -- noise that
+#: makes a real 404 harder to see, and a blank tab next to a page that is
+#: asking a user to paste an API key. 300 bytes of SVG served from the same
+#: process is the whole fix: no binary in the repo, no build step, and
+#: nothing extra in the Vercel bundle.
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="7" fill="#1f6feb"/>'
+    '<path d="M7 17.6l17.5-8.2c.9-.4 1.8.5 1.4 1.4l-8.2 17.5c-.4.9-1.7.8-2-.2'
+    'l-2-6.3-6.3-2c-1-.3-1.1-1.6-.2-2z" fill="#fff"/>'
+    "</svg>"
+)
+
+_HEAD_ICON = '<link rel="icon" href="/favicon.svg" type="image/svg+xml">'
+
+
 def page(title: str, body_html: str) -> str:
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"{_HEAD_ICON}"
         f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head>"
         f"<body>{_NAV}{body_html}</body></html>"
     )

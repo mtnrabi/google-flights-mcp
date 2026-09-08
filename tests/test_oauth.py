@@ -452,6 +452,38 @@ class TestTheWholeFlow:
             assert second["access_token"] != access
             assert second["refresh_token"] != refresh
 
+            # The first access token is untouched by a rotation ALONE: it
+            # expires on its own clock, which is what lets a client refresh
+            # early without dropping an in-flight call.
+            live.upstream.keys_seen.clear()
+            still = await call_tool(
+                http,
+                MCP_OAUTH_PATH,
+                SEARCH_ARGS,
+                {"authorization": f"Bearer {access}"},
+            )
+            assert still["result_count"] == 1
+
+            # A rotated refresh token coming back ONCE, seconds later, is
+            # read as the retry it almost always is: the same pair the
+            # rotation already issued, created nothing new (day 3's grace
+            # window). It also spends the one benign replay.
+            retried = await http.post(
+                "/oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "client_id": client_id,
+                },
+            )
+            assert retried.status_code == 200
+            assert retried.json()["refresh_token"] == second["refresh_token"]
+
+            # Coming back a SECOND time is the one thing that DOES take the
+            # family. A rotated token replayed after the retry window means
+            # either a client in a loop or a copy in somebody else's hands,
+            # and day 3 assumes the second: same invalid_grant, plus the
+            # whole family.
             replayed = await http.post(
                 "/oauth/token",
                 data={
@@ -463,19 +495,15 @@ class TestTheWholeFlow:
             assert replayed.status_code == 400
             assert replayed.json()["error"] == "invalid_grant"
 
-            # The first access token is untouched by a rotation: it expires
-            # on its own clock, which is what lets a client refresh early
-            # without dropping an in-flight call.
-            live.upstream.keys_seen.clear()
-            still = await call_tool(
-                http,
+            gone = await http.post(
                 MCP_OAUTH_PATH,
-                SEARCH_ARGS,
-                {"authorization": f"Bearer {access}"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={**MCP_HEADERS, "authorization": f"Bearer {access}"},
             )
-            assert still["result_count"] == 1
+            assert gone.status_code == 401
 
-            # 10. Revocation, and the 401 that follows it.
+            # 10. Revocation of an already-dead token still answers 200
+            #     (RFC 7009 2.2), and the endpoint stays a 401.
             revoked = await http.post(
                 "/oauth/revoke",
                 data={"token": second["access_token"], "client_id": client_id},

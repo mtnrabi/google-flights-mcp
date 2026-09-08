@@ -77,13 +77,15 @@ from .credentials import (
 )
 from .keystore import PROVIDER_GOOGLE, KeyStoreError
 from .oauth import (
+    EMAIL_HEADER,
     MCP_OAUTH_PATH,
     PROVIDER_HEADER,
     SUBJECT_HEADER,
     build_oauth_support,
 )
-from .oauthroutes import register_oauth_routes
+from .oauthroutes import caller_ip, register_oauth_routes
 from .oauthstore import OAuthStoreError
+from . import ratelimit
 from .webauth import (
     COOKIE_PATH,
     OAUTH_COOKIE,
@@ -92,7 +94,13 @@ from .webauth import (
     SESSION_TTL_SECONDS,
     WebAuthError,
 )
-from .legal import CONTACT_EMAIL, index_html, support_html, render_document
+from .legal import (
+    CONTACT_EMAIL,
+    FAVICON_SVG,
+    index_html,
+    render_document,
+    support_html,
+)
 from .hotels_client import (
     VALID_FILTERS,
     HotelsClient,
@@ -1146,16 +1154,27 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     STORE_MISS_SOURCES = ("store:disconnected", "store:oauth_no_key")
 
     def _reconnect_message(
-        signup: str, api_name: str, source: str = "store:disconnected"
+        signup: str,
+        api_name: str,
+        source: str = "store:disconnected",
+        email: str = "",
     ) -> dict[str, Any]:
-        """The reply for an identified caller with no usable stored key."""
+        """The reply for an identified caller with no usable stored key.
+
+        `email` is the account the OAuth token was approved by, injected by
+        the gate after that token validated. Naming it matters more than it
+        looks: the failure this reply describes is almost always "signed in
+        with one Google account, pasted the key under another", and a message
+        that does not say which account leaves the user to guess.
+        """
         connect_url = f"{site_origin}/connect"
         if source == "store:oauth_no_key":
+            who = f" as {email}" if email else ""
             message = (
-                "You are signed in, but no RapidAPI key is connected to this "
-                f"account yet. Open {connect_url}, sign in with the same "
-                "Google account, and paste your RapidAPI key once. Nothing "
-                "was searched and nothing was billed."
+                f"You are signed in{who}, but no RapidAPI key is connected to "
+                f"this account yet. Paste your RapidAPI key once at "
+                f"{connect_url} -- sign in there with the same Google account. "
+                "Nothing was searched and nothing was billed."
             )
         else:
             message = (
@@ -1165,6 +1184,23 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "paste your key again. Nothing was searched and nothing was "
                 "billed."
             )
+        if source == "store:oauth_no_key":
+            # NOT the three-step header ladder. This caller has already
+            # authenticated; telling them to put a key in a header or a query
+            # parameter describes a different way of using this server than
+            # the one they are using, and the model would relay it verbatim.
+            how = [
+                f"1. Get a RapidAPI key (free tier available): subscribe to "
+                f"the {api_name} at {signup}.",
+                f"2. Open {connect_url}, sign in with the same Google account "
+                "you signed in with here, and paste the key once. Nothing "
+                "else to change: this connection starts working immediately.",
+                "3. Usage counts against your own RapidAPI plan, not ours: "
+                "every response reports what the call spent and what is left, "
+                "in `api_usage`.",
+            ]
+        else:
+            how = key_howto_block(signup, api_name)["how"]
         return {
             "needs_api_key": True,
             "results": [],
@@ -1174,7 +1210,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "how_to_get_a_key": {
                 "connect_url": connect_url,
                 "signup_url": signup,
-                "how": key_howto_block(signup, api_name)["how"],
+                "how": how,
             },
         }
 
@@ -1235,7 +1271,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
             if credential.source in STORE_MISS_SOURCES:
                 return _reconnect_message(
-                    flights_signup, upstream_api_name("flights"), credential.source
+                    flights_signup,
+                    upstream_api_name("flights"),
+                    credential.source,
+                    email=(headers.get(EMAIL_HEADER) or "").strip(),
                 )
             return {
                 "needs_api_key": True,
@@ -1859,7 +1898,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if not credential.present:
             if credential.source in STORE_MISS_SOURCES:
                 return _reconnect_message(
-                    hotels_signup, upstream_api_name("hotels"), credential.source
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                    credential.source,
+                    email=(headers.get(EMAIL_HEADER) or "").strip(),
                 )
             return {
                 "needs_api_key": True,
@@ -2207,6 +2249,27 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         """Both platforms require reachable support details."""
         return HTMLResponse(support_html(settings.products))
 
+    @mcp.custom_route("/favicon.svg", methods=["GET"])
+    async def favicon_svg(_request: Request) -> Response:
+        """The tab icon every page in `<head>` points at."""
+        return Response(
+            FAVICON_SVG,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @mcp.custom_route("/favicon.ico", methods=["GET"])
+    async def favicon_ico(_request: Request) -> Response:
+        """204, not a 404 and not an icon.
+
+        A browser that has read our `<link rel="icon">` never asks for this;
+        the ones that ask are the ones that ask before parsing, plus every
+        crawler. `204 No Content` is the honest answer -- there is no .ico
+        here -- and it keeps the access log free of 404s that would otherwise
+        hide a real one.
+        """
+        return Response(status_code=204)
+
     # ── /connect ─────────────────────────────────────────────────────────
     # Registered only when the feature is configured. An unconfigured
     # deployment 404s these paths exactly as it does today, which is the
@@ -2366,7 +2429,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return response
 
         async def _render_signed_in(
-            identity, *, notice: str = "", error: str = ""
+            identity,
+            *,
+            notice: str = "",
+            error: str = "",
+            status: int = 200,
+            headers: dict[str, str] | None = None,
         ) -> Response:
             try:
                 summary = await connect.store.summary(identity.sub)
@@ -2395,7 +2463,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     csrf=connect.csrf(identity.sub),
                     notice=notice,
                     error=error,
-                )
+                ),
+                status_code=status,
+                headers=headers or {},
             )
 
         @mcp.custom_route("/connect/save", methods=["POST"])
@@ -2403,6 +2473,33 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             identity = connect.auth.read_session(request.cookies.get(SESSION_COOKIE))
             if identity is None:
                 return RedirectResponse("/connect", status_code=303)
+            # Every save spends one real request from the user's own RapidAPI
+            # plan (the validation call), so this limit protects their money
+            # as much as our egress. Keyed on the signed-in Google account,
+            # not the address: the caller has already authenticated, so the
+            # account is the better identity, and an office behind one NAT
+            # would otherwise share ten saves an hour between everybody in
+            # it. The address is only the fallback for a session with no sub,
+            # which this route cannot actually reach.
+            bucket = (
+                f"sub:{identity.sub}"
+                if identity.sub
+                else caller_ip(request)
+            )
+            if not ratelimit.LIMITER.allow(ratelimit.CONNECT_SAVE, bucket):
+                logger.warning("rate limit hit on /connect/save by %s", bucket)
+                return await _render_signed_in(
+                    identity,
+                    error=(
+                        "That is a lot of saves in a short time. Nothing was "
+                        "saved and no request was spent -- wait an hour and "
+                        "try again."
+                    ),
+                    status=429,
+                    headers={
+                        "Retry-After": str(ratelimit.CONNECT_SAVE.retry_after())
+                    },
+                )
             form = await request.form()
             if not connect.csrf_ok(identity.sub, str(form.get("csrf", ""))):
                 return await _render_signed_in(

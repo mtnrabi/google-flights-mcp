@@ -91,6 +91,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
+from . import cimd
 from .keystore import PROVIDER_GOOGLE
 from .oauthstore import (
     AuthCode,
@@ -101,6 +102,7 @@ from .oauthstore import (
     build_oauth_store,
     hash_secret,
 )
+from .ratelimit import UNKNOWN_IP
 from .webauth import WebAuthError, sign_payload, verify_payload
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,133 @@ REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 3600
 #: standing authorisation.
 CONSENT_TTL_SECONDS = 15 * 60
 
+# ── registration hygiene (day 3) ─────────────────────────────────────────
+# Registration is open, because the MCP spec requires it and because a
+# client_id on its own authorises nothing. Open is not the same as unlimited:
+# anyone who can POST can make a row, and rows nobody cleans up are how a
+# small table becomes an incident. Three mechanisms, deliberately different
+# in kind:
+#
+#   * a per-instance RATE limit (src/ratelimit.py) -- cheap, spoofable, first;
+#   * these DURABLE per-day caps, counted in Postgres, so every instance
+#     agrees on the number;
+#   * a SWEEP that deletes registrations which never became an
+#     authorization, so the caps are counted against a table that does not
+#     silently fill with abandoned rows.
+#
+#: Registrations from one address in a rolling day. Generous: a NAT, a CI
+#: runner or one directory registering on behalf of many users all share an
+#: address, and refusing those is a worse failure than the one being
+#: prevented.
+DCR_MAX_PER_IP_PER_DAY = 30
+#: Registrations from everyone in a rolling day. A real day on this server is
+#: single digits, so this number looks absurd -- and that is the point. A
+#: global cap set anywhere near real traffic is not a defence, it is a lever:
+#: whoever can vary the address the per-address cap is keyed on walks the
+#: global counter up in minutes, and from then on every legitimate
+#: `/oauth/register` -- a new Claude, Cursor or Smithery user -- gets 429 for
+#: a day. The cheap defence would have become a denial of service with a
+#: 24-hour tail. So the per-address cap stays as the one that bites, this one
+#: is only a backstop against a table growing without bound, and the number
+#: that gets a human's attention is the WARN threshold below, which logs and
+#: refuses nothing.
+DCR_MAX_PER_DAY = 5_000
+#: Registrations in a rolling day that mean "look at this". Not a refusal:
+#: crossing it logs, once per registration past the line, and that is all.
+DCR_WARN_PER_DAY = 500
+#: A registration that no human has approved within this long is litter.
+#: Seven days, not one: MCP clients commonly register when they are installed
+#: and are authorized whenever the person next opens the app, and a sweep
+#: that runs a day after registration deletes rows that were about to be
+#: used. The row is a name and a redirect URI; keeping it a week costs
+#: nothing next to signing somebody out mid-flow.
+STALE_CLIENT_SECONDS = 7 * 24 * 3600
+#: How often one instance will spend two DELETEs on housekeeping.
+SWEEP_INTERVAL_SECONDS = 15 * 60
+
+
+#: When this instance last swept. Module-level because it is a property of
+#: the process, not of one product's OAuthSupport -- both products share one
+#: database and sweeping it twice is wasted work.
+_SWEEP_STATE = {"last": 0.0}
+
+
+def reset_sweep_clock() -> None:
+    """Make the next registration sweep. For tests and for a fresh process."""
+    _SWEEP_STATE["last"] = 0.0
+
+
+# ── the refresh-retry grace window ───────────────────────────────────────
+# Rotation plus reuse detection is the right shape (OAuth 2.1 §4.14.2) and it
+# has one ugly edge: a client whose refresh response never arrived retries
+# the token it still has, we see a rotated token coming back, and the whole
+# family dies. The user is signed out by a dropped packet.
+#
+# So the FIRST replay of the token we just rotated, within a few seconds and
+# from the same client, is answered with the pair that request already
+# produced -- an idempotent retry, not a new grant. It creates no token, and
+# it is a race an attacker cannot rely on: they would have to present a
+# stolen refresh token inside the same ten seconds as the honest client's
+# retry, and the honest client's pair is what they would get. Anything later,
+# or a second replay, is the real thing and still kills the family.
+#
+#: How long a rotated refresh token may come back and be answered instead of
+#: revoked.
+REFRESH_REPLAY_GRACE_SECONDS = 10
+#: Per PROCESS, and deliberately not in the database: this is a nicety for a
+#: retry that happens milliseconds later, and a Vercel instance that does not
+#: have the entry simply falls through to reuse detection, which is the
+#: conservative answer. Nothing is weakened by a miss.
+_REPLAY_MAX = 512
+_REPLAY: dict[str, tuple[float, str, dict[str, Any]]] = {}
+
+
+def reset_replay_grace() -> None:
+    """Forget every in-flight retry. For tests and for a fresh process."""
+    _REPLAY.clear()
+
+
+def _remember_rotation(
+    token_hash: str, client_id: str, issued: dict[str, Any], now: float
+) -> None:
+    if len(_REPLAY) >= _REPLAY_MAX:
+        for key, (deadline, _, _) in list(_REPLAY.items()):
+            if deadline <= now:
+                del _REPLAY[key]
+        if len(_REPLAY) >= _REPLAY_MAX:
+            # A dictionary that grows without limit is its own denial of
+            # service, and losing the grace window only costs a retry.
+            _REPLAY.clear()
+    _REPLAY[token_hash] = (now + REFRESH_REPLAY_GRACE_SECONDS, client_id, issued)
+
+
+def _take_replay(
+    token_hash: str, client_id: str, now: float
+) -> dict[str, Any] | None:
+    """The pair this token already produced, once, inside the window."""
+    entry = _REPLAY.pop(token_hash, None)  # popped: once, whatever happens
+    if entry is None:
+        return None
+    deadline, owner, issued = entry
+    if now >= deadline or not hmac.compare_digest(owner, client_id):
+        return None
+    return issued
+
+
+def _cap(name: str, default: int) -> int:
+    """A registration cap, overridable by env so ops can loosen one without
+    a deploy. A malformed value keeps the default rather than turning the cap
+    off, because "0" and "not a number" must not mean "unlimited"."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; keeping %d", name, raw, default)
+        return default
+    return value if value > 0 else default
+
 #: Injected by the gate after a token validates, and STRIPPED from every
 #: inbound request before anything else runs. The strip is what makes the
 #: injection trustworthy: without it, any caller could send these headers to
@@ -163,7 +292,12 @@ def header_safe(value: str) -> str:
 SUBJECT_HEADER = "x-fp-oauth-subject"
 PROVIDER_HEADER = "x-fp-oauth-provider"
 CLIENT_HEADER = "x-fp-oauth-client"
-IDENTITY_HEADERS = (SUBJECT_HEADER, PROVIDER_HEADER, CLIENT_HEADER)
+#: The address the token was approved by, so a signed-in caller with no key
+#: can be told which account they are signed in as. Stripped from inbound
+#: requests with the rest: it is displayed back to a user, and a value a
+#: caller could set is a value a caller could use to make our own reply lie.
+EMAIL_HEADER = "x-fp-oauth-email"
+IDENTITY_HEADERS = (SUBJECT_HEADER, PROVIDER_HEADER, CLIENT_HEADER, EMAIL_HEADER)
 
 
 class OAuthError(Exception):
@@ -177,13 +311,16 @@ class OAuthError(Exception):
 
     def __init__(
         self, code: str, description: str = "", *, redirectable: bool = True,
-        status: int = 400,
+        status: int = 400, retry_after: int = 0,
     ) -> None:
         super().__init__(description or code)
         self.code = code
         self.description = description
         self.redirectable = redirectable
         self.status = status
+        #: Seconds, for a `Retry-After` header. Only a refusal that a caller
+        #: can usefully repeat later sets it.
+        self.retry_after = retry_after
 
     def as_dict(self) -> dict[str, str]:
         body = {"error": self.code}
@@ -295,6 +432,12 @@ class OAuthSupport:
                 "client_secret_basic",
             ],
             "code_challenge_methods_supported": ["S256"],
+            # A client_id that is an https URL we can fetch, instead of one
+            # we minted. Smithery asks for this before it will proxy a remote
+            # OAuth server, and it is how a client avoids leaving a row in
+            # our table per install. DCR is still offered above; this is an
+            # additional shape, not a replacement. See src/cimd.py.
+            "client_id_metadata_document_supported": True,
             "service_documentation": f"{self.issuer}/",
             "op_policy_uri": f"{self.issuer}/privacy",
             "op_tos_uri": f"{self.issuer}/terms",
@@ -328,7 +471,144 @@ class OAuthSupport:
 
     # ── dynamic client registration ──────────────────────────────────────
 
-    async def register(self, body: dict[str, Any]) -> dict[str, Any]:
+    # ── the client behind a client_id ─────────────────────────────────────
+
+    async def lookup_client(
+        self, client_id: str, redirect_uri: str = ""
+    ) -> OAuthClient | None:
+        """The client for this `client_id`, from our table or from its URL.
+
+        Two shapes, told apart by the id itself: `fpcl_…` is a row we wrote
+        at registration, an https URL is a Client ID Metadata Document we
+        fetch and validate now (src/cimd.py). Nothing else is accepted, so a
+        client that registered the old way keeps behaving exactly as it did.
+
+        `redirect_uri` is checked against the DOCUMENT here rather than left
+        to the caller, because for a CIMD client the document is the only
+        registration there is: skipping it would let anyone who knows a CIMD
+        URL have that client's codes delivered somewhere else.
+        """
+        if not cimd.is_cimd_client_id(client_id):
+            return await self.store.get_client(client_id)
+        try:
+            document = await cimd.load(client_id)
+            uris = cimd.redirect_uris(document)
+        except cimd.CimdError as exc:
+            logger.info("CIMD client_id %s refused: %s", client_id, exc)
+            raise OAuthError(
+                "invalid_client", str(exc), redirectable=False, status=400
+            ) from exc
+        allowed = tuple(u for u in uris if _redirect_uri_allowed(u))
+        if not allowed:
+            raise OAuthError(
+                "invalid_client",
+                "the client metadata document lists no usable redirect_uris",
+                redirectable=False,
+            )
+        if redirect_uri and redirect_uri not in allowed:
+            raise OAuthError(
+                "invalid_request",
+                "that redirect_uri is not listed in the client metadata document",
+                redirectable=False,
+            )
+        return OAuthClient(
+            client_id=client_id,
+            client_name=cimd.client_name(document, client_id),
+            redirect_uris=allowed,
+            token_endpoint_auth_method="none",
+            scope=str(document.get("scope") or DEFAULT_SCOPE),
+            client_secret_hash="",
+            created_at=time.time(),
+            metadata={},
+            ephemeral=True,
+        )
+
+    # ── dynamic client registration ──────────────────────────────────────
+
+    async def _sweep(self, now: float) -> None:
+        """Housekeeping, at most once every SWEEP_INTERVAL per instance.
+
+        Hung off registration rather than a cron because this deployment has
+        no scheduler and adding one for two DELETEs would be the bigger
+        change. Registration is the only endpoint that GROWS the tables, so
+        it is the honest place to pay for cleaning them.
+
+        Best effort throughout: a sweep that fails must never turn a valid
+        registration into an error.
+        """
+        if now - _SWEEP_STATE["last"] < SWEEP_INTERVAL_SECONDS:
+            return
+        # Stamped BEFORE the work, so a store that is failing does not get a
+        # sweep attempt per registration.
+        _SWEEP_STATE["last"] = now
+        try:
+            expired = await self.store.purge_expired(now)
+            stale = await self.store.purge_stale_clients(now - STALE_CLIENT_SECONDS)
+        except OAuthStoreError as exc:
+            logger.warning("OAuth sweep failed: %s", exc)
+            return
+        if expired or stale:
+            logger.info(
+                "OAuth sweep removed %d expired code(s)/token(s) and %d "
+                "unused client registration(s)",
+                expired,
+                stale,
+            )
+
+    async def _check_registration_caps(self, ip: str, now: float) -> None:
+        """The durable half of the registration limit.
+
+        Counted in Postgres, so every Vercel instance sees the same number --
+        unlike the per-instance rate limiter, which is the cheap first line.
+        Both are needed: the rate limiter stops a burst, this stops a slow
+        drip that would otherwise fill the table over a day.
+        """
+        since = now - 24 * 3600
+        per_day = _cap("MCP_OAUTH_DCR_MAX_PER_DAY", DCR_MAX_PER_DAY)
+        per_ip = _cap("MCP_OAUTH_DCR_MAX_PER_IP_PER_DAY", DCR_MAX_PER_IP_PER_DAY)
+        warn_per_day = _cap("MCP_OAUTH_DCR_WARN_PER_DAY", DCR_WARN_PER_DAY)
+        # `unknown` is the shared bucket for callers whose address the
+        # platform did not give us (`ratelimit.client_ip`). Counting a
+        # durable per-address cap against it would mean one missing header on
+        # the edge locks every registration on the server out for a day, so
+        # it is treated as "no address": the rate limiter still buckets them
+        # together, and the global backstop still applies.
+        if ip and ip != UNKNOWN_IP:
+            from_here = await self.store.count_clients_since(since, ip)
+            if from_here >= per_ip:
+                logger.warning(
+                    "registration cap: %s has registered %d client(s) today",
+                    ip,
+                    from_here,
+                )
+                raise OAuthError(
+                    "temporarily_unavailable",
+                    "too many client registrations from this address today; "
+                    "try again later",
+                    status=429,
+                    retry_after=3600,
+                )
+        total = await self.store.count_clients_since(since)
+        if warn_per_day <= total < per_day:
+            logger.warning(
+                "registration volume: %d client registration(s) in the last "
+                "24h, above the %d that a normal day looks like",
+                total,
+                warn_per_day,
+            )
+        if total >= per_day:
+            logger.warning("registration cap: %d registrations today", total)
+            raise OAuthError(
+                "temporarily_unavailable",
+                "this server is not accepting new client registrations right "
+                "now; try again later",
+                status=429,
+                retry_after=3600,
+            )
+
+    async def register(
+        self, body: dict[str, Any], ip: str = "", now: float | None = None
+    ) -> dict[str, Any]:
         """RFC 7591. Returns the registration response to send back.
 
         Open registration, which the MCP spec requires and which is safe
@@ -336,7 +616,12 @@ class OAuthSupport:
         Every flow through it still ends at a consent page that a human has
         to be signed into Google to see and has to press a button on. The
         row is a name and a redirect URI, not a permission.
+
+        Open, capped and swept: see `_check_registration_caps` and `_sweep`.
         """
+        now = now if now is not None else time.time()
+        await self._sweep(now)
+        await self._check_registration_caps(ip, now)
         uris = body.get("redirect_uris")
         if not isinstance(uris, list) or not uris:
             raise OAuthError(
@@ -386,7 +671,8 @@ class OAuthSupport:
             token_endpoint_auth_method=method,
             scope=str(body.get("scope") or DEFAULT_SCOPE),
             client_secret_hash=hash_secret(secret) if secret else "",
-            created_at=time.time(),
+            created_at=now,
+            registered_ip=(ip or "")[:64],
             metadata={
                 k: v
                 for k, v in body.items()
@@ -434,7 +720,9 @@ class OAuthSupport:
                 "invalid_request", "client_id is missing", redirectable=False
             )
         try:
-            client = await self.store.get_client(client_id)
+            client = await self.lookup_client(
+                client_id, (params.get("redirect_uri") or "").strip()
+            )
         except OAuthStoreError as exc:
             logger.warning("client lookup failed: %s", exc)
             raise OAuthError(
@@ -537,7 +825,11 @@ class OAuthSupport:
     # ── issuing ──────────────────────────────────────────────────────────
 
     async def issue_code(
-        self, request: dict[str, str], sub: str, now: float | None = None
+        self,
+        request: dict[str, str],
+        sub: str,
+        now: float | None = None,
+        email: str = "",
     ) -> str:
         now = now if now is not None else time.time()
         code = mint(CODE_PREFIX)
@@ -552,9 +844,45 @@ class OAuthSupport:
                 provider=PROVIDER_GOOGLE,
                 resource=request.get("resource", self.resource_url),
                 expires_at=now + CODE_TTL_SECONDS,
+                user_email=email,
             )
         )
+        # This registration has now been approved by a human, so the sweep
+        # must never take it. A CIMD client has no row to stamp.
+        if not cimd.is_cimd_client_id(request["client_id"]):
+            try:
+                await self.store.mark_client_authorized(request["client_id"], now)
+            except OAuthStoreError as exc:
+                # Bookkeeping, not the grant. The NOT EXISTS clauses in the
+                # sweep already protect a client that has a code or a token.
+                logger.warning("could not stamp client as authorized: %s", exc)
         return code
+
+    async def note_consent_shown(
+        self, client_id: str, now: float | None = None
+    ) -> None:
+        """A consent page for this client is being put in front of a human.
+
+        Same stamp the approval writes, moved earlier for one reason: the
+        sweep deletes registrations with no code, no token and no stamp, and
+        until this existed the only stamp happened when Approve was pressed.
+        A client that registered at install and signs in a week later spent
+        the whole consent page inside a window where the sweep could take its
+        row -- and the exchange that followed would fail `invalid_client`
+        with nothing in the logs naming the cause.
+
+        Best effort, like the stamp in `issue_code`: this is bookkeeping, and
+        a store hiccup must not stop a page rendering. A CIMD client has no
+        row to stamp.
+        """
+        if not client_id or cimd.is_cimd_client_id(client_id):
+            return
+        try:
+            await self.store.mark_client_authorized(
+                client_id, now if now is not None else time.time()
+            )
+        except OAuthStoreError as exc:
+            logger.warning("could not stamp client at the consent page: %s", exc)
 
     async def _issue_tokens(
         self,
@@ -565,9 +893,15 @@ class OAuthSupport:
         scope: str,
         resource: str,
         now: float,
+        email: str = "",
+        family_id: str = "",
     ) -> dict[str, Any]:
         access = mint(ACCESS_TOKEN_PREFIX)
         refresh = mint(REFRESH_TOKEN_PREFIX)
+        # One family per authorization, carried across every rotation. It is
+        # what makes "revoke the whole line" a single statement when a
+        # rotated refresh token comes back.
+        family = family_id or new_family()
         await self.store.put_token(
             TokenRecord(
                 token_hash=hash_secret(access),
@@ -578,6 +912,8 @@ class OAuthSupport:
                 scope=scope,
                 resource=resource,
                 expires_at=now + ACCESS_TOKEN_TTL_SECONDS,
+                user_email=email,
+                family_id=family,
             )
         )
         await self.store.put_token(
@@ -590,6 +926,8 @@ class OAuthSupport:
                 scope=scope,
                 resource=resource,
                 expires_at=now + REFRESH_TOKEN_TTL_SECONDS,
+                user_email=email,
+                family_id=family,
             )
         )
         return {
@@ -638,7 +976,14 @@ class OAuthSupport:
         if not client_id:
             raise OAuthError("invalid_client", "client_id is missing", status=401)
         try:
-            client = await self.store.get_client(client_id)
+            client = await self.lookup_client(client_id)
+        except OAuthError as exc:
+            # A CIMD document that stopped resolving between authorize and
+            # the exchange. `invalid_client` with the document's reason, at
+            # 401 like every other client-authentication failure here.
+            raise OAuthError(
+                "invalid_client", exc.description or exc.code, status=401
+            ) from exc
         except OAuthStoreError as exc:
             logger.warning("client lookup failed at the token endpoint: %s", exc)
             raise OAuthError(
@@ -717,6 +1062,7 @@ class OAuthSupport:
             scope=record.scope,
             resource=record.resource,
             now=now,
+            email=record.user_email,
         )
 
     async def _refresh_token_grant(
@@ -725,8 +1071,22 @@ class OAuthSupport:
         presented = (form.get("refresh_token") or "").strip()
         if not presented:
             raise OAuthError("invalid_request", "refresh_token is missing")
-        record = await self.store.get_token(hash_secret(presented), "refresh", now=now)
+        presented_hash = hash_secret(presented)
+        record = await self.store.get_token(presented_hash, "refresh", now=now)
         if record is None:
+            # Before assuming theft: the same client asking again, seconds
+            # after we rotated this token, is a retry of a response it never
+            # received. Answer it with the pair that request produced. See
+            # REFRESH_REPLAY_GRACE_SECONDS.
+            retry = _take_replay(presented_hash, client.client_id, now)
+            if retry is not None:
+                logger.info(
+                    "refresh retry inside the grace window for client %s; "
+                    "returning the pair that rotation already issued",
+                    client.client_id,
+                )
+                return retry
+            await self._detect_reuse(presented_hash, client, now)
             raise OAuthError(
                 "invalid_grant", "that refresh token is unknown, revoked or expired"
             )
@@ -747,12 +1107,60 @@ class OAuthSupport:
             scope=record.scope,
             resource=record.resource,
             now=now,
+            email=record.user_email,
+            family_id=record.family_id,
         )
-        # Rotation: the presented refresh token dies here. Deleted after the
-        # new pair is written, so a crash in between leaves the user with a
-        # token that still works rather than none at all.
-        await self.store.revoke_token(record.token_hash)
+        # Rotation: the presented refresh token stops working here. Rotated
+        # after the new pair is written, so a crash in between leaves the
+        # user with a token that still works rather than none at all.
+        #
+        # STAMPED, not deleted (day 3). A deleted row and a token that never
+        # existed are indistinguishable, and the difference is the whole
+        # signal: a rotated refresh token coming back means either a client
+        # that lost the response or a copy in somebody else's hands, and
+        # OAuth 2.1 §4.14.2 says to assume the second.
+        await self.store.rotate_token(record.token_hash, now)
+        _remember_rotation(record.token_hash, client.client_id, issued, now)
         return issued
+
+    async def _detect_reuse(
+        self, token_hash: str, client: OAuthClient, now: float
+    ) -> None:
+        """A refresh token that was already rotated, presented again.
+
+        The response is the same `invalid_grant` either way -- this is about
+        what happens to the OTHER tokens. Every token descended from that one
+        authorization is deleted, so an attacker replaying a stolen refresh
+        token cannot keep the access token they got with it, and the real
+        user's next call fails in a way that makes them sign in again.
+
+        The honest retry -- a client asking again for a response it never
+        received -- is caught before this function runs, by the few-second
+        grace window in `_refresh_token_grant`. What reaches here is a
+        rotated token coming back late, or coming back twice, and there the
+        safe reading is theft: a stolen refresh token is indistinguishable
+        from a retried one, and OAuth 2.1 §4.14.2 says to assume the first.
+        """
+        try:
+            stale = await self.store.get_token_any(token_hash, "refresh")
+        except OAuthStoreError as exc:
+            logger.warning("reuse check could not read the store: %s", exc)
+            return
+        if stale is None or stale.revoked_at is None:
+            return
+        logger.warning(
+            "refresh token reuse detected for client %s (sub=%s); revoking "
+            "the whole token family",
+            client.client_id,
+            stale.user_sub,
+        )
+        try:
+            dropped = await self.store.revoke_family(stale.family_id)
+        except OAuthStoreError as exc:
+            logger.warning("could not revoke the token family: %s", exc)
+            return
+        if dropped:
+            logger.warning("revoked %d token(s) after refresh reuse", dropped)
 
     async def revoke(self, form: dict[str, str], authorization: str | None = None) -> None:
         """RFC 7009. Always succeeds from the client's point of view.
@@ -762,7 +1170,7 @@ class OAuthSupport:
         "the token is not valid" is the outcome they asked for anyway.
         """
         try:
-            await self._authenticate_client(form, authorization)
+            client = await self._authenticate_client(form, authorization)
         except OAuthError:
             # A revoke with bad client credentials still must not tell the
             # caller anything. Nothing is revoked; nothing is disclosed.
@@ -770,8 +1178,37 @@ class OAuthSupport:
         token = (form.get("token") or "").strip()
         if not token:
             return
+        token_hash = hash_secret(token)
+        kind = "refresh" if token.startswith(REFRESH_TOKEN_PREFIX) else "access"
         try:
-            await self.store.revoke_token(hash_secret(token))
+            # RFC 7009 §2.1: the server "validates whether the token was
+            # issued to the client making the revocation request". Without
+            # that check, any client holding somebody else's token can sign
+            # that user out -- and since revoking a refresh token now takes
+            # the whole family, the blast radius is a whole authorization
+            # rather than one token. The answer stays 200 either way: §2.2's
+            # silence rule does not stop applying because we said no.
+            record = await self.store.get_token_any(token_hash, kind)
+            if record is not None and record.client_id != client.client_id:
+                logger.warning(
+                    "client %s tried to revoke a token issued to %s",
+                    client.client_id,
+                    record.client_id,
+                )
+                return
+            # Revoking a refresh token SHOULD revoke the access tokens issued
+            # with it. The family id is exactly that set, so one statement
+            # does it -- and it also means a client that logs out cannot
+            # leave a live access token behind.
+            family = (
+                record.family_id
+                if record is not None and kind == "refresh"
+                else ""
+            )
+            if family:
+                await self.store.revoke_family(family)
+            else:
+                await self.store.revoke_token(token_hash)
         except OAuthStoreError as exc:
             logger.warning("revocation failed: %s", exc)
 
@@ -997,6 +1434,7 @@ class OAuthResourceGate:
             (SUBJECT_HEADER.encode("ascii"), header_safe(record.user_sub).encode("ascii")),
             (PROVIDER_HEADER.encode("ascii"), header_safe(record.provider).encode("ascii")),
             (CLIENT_HEADER.encode("ascii"), header_safe(record.client_id).encode("ascii")),
+            (EMAIL_HEADER.encode("ascii"), header_safe(record.user_email).encode("ascii")),
         ]
         await self.app(scope, receive, send)
 
@@ -1106,3 +1544,8 @@ def redirect_with(base: str, params: dict[str, str]) -> str:
 
 def new_state() -> str:
     return secrets.token_urlsafe(16)
+
+
+def new_family() -> str:
+    """The id every token descended from one authorization shares."""
+    return "fam_" + secrets.token_urlsafe(16)
