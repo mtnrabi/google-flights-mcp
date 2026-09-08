@@ -1,4 +1,4 @@
-# Google Flights MCP — real-time fares your agent can search across a whole date range, ad-free
+# Google Flights MCP: real-time fares your agent can search across a whole date range, ad-free
 
 ```bash
 claude mcp add --transport http google-flights https://google-flights-mcp.flightpowers.com/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
@@ -8,10 +8,10 @@ Hosted. Nothing to clone, nothing to build. Listed in the official MCP Registry 
 `com.flightpowers/google-flights-mcp`. Health check:
 [`/health`](https://google-flights-mcp.flightpowers.com/health).
 
-**Need a key?** Subscribe to the Google Flights Live API on RapidAPI — free tier available —
+**Need a key?** Subscribe to the Google Flights Live API on RapidAPI, free tier available,
 and copy your `x-rapidapi-key`: **https://rapidapi.com/mtnrabi/api/google-flights-live-api**
 
-**No key yet? Start with the free server — same search, no signup:**
+**No key yet? Start with the free server, same search, no signup:**
 `claude mcp add --transport http google-flights-free https://google-flights-lulu.flightpowers.com/mcp`
 (ad-supported: one disclosed sponsored card per result, fan-out capped at 15, and clients that
 cannot render the sponsored card may be capped further.) Come back here when the ads, the
@@ -38,20 +38,20 @@ variable.
 Two tools that answer a *fare question*, not a *date lookup*.
 
 - **Ask open-ended questions.** "Cheapest one-way to Sri Lanka anywhere in October", "5 to 7
-  nights in Rome sometime in May, from Tel Aviv or Larnaca" — each is **one** tool call. Both
+  nights in Rome sometime in May, from Tel Aviv or Larnaca": each is **one** tool call. Both
   tools take a departure date **range**, a **list** of destination airports, and (round-trip) a
   `nights` value instead of a fixed return date, and expand them internally.
 - **Say whether a price is actually good.** Every result carries Google's own historical range
-  for that route and period — `price_insights_low`, `price_insights_high`, and a
+  for that route and period: `price_insights_low`, `price_insights_high`, and a
   `price_range_in_relation_to_other_periods` verdict of `low` / `typical` / `high`. That is what
   lets an agent answer "$209 is typical here, don't rush" instead of just quoting a number.
 - **Book, not just browse.** Every result includes a `buy_link` to Google Flights.
-- **Know what it spent.** Every response carries `api_usage` — requests used by this call, and
+- **Know what it spent.** Every response carries `api_usage`: requests used by this call, and
   what is left on the caller's plan. See [Spend reporting](#spend-reporting-api_usage).
 - **Know what it searched.** Every response carries `search_coverage`, so the model can say
   honestly which dates and destinations the answer is based on.
 
-Results are live fares. **They go stale within minutes — never cache a fare or reuse an earlier
+Results are live fares. **They go stale within minutes: never cache a fare or reuse an earlier
 result; search again and state when the data was fetched.**
 
 ## Get a key (free tier available)
@@ -64,7 +64,7 @@ subscription, which is why the key travels with the request.
 2. Copy your `x-rapidapi-key`.
 3. Pass it to the server in any one of the three ways below.
 
-If a key is missing, the tools do not fail silently and do not spend anything — they return
+If a key is missing, the tools do not fail silently and do not spend anything. They return
 `needs_api_key: true` with the signup URL and these instructions, phrased for the model to read
 back to you.
 
@@ -73,7 +73,7 @@ back to you.
 | Way | How | When to use it |
 |---|---|---|
 | **Header** (preferred) | `--header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"` | Anything that lets you set headers. Keys stay out of URLs, and therefore out of proxy and access logs. |
-| **Query parameter** | `https://google-flights-mcp.flightpowers.com/mcp?rapidapi_key=YOUR_RAPIDAPI_KEY` | Hosts that only let you paste a URL — claude.ai's custom-connector dialog is the case that matters. |
+| **Query parameter** | `https://google-flights-mcp.flightpowers.com/mcp?rapidapi_key=YOUR_RAPIDAPI_KEY` | Hosts that only let you paste a URL: claude.ai's custom-connector dialog is the case that matters. |
 | **Client API-key field** | Paste the key into the client's own "API key" box | Hosts that send `authorization: Bearer <key>` or `x-api-key`. Smithery's saved-config form (`config.rapidApiKey=`) is also accepted. |
 
 First non-empty source wins, in that order. The key is never logged, never echoed into an error
@@ -99,7 +99,7 @@ Where a deployment has it enabled (check `connect_enabled` on `/health`), there 
 1. Open **https://google-flights-mcp.flightpowers.com/connect** (hotels:
    **https://hotels.flightpowers.com/connect**) and sign in with Google.
 2. Paste your RapidAPI key once, into a form, over TLS.
-3. Copy the connect URL it gives you back — `…/mcp?fp_token=fpk_…` — and use that as the server
+3. Copy the connect URL it gives you back, `…/mcp?fp_token=fpk_…`, and use that as the server
    URL in your MCP client. Clients that let you set headers can send the same token as
    `Authorization: Bearer fpk_…` instead.
 
@@ -113,14 +113,14 @@ Some details worth knowing:
 
 - **Saving runs one check.** The key is validated against the listing before it is stored, so a
   typo fails on the page rather than in your client an hour later. That check costs **at most one
-  request** from your own plan — on the free BASIC plan (10 a month), one of ten. A key that
+  request** from your own plan: on the free BASIC plan (10 a month), one of ten. A key that
   RapidAPI rejects at the gateway costs nothing.
 - **A key on the request always wins.** If you send an `x-rapidapi-key` header (or any of the
   other channels above) *and* carry a connect token, the request's own key is used. Nothing you
   already have set up changes behaviour because you signed in.
 - **The token is not your key** and cannot be turned back into it. It is valid for 90 days, and
   it stops resolving the moment you disconnect. A call carrying a token whose key has been
-  disconnected gets a `needs_api_key` reply telling you to reconnect — it never falls back to
+  disconnected gets a `needs_api_key` reply telling you to reconnect. It never falls back to
   somebody else's subscription and never spends anything.
 - **BASIC is free.** [Google Flights Live API](https://rapidapi.com/mtnrabi/api/google-flights-live-api)
   · [Booking Live API](https://rapidapi.com/mtnrabi/api/booking-live-api). One RapidAPI key covers
@@ -141,7 +141,7 @@ visible rather than guessed.
 
 Optional: `MCP_CONNECT_VALIDATE=0` stores a pasted key without checking it first.
 
-**Authorised redirect URIs to register on the Google client** — one per product origin, exactly:
+**Authorised redirect URIs to register on the Google client**, one per product origin, exactly:
 
 ```
 https://google-flights-mcp.flightpowers.com/connect/callback
@@ -150,7 +150,7 @@ https://hotels.flightpowers.com/connect/callback
 
 `flights.flightpowers.com` needs **no** entry. `/connect` and `/connect/start` bounce an alias to
 the canonical origin before the sign-in starts, because cookies are per-host and Google compares
-`redirect_uri` literally — an alias that started its own sign-in would come back to a host with no
+`redirect_uri` literally: an alias that started its own sign-in would come back to a host with no
 state cookie and fail with a message that reads like a Google misconfiguration.
 
 Also on the OAuth consent screen: scopes `openid` and `.../auth/userinfo.email`, and nothing else.
@@ -210,7 +210,7 @@ tool actually runs. Step 4 has to be a **real search**.
 
 | Tool | What it does |
 |---|---|
-| `search_oneway_flights` | Real-time one-way fares. Input: origin IATA, destination IATA **or a list**, and either one departure date or a date range. Returns price, airline, duration, stops, `buy_link`, and Google's historical price range so you can judge the fare. Use for any one-way question, including open-ended ones — one call with a range, never one call per date. |
+| `search_oneway_flights` | Real-time one-way fares. Input: origin IATA, destination IATA **or a list**, and either one departure date or a date range. Returns price, airline, duration, stops, `buy_link`, and Google's historical price range so you can judge the fare. Use for any one-way question, including open-ended ones: one call with a range, never one call per date. |
 | `search_roundtrip_flights` | Real-time round-trip fares priced as **paired legs**, not two one-ways. Input: origin, destination(s), a departure date or range, and either a `return_date` or a trip length in `nights` (a number or a list like `[5,6,7]`). Returns total price, per-leg airline/stops/duration, and one `buy_link` for the trip. |
 
 ### `search_oneway_flights`
@@ -292,7 +292,7 @@ One call:
 ```
 
 That expands to 15 dates × 2 destinations = 30 combinations, which is exactly the per-call cap.
-The response shape (field names are real; **the values below are illustrative, not a quote** —
+The response shape (field names are real; **the values below are illustrative, not a quote**,
 run the call to get live fares):
 
 ```json
@@ -345,18 +345,18 @@ run the call to get live fares):
 
 Other response shapes to expect, all of them normal:
 
-- **No flights on those dates.** `results: []` with a `message` — Google Flights genuinely
+- **No flights on those dates.** `results: []` with a `message`: Google Flights genuinely
   returns nothing for some route/date combinations. Not an error. Try nearby dates or a
   nearby airport. `use_fallback` will not change this and is left unset by default: the
   backend accepts the field, but the second flight-data source it selects is gated behind
-  `USE_FALLBACK_FLI` (`fallback_available()`), which is not switched on for this API — so
+  `USE_FALLBACK_FLI` (`fallback_available()`), which is not switched on for this API, so
   none of its three values has any observable effect on a search today. The automatic
   retries the backend does on an unreadable page are unconditional and are not affected
   by it.
 - **Some searches failed.** A `partial` field says how many of the executed searches failed, and
   the results cover the rest.
 - **Range too wide.** `search_coverage.truncated: true` plus a `note`. The range is sampled
-  **evenly across the whole window** (first and last kept), not cut short — so the sample is
+  **evenly across the whole window** (first and last kept), not cut short, so the sample is
   representative, not the first N days. Raise `max_searches` or narrow the range for fuller
   coverage.
 - **No key / rejected key.** `needs_api_key: true`, zero spend, with the fix. A valid RapidAPI
@@ -435,7 +435,7 @@ wide question), a narrower date range, a shorter destination list.
 
 The underlying REST API takes exactly one `(origin, destination, date)` tuple per call. Against a
 one-date-per-call passthrough, "cheapest to Sri Lanka anywhere in October" is 31 separate tool
-calls — 31 round trips through the model, 31 chances to lose the thread, and a bill the user only
+calls: 31 round trips through the model, 31 chances to lose the thread, and a bill the user only
 discovers afterwards.
 
 Here it is **one** tool call. The fan-out happens server-side, concurrently, capped, evenly
@@ -450,7 +450,7 @@ sampled, deduplicated on `buy_link`, merged, sorted by your `sort_by`, and repor
 | Spend reporting | `api_usage` in every response | n/a |
 | Directory-listable | yes | no |
 
-**This server carries no ads at all** — not by taste but by constraint: Anthropic's connector
+**This server carries no ads at all**, not by taste but by constraint: Anthropic's connector
 directory policy and OpenAI's app guidelines both prohibit advertising and sponsored content in
 tool results, so an ad-carrying server can never be listed there and this one can.
 
@@ -463,14 +463,14 @@ cp example.env .env          # fill it in; leave RAPIDAPI_KEY empty
 set -a && . .env && set +a
 .venv/bin/python -m src      # streamable HTTP on http://localhost:8000/mcp
 ```
-<!-- untested — developer verify: clone/venv/run steps not executed in this environment -->
+<!-- untested, developer verify: clone/venv/run steps not executed in this environment -->
 
 Point a client at the local process the same way:
 
 ```bash
 claude mcp add --transport http google-flights-local http://localhost:8000/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
 ```
-<!-- untested — developer verify -->
+<!-- untested, developer verify -->
 
 Tests (620 passing, verified):
 
@@ -488,14 +488,14 @@ Configuration lives in `example.env`; every variable is documented there. The on
 | `REQUEST_TIMEOUT_SECONDS` | `75` | The upstream function's `Timeout` (60) plus a 15s edge-relay margin, so this side never gives up on an answer that is still coming. |
 | `DEFAULT_RESULT_LIMIT` | `10` | Results requested per individual upstream search. |
 | `MCP_PRODUCTS` | `both` | Which product this deployment serves: `flights`, `hotels` or `both`. Selects the tool set, the server instructions, the service name, the policy pages and the RapidAPI listing a keyless or unsubscribed caller is sent to. A hotels deployment left on the default introduces itself as a flights server. |
-| `SIGNUP_URL` | listing matching `MCP_PRODUCTS` | Quoted back to users who arrive without a key. On `both`, the hotel tools quote the Booking listing regardless — one URL cannot be the Subscribe button for two APIs. |
+| `SIGNUP_URL` | listing matching `MCP_PRODUCTS` | Quoted back to users who arrive without a key. On `both`, the hotel tools quote the Booking listing regardless: one URL cannot be the Subscribe button for two APIs. |
 | `MCP_PRODUCTS_BY_HOST` | `default` | Which product each hostname serves, so one deployment can carry both paid domains and each listing still gets exactly its own tool set. `default` is the built-in map of flightpowers.com aliases; `off` disables host routing entirely (the no-code rollback); or an explicit `host=product,…` map. An unmapped hostname falls back to `MCP_PRODUCTS`. |
-| `MCP_PUBLIC_URL` | `http://localhost:8000/mcp` | Reported by `/health` and the origin of every policy-page link. `MCP_PUBLIC_URL_FLIGHTS` / `MCP_PUBLIC_URL_HOTELS` override it per product on a deployment serving both — without them the hotels hostname would advertise the flights one. `SIGNUP_URL_FLIGHTS` / `SIGNUP_URL_HOTELS` work the same way. |
-| `RAPIDAPI_KEY` | *(empty)* | **Leave empty in production.** If set, every keyless caller is served on — and billed to — that subscription. The server logs a warning at startup and `/health` reports `server_side_key_configured`. |
+| `MCP_PUBLIC_URL` | `http://localhost:8000/mcp` | Reported by `/health` and the origin of every policy-page link. `MCP_PUBLIC_URL_FLIGHTS` / `MCP_PUBLIC_URL_HOTELS` override it per product on a deployment serving both. Without them the hotels hostname would advertise the flights one. `SIGNUP_URL_FLIGHTS` / `SIGNUP_URL_HOTELS` work the same way. |
+| `RAPIDAPI_KEY` | *(empty)* | **Leave empty in production.** If set, every keyless caller is served on, and billed to, that subscription. The server logs a warning at startup and `/health` reports `server_side_key_configured`. |
 | `METRICS_TOKEN` | *(empty)* | When set, `/metrics` requires an `x-metrics-token` header. |
 | `LOG_PATH` | *(empty)* | Empty disables the file sink; stdout `MCP_CALL` lines remain the record. Correct on serverless. |
 
-Operational routes: `GET /health` (public, unauthenticated — registries poll it),
+Operational routes: `GET /health` (public, unauthenticated: registries poll it),
 `GET /metrics`, `GET /metrics/calls?hours=24`.
 
 Deployment target is Vercel via `api/index.py` (FastAPI wrapper handing FastMCP its lifespan,
@@ -514,13 +514,13 @@ docker build -t flightpowers-mcp .
 docker run --rm -p 8000:8000 flightpowers-mcp
 curl http://localhost:8000/health
 ```
-<!-- untested in CI — no Docker daemon on the machine that wrote this; the exact file set the
+<!-- untested in CI, no Docker daemon on the machine that wrote this; the exact file set the
      image copies (requirements.txt, src/, legal/) and the exact start command were installed
      into a clean venv on Python 3.12 and booted: /health 200, /privacy and /terms 200,
      MCP initialize + tools/list returned all four tools. -->
 
-The container serves streamable HTTP on `${PORT}/mcp` — the same transport as the hosted
-deployment — via `python -m src`. `api/index.py` is the Vercel wrapper and is not used here.
+The container serves streamable HTTP on `${PORT}/mcp`, the same transport as the hosted
+deployment, via `python -m src`. `api/index.py` is the Vercel wrapper and is not used here.
 
 **No secret is baked into the image.** Every search is billed to the caller's own RapidAPI
 subscription and their key travels with the request as `x-rapidapi-key`. `RAPIDAPI_KEY` is
@@ -542,4 +542,4 @@ Every variable in the table above works as `-e NAME=value`. `HOST` defaults to `
 This is an independent API that returns publicly available flight pricing. It is **not affiliated
 with, endorsed by, or sponsored by Google**. "Google Flights" is used only to describe the public
 data source. Fares are supplied by the upstream provider, change constantly, and are not
-guaranteed — always confirm the price on the airline or booking site before purchase.
+guaranteed. Always confirm the price on the airline or booking site before purchase.
