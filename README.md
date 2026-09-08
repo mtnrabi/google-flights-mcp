@@ -1,5 +1,17 @@
 # Google Flights MCP: real-time fares your agent can search across a whole date range, ad-free
 
+**Sign in, no key to paste:**
+
+```bash
+claude mcp add --transport http google-flights https://flights.flightpowers.com/mcp/oauth
+```
+
+Works in clients that support MCP authorization: a Sign in button appears, you sign in with
+Google, and you paste your RapidAPI key once on the `/connect` page. Nothing goes in your client
+config.
+
+**Or bring your own RapidAPI key:**
+
 ```bash
 claude mcp add --transport http google-flights https://google-flights-mcp.flightpowers.com/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
 ```
@@ -92,6 +104,9 @@ https://rapidapi.com/mtnrabi/api/google-flights-live-api (free tier available) a
 `x-rapidapi-key`.
 
 ## A fourth way: sign in once at `/connect`
+
+This is the page the sign-in URL at the top of this README sends you to. A client that speaks MCP
+authorization walks you through it on its own; the steps below are the same thing done by hand.
 
 Where a deployment has it enabled (check `connect_enabled` on `/health`), there is a page at
 `/connect` that replaces all of the above with a sign-in:
