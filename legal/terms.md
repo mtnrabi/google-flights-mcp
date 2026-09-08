@@ -1,4 +1,4 @@
-# Terms of Service — {{PRODUCT}} (paid, ad-free)
+# Terms of Service, {{PRODUCT}} (paid, ad-free)
 
 **Service:** `https://{{HOST}}/mcp`
 **Registry name:** `{{REGISTRY_NAME}}`
@@ -9,8 +9,8 @@ By connecting an MCP client to this server or calling its tools, you agree to
 these terms. If you do not agree, do not connect to it.
 
 "Paid" in the title distinguishes this deployment from the free, ad-supported
-one; it means bring-your-own-key. This server charges you nothing itself —
-every search is billed to your own RapidAPI subscription. See section 2.
+one; it means bring-your-own-key. This server charges you nothing itself.
+Every search is billed to your own RapidAPI subscription. See section 2.
 
 ---
 
@@ -44,7 +44,7 @@ Every search is billed to **your own RapidAPI subscription** for the {{UPSTREAM_
 - Every successful response carries an `api_usage` block. It always reports
   `requests_used_by_this_call`, and adds `plan_requests_remaining` and
   `plan_requests_limit` whenever RapidAPI returns its rate-limit headers for
-  your plan — so the cost of a call is visible in the call itself.
+  your plan, so the cost of a call is visible in the call itself.
 - You are responsible for your RapidAPI plan, its quota, and its charges.
   {{COST_SENTENCE}}; check `api_usage` for the actual figure.
 - Your relationship with RapidAPI and with the underlying API provider is
@@ -126,7 +126,7 @@ indirect, incidental, special, consequential, or exemplary damages, nor for lost
 profits, lost bookings, missed fares, travel disruption, or RapidAPI charges
 incurred through your use of the service, whether or not foreseeable. To the
 extent liability cannot be excluded, it is limited to the amount you have paid
-the operator for the service, which for this server is zero — the service itself
+the operator for the service, which for this server is zero. The service itself
 charges you nothing and your searches are billed by RapidAPI, not by us.
 
 ---
