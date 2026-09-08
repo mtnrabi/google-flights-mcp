@@ -107,15 +107,15 @@ it, your MCP client signs you in itself: it registers with this server, opens
 a browser, and you approve that client by name.
 
 It uses exactly the same Google sign-in and the same encrypted key record that
-section 2a describes, there is no second identity and no second copy of your
-key. What is additionally written down is only what makes the sign-in work:
+section 2a describes. There is no second identity and no second copy of
+your key. What is additionally written down is only what makes the sign-in work:
 
 - **The client's registration.** The name it gave, the URL it asked to be sent
   back to, and an identifier we generated for it. No personal data.
 - **Short-lived grants tied to your account.** An authorization code (valid for
   ten minutes, usable once), an access token (one hour) and a refresh token
-  (thirty days), each stored as a one-way hash, the database never holds a
-  value that could be replayed, alongside your Google account identifier and
+  (thirty days), each stored as a one-way hash (the database never holds a
+  value that could be replayed), alongside your Google account identifier and
   the client that was approved.
 - **What the client can do.** Run searches billed to your own RapidAPI plan.
   It never receives your RapidAPI key, and there is nothing else these tokens
