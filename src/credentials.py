@@ -100,7 +100,14 @@ MIN_KEY_LENGTH = 20
 # connected is wrong": the single most confusing failure this feature could
 # ship with. So the prefix is filtered at the one place every channel passes
 # through, and the token is resolved separately (see server.py).
-OUR_TOKEN_PREFIXES = ("fpk_",)
+CONNECT_TOKEN_PREFIXES = ("fpk_",)
+#: MCP-protocol OAuth (src/oauth.py) hands clients an `fpo_` access token and
+#: an `fpr_` refresh token, and an access token arrives in exactly the header
+#: this module reads a key out of. Same trap as `fpk_`, same fix -- but they
+#: are NOT connect tokens, so they are listed separately: `find_connect_token`
+#: must not hand one to `read_connect_token`, which would only reject it.
+OAUTH_TOKEN_PREFIXES = ("fpo_", "fpr_")
+OUR_TOKEN_PREFIXES = CONNECT_TOKEN_PREFIXES + OAUTH_TOKEN_PREFIXES
 
 # Where a connect token is expected to arrive on its own name. Not a RapidAPI
 # key channel; listed here so server.py and this module cannot disagree.
@@ -366,7 +373,7 @@ def find_connect_token(
             value = value[1:-1].strip()
         if value.lower().startswith("bearer "):
             value = value[7:].strip()
-        return value if value.startswith(OUR_TOKEN_PREFIXES) else ""
+        return value if value.startswith(CONNECT_TOKEN_PREFIXES) else ""
 
     for name in (*HEADER_NAMES, BEARER_HEADER):
         found = _token(headers.get(name))

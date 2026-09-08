@@ -154,6 +154,24 @@ def verify_payload(
     return payload
 
 
+def is_local_path(target: str) -> bool:
+    """True for a value that can only be a path on this origin.
+
+    An open redirect is the classic way a sign-in gets weaponised: the user
+    authenticates on the real site and is then bounced to an attacker's copy.
+    So the test is deliberately narrow -- one leading slash, never two (`//`
+    is protocol-relative and goes to another host), no scheme, no backslash
+    (some browsers normalise `\\` to `/`), and no control characters.
+    """
+    if not target or not isinstance(target, str):
+        return False
+    if not target.startswith("/") or target.startswith("//"):
+        return False
+    if "\\" in target or ":" in target.split("?", 1)[0]:
+        return False
+    return all(ch >= " " and ch != "\x7f" for ch in target)
+
+
 # ── identity ─────────────────────────────────────────────────────────────
 
 
@@ -197,26 +215,34 @@ class GoogleWebAuth:
 
     # ── step 1: send them to Google ──────────────────────────────────────
 
-    def start(self) -> tuple[str, str]:
+    def start(self, next_path: str = "") -> tuple[str, str]:
         """Returns (authorize_url, signed state cookie value).
 
         PKCE even though this is a confidential client with a secret. It
         costs two lines and it closes the authorization-code interception
         window that a plain confidential flow leaves open on a redirect URI
         anybody can navigate to.
+
+        `next_path` is where to land after the sign-in, and it rides INSIDE
+        the signed state cookie rather than on the query string. That is what
+        makes it safe: a value the browser cannot edit cannot be turned into
+        an open redirect, so the callback can send the user straight on to a
+        pending MCP authorization request without re-validating a URL a
+        stranger supplied. `is_local_path` is still applied on the way out,
+        because a bug that put a full URL in here should fail closed.
         """
         verifier = _b64e(os.urandom(32))
         challenge = _b64e(hashlib.sha256(verifier.encode("ascii")).digest())
         state = secrets.token_urlsafe(16)
-        cookie = sign_payload(
-            {
-                "typ": "oauth",
-                "state": state,
-                "v": verifier,
-                "exp": int(time.time()) + OAUTH_STATE_TTL_SECONDS,
-            },
-            self.session_secret,
-        )
+        payload = {
+            "typ": "oauth",
+            "state": state,
+            "v": verifier,
+            "exp": int(time.time()) + OAUTH_STATE_TTL_SECONDS,
+        }
+        if next_path and is_local_path(next_path):
+            payload["n"] = next_path
+        cookie = sign_payload(payload, self.session_secret)
         url = f"{GOOGLE_AUTHORIZE_URL}?" + urlencode(
             {
                 "client_id": self.client_id,
@@ -286,6 +312,25 @@ class GoogleWebAuth:
             # never end up somewhere it could be treated as a contact.
             email = ""
         return GoogleIdentity(sub=sub, email=email)
+
+    def next_from_state(self, state_cookie: str | None) -> str:
+        """Where the sign-in was headed, out of the signed state cookie.
+
+        "" for anything that does not verify. Called by /connect/callback
+        after `finish` has already accepted the same cookie, so a second
+        signature check here costs one HMAC and removes the need for the two
+        call sites to agree about which of them validated what.
+        """
+        if not state_cookie:
+            return ""
+        try:
+            payload = verify_payload(state_cookie, self.session_secret)
+        except WebAuthError:
+            return ""
+        if payload.get("typ") != "oauth":
+            return ""
+        target = str(payload.get("n", ""))
+        return target if is_local_path(target) else ""
 
     # ── sessions and connect tokens ──────────────────────────────────────
 

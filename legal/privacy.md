@@ -99,6 +99,33 @@ If you use it:
   Your RapidAPI account and subscription are untouched; only our copy of the
   key is removed.
 
+## 2b. Signing in from inside your MCP client (`/mcp/oauth`)
+
+Where `/connect` is available, so is a second MCP endpoint at `/mcp/oauth`
+(`/health` reports `oauth_enabled`). Instead of pasting a URL with a token in
+it, your MCP client signs you in itself: it registers with this server, opens
+a browser, and you approve that client by name.
+
+It uses exactly the same Google sign-in and the same encrypted key record that
+section 2a describes, there is no second identity and no second copy of your
+key. What is additionally written down is only what makes the sign-in work:
+
+- **The client's registration.** The name it gave, the URL it asked to be sent
+  back to, and an identifier we generated for it. No personal data.
+- **Short-lived grants tied to your account.** An authorization code (valid for
+  ten minutes, usable once), an access token (one hour) and a refresh token
+  (thirty days), each stored as a one-way hash, the database never holds a
+  value that could be replayed, alongside your Google account identifier and
+  the client that was approved.
+- **What the client can do.** Run searches billed to your own RapidAPI plan.
+  It never receives your RapidAPI key, and there is nothing else these tokens
+  authorise.
+- **Deleting it is the same button.** "Disconnect" on `/connect` deletes your
+  stored key *and* drops every access and refresh token issued for your
+  account, in the same action. A client can also revoke its own token at
+  `/oauth/revoke`. Expired codes and tokens are deleted; nothing about a
+  finished sign-in is kept for analytics.
+
 ---
 
 ## 3. What is logged
@@ -151,11 +178,11 @@ The server does not collect, log, store, or transmit any of the following:
   appears in any record it writes, and none is sent upstream. (The hosting
   platform terminates the network connection and keeps its own request logs,
   see section 6.)
-- **Any user identity**, unless you signed in on `/connect`: the tool path
-  itself has no account, no user ID, no session ID, no name, no email address
-  and no device or client identifier. What section 2a describes is the only
-  identity this service ever holds, it exists only because you chose to create
-  it, and Disconnect deletes it.
+- **Any user identity**, unless you signed in on `/connect` or through
+  `/mcp/oauth`: the tool path itself has no account, no user ID, no session
+  ID, no name, no email address and no device or client identifier. What
+  sections 2a and 2b describe is the only identity this service ever holds,
+  it exists only because you chose to create it, and Disconnect deletes it.
 - **Your search parameters.** {{SEARCH_PARAM_NOUNS}} are used to perform the
   search and are then discarded. Only the *count* of requested combinations is
   recorded, not the values, with one exception: when a request is rejected as
