@@ -84,6 +84,7 @@ from .oauth import (
     build_oauth_support,
 )
 from .oauthroutes import caller_ip, register_oauth_routes
+from .servercard import register_server_card_route
 from .oauthstore import OAuthStoreError
 from . import ratelimit
 from .webauth import (
@@ -2616,6 +2617,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # apps -- and widening that signature for one optional feature would
     # touch every one of those call sites.
     mcp.fp_oauth = oauth
+
+    # ── static server card ───────────────────────────────────────────────
+    # Registered unconditionally, and last, so it sees the final registry:
+    # its tool list is read from `mcp` itself. Smithery's scanner falls back
+    # to this document when it cannot get past an auth wall, which is exactly
+    # what `/mcp/oauth` is. See src/servercard.py.
+    register_server_card_route(mcp, settings, oauth, site)
 
     @mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"])
     async def openai_challenge(_request: Request) -> Response:

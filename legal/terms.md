@@ -1,4 +1,4 @@
-# Terms of Service, {{PRODUCT}} (paid, ad-free)
+# Terms of Service for {{PRODUCT}} (paid, ad-free)
 
 **Service:** `https://{{HOST}}/mcp`
 **Registry name:** `{{REGISTRY_NAME}}`
@@ -126,8 +126,8 @@ indirect, incidental, special, consequential, or exemplary damages, nor for lost
 profits, lost bookings, missed fares, travel disruption, or RapidAPI charges
 incurred through your use of the service, whether or not foreseeable. To the
 extent liability cannot be excluded, it is limited to the amount you have paid
-the operator for the service, which for this server is zero. The service itself
-charges you nothing and your searches are billed by RapidAPI, not by us.
+the operator for the service, which for this server is zero (the service itself
+charges you nothing and your searches are billed by RapidAPI, not by us).
 
 ---
 

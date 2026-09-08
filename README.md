@@ -704,7 +704,7 @@ claude mcp add --transport http google-flights-local http://localhost:8000/mcp -
 ```
 <!-- untested, developer verify -->
 
-Tests (737 passing, verified):
+Tests (760 passing, verified):
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -728,7 +728,37 @@ Configuration lives in `example.env`; every variable is documented there. The on
 | `LOG_PATH` | *(empty)* | Empty disables the file sink; stdout `MCP_CALL` lines remain the record. Correct on serverless. |
 
 Operational routes: `GET /health` (public, unauthenticated: registries poll it),
-`GET /metrics`, `GET /metrics/calls?hours=24`.
+`GET /metrics`, `GET /metrics/calls?hours=24`,
+`GET /.well-known/mcp/server-card.json` (see below).
+
+### The static server card
+
+`GET /.well-known/mcp/server-card.json` returns this deployment's metadata as a standalone
+JSON document: `serverInfo`, `description`, `transport`, `capabilities`, `authentication`,
+`instructions`, and the full `tools` and `prompts` lists exactly as `tools/list` serialises
+them. Public, unauthenticated, `Cache-Control: public, max-age=3600`, open CORS.
+
+It exists because the URL we publish in directories is `/mcp/oauth`, which always answers
+401, so an automated scanner cannot read the tool list off the wire. Smithery's publish
+page names this document as the way out: "If automatic scanning can't complete (auth wall,
+required configuration, or other issues), you can provide server metadata manually via a
+static server card at /.well-known/mcp/server-card.json". The field list follows
+[SEP-1649](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1649).
+
+Two things worth knowing:
+
+* The tool list is read from the LIVE registry at first request, never written out by hand,
+  so it cannot drift from what `tools/list` returns. `tests/test_server_card.py` compares
+  the two on both products.
+* It is per hostname, like everything else here: `hotels.flightpowers.com` returns the hotel
+  card, both flights hostnames return the flights card, and every URL inside is on that
+  product's own origin. `transport.endpoint` is `/mcp/oauth` where OAuth is configured, with
+  the keyed `/mcp` endpoint listed under `_meta` as an alternative.
+
+```bash
+curl -s https://flights.flightpowers.com/.well-known/mcp/server-card.json | python3 -m json.tool
+curl -s https://hotels.flightpowers.com/.well-known/mcp/server-card.json  | python3 -m json.tool
+```
 
 Deployment target is Vercel via `api/index.py` (FastAPI wrapper handing FastMCP its lifespan,
 `stateless_http=True`). The canonical MCP path is `/mcp`, **no trailing slash**.
