@@ -2177,7 +2177,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         abandoned deployment next to a listing that claims the service is
         live. Links out to the policies, support and health instead."""
         return HTMLResponse(
-            index_html(settings.products, site, settings.signup_url)
+            index_html(
+                settings.products,
+                site,
+                settings.signup_url,
+                f"{site}{MCP_OAUTH_PATH}" if oauth is not None else None,
+            )
         )
 
     @mcp.custom_route("/privacy", methods=["GET"])

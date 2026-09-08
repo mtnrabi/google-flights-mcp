@@ -447,13 +447,13 @@ A hosted Model Context Protocol server returning real-time {{DATA_NOUN}} data.
 result.
 
 ## Connect
-
-**Endpoint:** `{{MCP_URL}}` — transport: streamable HTTP.
+{{SIGN_IN_BLOCK}}
+**Or bring your own RapidAPI key:** `{{MCP_URL}}` — transport: streamable HTTP.
 
 Every search is billed to the caller's own RapidAPI subscription, supplied per
 request as an `x-rapidapi-key` header. This server holds no upstream
-credential of its own and stores no key. Get a key, free tier available, at
-`{{SIGNUP_URL}}`.
+credential of its own and never stores a key sent on a request. Get a key, free
+tier available, at `{{SIGNUP_URL}}`.
 
 ## Tools
 
@@ -476,7 +476,18 @@ pricing. It is not affiliated with, endorsed by, or sponsored by
 """
 
 
-def index_html(products: str, site: str, signup_url: str) -> str:
+SIGN_IN_MD = """
+**Sign in, no key to paste:** `{{OAUTH_URL}}`, transport: streamable HTTP.
+
+Works in clients that support MCP authorization: a Sign in button appears, you
+sign in with Google, and you paste your RapidAPI key once on the `{{SITE}}/connect`
+page. Nothing goes in the client config.
+"""
+
+
+def index_html(
+    products: str, site: str, signup_url: str, oauth_url: str | None = None
+) -> str:
     """The landing page at `/`.
 
     Deliberately a summary of facts a reviewer checks -- transport, auth model,
@@ -486,9 +497,15 @@ def index_html(products: str, site: str, signup_url: str) -> str:
     """
     ctx = PRODUCT_CONTEXT.get(products) or PRODUCT_CONTEXT["flights"]
     md = apply_context(INDEX_MD, products)
+    # The sign-in paragraph is dropped, not greyed out, on a deployment where
+    # `/mcp/oauth` is not registered. `/health` reports the same fact as
+    # `oauth_enabled`; a landing page that advertises a 404 is worse than a
+    # landing page that says nothing.
+    md = md.replace("{{SIGN_IN_BLOCK}}", SIGN_IN_MD if oauth_url else "")
     md = (
         md.replace("{{SITE}}", site)
         .replace("{{MCP_URL}}", f"{site}/mcp")
+        .replace("{{OAUTH_URL}}", oauth_url or "")
         .replace("{{SIGNUP_URL}}", signup_url)
     )
     return page(ctx["PRODUCT"], markdown_to_html(md))

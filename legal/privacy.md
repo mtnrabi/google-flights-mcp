@@ -99,6 +99,8 @@ If you use it:
   Your RapidAPI account and subscription are untouched; only our copy of the
   key is removed.
 
+---
+
 ## 2b. Signing in from inside your MCP client (`/mcp/oauth`)
 
 Where `/connect` is available, so is a second MCP endpoint at `/mcp/oauth`
