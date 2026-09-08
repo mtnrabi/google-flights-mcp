@@ -1,4 +1,4 @@
-# Privacy Policy — {{PRODUCT}} (paid, ad-free)
+# Privacy Policy: {{PRODUCT}} (paid, ad-free)
 
 **Service:** `https://{{HOST}}/mcp`
 **Registry name:** `{{REGISTRY_NAME}}`
@@ -36,8 +36,8 @@ it:
   (preferred), an `authorization: Bearer` or `x-api-key` header, a query
   parameter on the connector URL (`rapidapi_key`, `rapidapi-key`,
   `rapidapikey`, `api_key`, `apikey`, or `key`), a Smithery-style `config.`
-  parameter or base64 `config=` blob, or — last, and
-  normally unset — a `RAPIDAPI_KEY` value in the server's own environment.
+  parameter or base64 `config=` blob, or, last, and
+  normally unset, a `RAPIDAPI_KEY` value in the server's own environment.
 - **What is done with it.** It is held in memory for the duration of that one
   request and sent to RapidAPI as the `x-rapidapi-key` header on each upstream
   search request that the call makes.
@@ -45,11 +45,11 @@ it:
   in an error message, never returned in a tool response, and never cached or
   reused for a later request. A key supplied on a request is held in memory for
   that request and then discarded; it is **not stored**.
-- **The one exception, and it is yours to choose.** If — and only if — you use
+- **The one exception, and it is yours to choose.** If, and only if, you use
   the optional `/connect` page (section 2a), the key you paste there is stored,
   encrypted, so that later requests can use it without you pasting it again. A
   server that never sees you use `/connect` stores nothing about you.
-- **What is recorded about it.** Only *which mechanism supplied it* — the
+- **What is recorded about it.** Only *which mechanism supplied it*: the
   literal values recorded are strings such as `header:x-rapidapi-key`,
   `query:rapidapi_key`, `env:RAPIDAPI_KEY`, or `none`. This field exists so
   that "users cannot work out how to pass a key" is distinguishable from "users
@@ -65,7 +65,7 @@ and spends nothing.
 Some deployments of this server offer a page at `/connect`. It is optional in
 two senses: not every deployment has it (`/health` reports `connect_enabled`,
 and where it is off the page does not exist), and where it does exist, using it
-is your choice — every other way of passing a key keeps working untouched.
+is your choice, every other way of passing a key keeps working untouched.
 
 If you use it:
 
@@ -94,8 +94,8 @@ If you use it:
   tracking of any kind. There are no third-party cookies anywhere on this
   service.
 - **Deleting it is one button.** "Disconnect" on `/connect` **deletes** the
-  stored record — the ciphertext included, not a flag set on a row that keeps
-  it — and every connect token for that account stops resolving immediately.
+  stored record, the ciphertext included, not a flag set on a row that keeps
+  it, and every connect token for that account stops resolving immediately.
   Your RapidAPI account and subscription are untouched; only our copy of the
   key is removed.
 
@@ -118,7 +118,7 @@ fields and nothing else:
 | `duration_ms` | How long the call took |
 | `truncated` | Whether the fan-out cap trimmed the search |
 | `credential_source` | Which mechanism supplied the key (see section 2) |
-| `error` | An error label such as `no_api_key`, `auth` or `quota`; a validation message when the request was rejected before any search ran; otherwise null. A validation message quotes the value that failed validation — an unparseable date or trip length, for example |
+| `error` | An error label such as `no_api_key`, `auth` or `quota`; a validation message when the request was rejected before any search ran; otherwise null. A validation message quotes the value that failed validation, an unparseable date or trip length, for example |
 
 If the deployment is configured with a writable log path, the same line is also
 appended to a local file. On the current hosting platform that path is not
@@ -133,7 +133,7 @@ Aggregate integer counters are incremented per call:
 `truncated_calls`, `errored_calls`, `unauthenticated_calls`, plus per-UTC-hour
 totals of `tool_calls` and `upstream_calls`.
 
-These are plain numbers with no per-caller dimension — there is no key, no
+These are plain numbers with no per-caller dimension: there is no key, no
 identifier, and no way to attribute a counter to anyone. By default they live in
 process memory and reset when the process recycles. If an Upstash Redis store is
 configured, they are stored there as integers under the key prefix `gfpaid`;
@@ -146,19 +146,19 @@ running integers.
 
 The server does not collect, log, store, or transmit any of the following:
 
-- **Your API key value** — see section 2.
+- **Your API key value**, see section 2.
 - **IP addresses.** This server logs, stores and forwards none. No IP address
   appears in any record it writes, and none is sent upstream. (The hosting
-  platform terminates the network connection and keeps its own request logs —
+  platform terminates the network connection and keeps its own request logs,
   see section 6.)
-- **Any user identity**, unless you signed in on `/connect` — the tool path
+- **Any user identity**, unless you signed in on `/connect`: the tool path
   itself has no account, no user ID, no session ID, no name, no email address
   and no device or client identifier. What section 2a describes is the only
   identity this service ever holds, it exists only because you chose to create
   it, and Disconnect deletes it.
 - **Your search parameters.** {{SEARCH_PARAM_NOUNS}} are used to perform the
   search and are then discarded. Only the *count* of requested combinations is
-  recorded, not the values — with one exception: when a request is rejected as
+  recorded, not the values, with one exception: when a request is rejected as
   invalid before any search runs, the validation message goes into the `error`
   field described in section 3, and that message quotes the single value that
   failed (a malformed date or trip length, for example).
@@ -198,13 +198,13 @@ No other processor receives anything.
 
 ## 7. Operational endpoints
 
-- `GET /health` — public and unauthenticated. Returns service status, the
+- `GET /health`: public and unauthenticated. Returns service status, the
   public MCP URL, the signup URL, whether ads are served (always `false`), and
   whether a server-side fallback key is configured. It contains no caller data.
-- `GET /metrics` and `GET /metrics/calls` — the aggregate counters from
+- `GET /metrics` and `GET /metrics/calls`: the aggregate counters from
   section 4, protected by a `x-metrics-token` header when a token is
   configured. They contain no caller data.
-- `GET /.well-known/openai-apps-challenge` — a domain-verification token, or
+- `GET /.well-known/openai-apps-challenge`: a domain-verification token, or
   404 when unconfigured.
 
 ---
@@ -214,7 +214,7 @@ No other processor receives anything.
 - Search parameters and results: not retained.
 - API keys passed on a request: not retained.
 - A key connected through `/connect`: retained, encrypted, until you press
-  Disconnect. There is no expiry sweep — the record lasts as long as you want
+  Disconnect. There is no expiry sweep: the record lasts as long as you want
   it to and no longer.
 - The Google account identifier and email address behind a connected key: the
   same lifetime as the key, and deleted with it.
@@ -226,7 +226,7 @@ No other processor receives anything.
 
 If you have not used `/connect`, no personal data is collected, so there is no
 account to close and no per-user deletion or access request that can be
-meaningfully fulfilled — there is no record keyed to you to find. If you have,
+meaningfully fulfilled: there is no record keyed to you to find. If you have,
 "Disconnect" on that page is the deletion, it is immediate, and it needs no
 request to anybody. Either way, if you believe a record about you exists that
 this policy does not describe, write to the contact address below and we will
