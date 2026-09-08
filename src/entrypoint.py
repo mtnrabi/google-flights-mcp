@@ -63,6 +63,7 @@ from typing import Any, Callable
 
 from starlette.applications import Starlette
 
+from .oauth import OAuthResourceGate
 from .server import build_server
 from .settings import Settings, host_products, load_settings, normalise_host
 
@@ -157,8 +158,31 @@ def _build_asgi_app(entry: Entrypoint) -> Starlette:
     async def dispatch(scope, receive, send):
         await entry.app_for_scope(scope).mcp_app(scope, receive, send)
 
+    def support_for_scope(scope):
+        """The OAuth feature of whichever product answers for this Host.
+
+        Read off the FastMCP instance rather than plumbed through
+        ProductApp, because `build_server` is what decides whether the
+        feature is configured and it returns a FastMCP everywhere.
+        """
+        return getattr(entry.app_for_scope(scope).server, "fp_oauth", None)
+
     app = Starlette(lifespan=entry.lifespan)
-    app.mount("/", dispatch)
+    # The gate wraps the host dispatcher rather than sitting inside a product
+    # app, and it is installed UNCONDITIONALLY -- even on a deployment with
+    # no OAuth configured. Two jobs:
+    #
+    #  1. Strip `x-fp-oauth-*` from every inbound request, whatever the path.
+    #     server.py serves a user's stored RapidAPI key on the strength of
+    #     that header, so a caller able to set it himself could spend a
+    #     stranger's plan. Stripping it here, above everything, is what makes
+    #     the injected value trustworthy -- and it must not depend on a
+    #     feature flag, because the danger does not.
+    #  2. Guard /mcp/oauth: 401 + the WWW-Authenticate challenge when no
+    #     valid access token is presented, and otherwise rewrite the path to
+    #     /mcp so the request is served by the same tools, the same product
+    #     routing and the same session manager as every other call.
+    app.mount("/", OAuthResourceGate(dispatch, support_for_scope))
     return app
 
 

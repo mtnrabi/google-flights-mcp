@@ -4,6 +4,8 @@
     "connect_enabled": false,
     "contact_email": "mtnrabi@gmail.com",
     "mcp_endpoint": "https://flights.golden.test/mcp",
+    "oauth_enabled": false,
+    "oauth_mcp_endpoint": null,
     "privacy_url": "https://flights.golden.test/privacy",
     "server_side_key_configured": false,
     "service": "google-flights-mcp",

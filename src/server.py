@@ -75,7 +75,15 @@ from .credentials import (
     redact,
     resolve_credential,
 )
-from .keystore import KeyStoreError
+from .keystore import PROVIDER_GOOGLE, KeyStoreError
+from .oauth import (
+    MCP_OAUTH_PATH,
+    PROVIDER_HEADER,
+    SUBJECT_HEADER,
+    build_oauth_support,
+)
+from .oauthroutes import register_oauth_routes
+from .oauthstore import OAuthStoreError
 from .webauth import (
     COOKIE_PATH,
     OAUTH_COOKIE,
@@ -1038,6 +1046,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     if connect is not None:
         logger.info("/connect is enabled for %s", settings.products)
 
+    # ── MCP-protocol OAuth (optional, and only where /connect exists) ────
+    # Day 2. `/mcp` is untouched by all of it: the OAuth surface is a second
+    # endpoint, `/mcp/oauth`, that always challenges, plus the discovery and
+    # token routes a client needs to answer that challenge. See src/oauth.py
+    # for why one endpoint could not do both jobs.
+    oauth = build_oauth_support(settings.products, site_origin, connect)
+
     async def _resolve(headers: dict[str, str], params: dict[str, str]) -> Credential:
         """The caller's key, in the order credentials.py documents.
 
@@ -1057,6 +1072,29 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         credential = resolve_credential(headers, params, fallback="")
         if credential.present:
             return credential
+
+        # An OAuth-authenticated request on /mcp/oauth. The subject header is
+        # injected by `oauth.OAuthResourceGate` AFTER an access token has been
+        # validated, and the same gate strips any inbound copy of it from
+        # every request, so its presence here can only mean a token verified.
+        # Checked before the connect token because it is the more specific
+        # identity: a client that signed in should not be served from a
+        # stale `fpk_` someone left in the URL.
+        if oauth is not None:
+            sub = (headers.get(SUBJECT_HEADER) or "").strip()
+            if sub:
+                provider = (headers.get(PROVIDER_HEADER) or "").strip() or PROVIDER_GOOGLE
+                try:
+                    stored = await connect.store.get(sub, provider)
+                except KeyStoreError as exc:
+                    logger.warning("stored key lookup failed for an OAuth caller: %s", exc)
+                    stored = None
+                if stored is not None:
+                    return Credential(key=stored.key, source="store:oauth")
+                # Signed in, but never pasted a key. A distinct source so the
+                # reply can say "connect one at /connect" rather than walking
+                # them through an OAuth sign-in they have already done.
+                return Credential(key="", source="store:oauth_no_key")
 
         if connect is not None:
             token = find_connect_token(headers, params)
@@ -1101,21 +1139,38 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             block["connect_url"] = f"{site_origin}/connect"
         return block
 
-    def _reconnect_message(signup: str, api_name: str) -> dict[str, Any]:
-        """The reply for a connect token whose stored key is gone."""
+    #: Sources that mean "we know who you are, we just have no key for you".
+    #: Both get the reconnect reply rather than the get-a-key one, because
+    #: sending a user who already has a key through "subscribe on RapidAPI"
+    #: is the worst answer available.
+    STORE_MISS_SOURCES = ("store:disconnected", "store:oauth_no_key")
+
+    def _reconnect_message(
+        signup: str, api_name: str, source: str = "store:disconnected"
+    ) -> dict[str, Any]:
+        """The reply for an identified caller with no usable stored key."""
         connect_url = f"{site_origin}/connect"
-        return {
-            "needs_api_key": True,
-            "results": [],
-            "result_count": 0,
-            "signup_url": signup,
-            "message": (
+        if source == "store:oauth_no_key":
+            message = (
+                "You are signed in, but no RapidAPI key is connected to this "
+                f"account yet. Open {connect_url}, sign in with the same "
+                "Google account, and paste your RapidAPI key once. Nothing "
+                "was searched and nothing was billed."
+            )
+        else:
+            message = (
                 "This connect link is no longer attached to a RapidAPI key -- "
                 "it was disconnected, or the key was removed. Open "
                 f"{connect_url}, sign in with the same Google account, and "
                 "paste your key again. Nothing was searched and nothing was "
                 "billed."
-            ),
+            )
+        return {
+            "needs_api_key": True,
+            "results": [],
+            "result_count": 0,
+            "signup_url": signup,
+            "message": message,
             "how_to_get_a_key": {
                 "connect_url": connect_url,
                 "signup_url": signup,
@@ -1174,13 +1229,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 truncated=False,
                 error=(
                     "disconnected_key"
-                    if credential.source == "store:disconnected"
+                    if credential.source in STORE_MISS_SOURCES
                     else "no_api_key"
                 ),
             )
-            if credential.source == "store:disconnected":
+            if credential.source in STORE_MISS_SOURCES:
                 return _reconnect_message(
-                    flights_signup, upstream_api_name("flights")
+                    flights_signup, upstream_api_name("flights"), credential.source
                 )
             return {
                 "needs_api_key": True,
@@ -1802,9 +1857,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         credential: Credential = await _resolve(headers, params)
 
         if not credential.present:
-            if credential.source == "store:disconnected":
+            if credential.source in STORE_MISS_SOURCES:
                 return _reconnect_message(
-                    hotels_signup, upstream_api_name("hotels")
+                    hotels_signup, upstream_api_name("hotels"), credential.source
                 )
             return {
                 "needs_api_key": True,
@@ -2101,6 +2156,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 # routing problem, and a half-set configuration disables the
                 # feature silently on purpose.
                 "connect_enabled": connect is not None,
+                # Day 2: whether the always-challenging OAuth endpoint is
+                # live, and where it is. Same reason as connect_enabled --
+                # `/mcp/oauth` 404ing is otherwise indistinguishable from a
+                # routing problem, and a directory listing that points at a
+                # dead endpoint is worse than no listing.
+                "oauth_enabled": oauth is not None,
+                "oauth_mcp_endpoint": (
+                    f"{site}{MCP_OAUTH_PATH}" if oauth is not None else None
+                ),
             }
         )
 
@@ -2229,7 +2293,16 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             redirect = _wrong_host(request)
             if redirect is not None:
                 return redirect
-            url, state_cookie = connect.auth.start()
+            # `next` is where to land after Google. It is validated by
+            # `GoogleWebAuth.start` and then carried INSIDE the signed state
+            # cookie, so what comes back at the callback cannot have been
+            # edited into an open redirect. Used by /connect/authorize, which
+            # sends a not-yet-signed-in user through this sign-in and wants
+            # them returned to the pending authorization request rather than
+            # to a page that has forgotten it.
+            url, state_cookie = connect.auth.start(
+                request.query_params.get("next", "")
+            )
             response = RedirectResponse(url, status_code=302)
             _set_cookie(response, OAUTH_COOKIE, state_cookie, OAUTH_STATE_TTL_SECONDS)
             return response
@@ -2274,7 +2347,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     ),
                     status_code=400,
                 )
-            response = RedirectResponse("/connect", status_code=303)
+            response = RedirectResponse(
+                connect.auth.next_from_state(state_cookie) or "/connect",
+                status_code=303,
+            )
             _set_cookie(
                 response,
                 SESSION_COOKIE,
@@ -2395,6 +2471,25 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                         "changed; try again in a minute."
                     ),
                 )
+            # Disconnect has to mean disconnect. The key is gone, so every
+            # OAuth token for this account now resolves to nothing anyway --
+            # but leaving live tokens behind would mean a client that still
+            # says "connected" while nothing works, and the consent page
+            # promised otherwise. Best effort: a store outage here must not
+            # turn a successful key removal into an error.
+            if oauth is not None:
+                try:
+                    dropped = await oauth.store.revoke_for_user(
+                        identity.sub, PROVIDER_GOOGLE
+                    )
+                    if dropped:
+                        logger.info(
+                            "revoked %d OAuth token(s) for sub=%s",
+                            dropped,
+                            identity.sub,
+                        )
+                except OAuthStoreError as exc:
+                    logger.warning("could not revoke OAuth tokens: %s", exc)
             return await _render_signed_in(
                 identity,
                 notice=(
@@ -2404,6 +2499,21 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     else "There was no stored key to remove."
                 ),
             )
+
+    # ── MCP-protocol OAuth routes ────────────────────────────────────────
+    # Registered only when the feature is configured, for the same reason
+    # /connect's are: an unconfigured deployment answering 404 here is the
+    # honest answer, and it is what makes this whole change a no-op until
+    # ops sets the env vars.
+    if oauth is not None:
+        register_oauth_routes(mcp, oauth, settings, connect)
+
+    # Read by src/entrypoint.py, which installs the /mcp/oauth ASGI gate.
+    # An attribute rather than a second return value because `build_server`
+    # returns a FastMCP everywhere -- tests, `python -m src`, both product
+    # apps -- and widening that signature for one optional feature would
+    # touch every one of those call sites.
+    mcp.fp_oauth = oauth
 
     @mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"])
     async def openai_challenge(_request: Request) -> Response:
