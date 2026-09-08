@@ -91,6 +91,121 @@ The installer will prompt for your RapidAPI key. Subscribe at
 https://rapidapi.com/mtnrabi/api/google-flights-live-api (free tier available) and copy your
 `x-rapidapi-key`.
 
+## A fourth way: sign in once at `/connect`
+
+Where a deployment has it enabled (check `connect_enabled` on `/health`), there is a page at
+`/connect` that replaces all of the above with a sign-in:
+
+1. Open **https://google-flights-mcp.flightpowers.com/connect** (hotels:
+   **https://hotels.flightpowers.com/connect**) and sign in with Google.
+2. Paste your RapidAPI key once, into a form, over TLS.
+3. Copy the connect URL it gives you back — `…/mcp?fp_token=fpk_…` — and use that as the server
+   URL in your MCP client. Clients that let you set headers can send the same token as
+   `Authorization: Bearer fpk_…` instead.
+
+What that buys you: your RapidAPI key is not in your client config, not in a URL, and not in
+whatever logs that URL passes through. What it costs: the server stores your key, encrypted, and
+knows your Google account id and email address. `Disconnect` on the same page deletes the record
+and kills every connect token for your account, immediately. The full description is
+[section 2a of the privacy policy](https://google-flights-mcp.flightpowers.com/privacy).
+
+Some details worth knowing:
+
+- **Saving runs one check.** The key is validated against the listing before it is stored, so a
+  typo fails on the page rather than in your client an hour later. That check costs **at most one
+  request** from your own plan — on the free BASIC plan (10 a month), one of ten. A key that
+  RapidAPI rejects at the gateway costs nothing.
+- **A key on the request always wins.** If you send an `x-rapidapi-key` header (or any of the
+  other channels above) *and* carry a connect token, the request's own key is used. Nothing you
+  already have set up changes behaviour because you signed in.
+- **The token is not your key** and cannot be turned back into it. It is valid for 90 days, and
+  it stops resolving the moment you disconnect. A call carrying a token whose key has been
+  disconnected gets a `needs_api_key` reply telling you to reconnect — it never falls back to
+  somebody else's subscription and never spends anything.
+- **BASIC is free.** [Google Flights Live API](https://rapidapi.com/mtnrabi/api/google-flights-live-api)
+  · [Booking Live API](https://rapidapi.com/mtnrabi/api/booking-live-api). One RapidAPI key covers
+  whichever of the two you have subscribed to; you connect it once.
+
+### Running `/connect` on your own deployment
+
+Off unless **all four** of these are set. A half-configured deployment registers none of the
+routes and serves keyed callers exactly as before; `/health` reports `connect_enabled` so that is
+visible rather than guessed.
+
+| Variable | What it is |
+|---|---|
+| `GOOGLE_OAUTH_CLIENT_ID` | Google Cloud Console → Credentials → OAuth client ID, type **Web application**. Ends `.apps.googleusercontent.com`. |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | The same client's secret (`GOCSPX-…`). |
+| `MCP_KEY_MASTER` | 32 bytes, base64: `openssl rand -base64 32`. Encrypts stored keys (AES-256-GCM) and derives the cookie and token signing keys. |
+| `DATABASE_URL` | Neon Postgres, **pooled** endpoint (`…-pooler…`). Schema: `migrations/001_mcp_user_keys.sql`. |
+
+Optional: `MCP_CONNECT_VALIDATE=0` stores a pasted key without checking it first.
+
+**Authorised redirect URIs to register on the Google client** — one per product origin, exactly:
+
+```
+https://google-flights-mcp.flightpowers.com/connect/callback
+https://hotels.flightpowers.com/connect/callback
+```
+
+`flights.flightpowers.com` needs **no** entry. `/connect` and `/connect/start` bounce an alias to
+the canonical origin before the sign-in starts, because cookies are per-host and Google compares
+`redirect_uri` literally — an alias that started its own sign-in would come back to a host with no
+state cookie and fail with a message that reads like a Google misconfiguration.
+
+Also on the OAuth consent screen: scopes `openid` and `.../auth/userinfo.email`, and nothing else.
+
+**Rotating `MCP_KEY_MASTER` logs everybody out and invalidates every stored key.** That is
+deliberate: after a rotation nothing is left holding a token that resolves to a key nobody can
+read. Users see "connect again", not a failed search. `key_version` on the table is there so a
+staged rotation is possible later without a flag day.
+
+### Verifying the flow end to end
+
+Migration first, once per database:
+
+```bash
+psql "$DATABASE_URL" -f migrations/001_mcp_user_keys.sql
+```
+
+Then, after deploying:
+
+```bash
+# 1. The feature is actually on.
+curl -s https://google-flights-mcp.flightpowers.com/health | grep connect_enabled
+
+# 2. The page renders for an anonymous visitor.
+curl -sI https://google-flights-mcp.flightpowers.com/connect        # 200
+curl -sI https://google-flights-mcp.flightpowers.com/connect/start  # 302 to accounts.google.com
+
+# 3. Sign in in a browser, paste a key, copy the connect URL.
+
+# 4. MCP Inspector against that URL -- list the tools, then run one real search.
+npx @modelcontextprotocol/inspector
+#   Transport: Streamable HTTP
+#   URL: https://google-flights-mcp.flightpowers.com/mcp?fp_token=fpk_...
+
+# 5. Claude Code, the same URL.
+claude mcp add --transport http flightpowers \
+  "https://google-flights-mcp.flightpowers.com/mcp?fp_token=fpk_..."
+claude mcp list          # shows it connected
+#   then, in a session: ask for a fare and check the result is real
+
+# 6. Cursor: Settings -> MCP -> Add, same URL. Or in ~/.cursor/mcp.json:
+#   { "mcpServers": { "flightpowers": {
+#       "url": "https://google-flights-mcp.flightpowers.com/mcp?fp_token=fpk_..." } } }
+
+# 7. Hotels, the other hostname, with the same token.
+#   https://hotels.flightpowers.com/mcp?fp_token=fpk_...
+
+# 8. Press Disconnect on /connect, then re-run step 4. The tool must answer
+#    needs_api_key with a "connect again" message -- not a search, and not a
+#    generic "get a key" reply.
+```
+
+A `tools/list` that succeeds proves nothing about any of this: a token is only consulted when a
+tool actually runs. Step 4 has to be a **real search**.
+
 ## Tools
 
 | Tool | What it does |
@@ -357,7 +472,7 @@ claude mcp add --transport http google-flights-local http://localhost:8000/mcp -
 ```
 <!-- untested — developer verify -->
 
-Tests (498 passing, verified):
+Tests (620 passing, verified):
 
 ```bash
 .venv/bin/python -m pytest -q

@@ -22,7 +22,15 @@ So all of them are accepted, in this order:
    base64-encoded JSON blob in `config=`. Smithery's gateway injects the
    user's saved configuration this way; without this branch every Smithery
    install of this server would arrive keyless.
-5. `RAPIDAPI_KEY` in the server environment. Deliberately last, normally
+5. A stored key, when the request carries a `fpk_...` connect token issued
+   by /connect (as `Authorization: Bearer`, `?fp_token=`, or `?rapidapi_key=`
+   -- users paste it in all three places). Resolved in server.py, not here,
+   because it needs a database round trip; what happens *here* is the other
+   half of that: a value that starts with the connect-token prefix is never
+   treated as a RapidAPI key. Without that, a connect token in the
+   Authorization header would be forwarded to RapidAPI, rejected, and
+   reported to the user as "your key was refused".
+6. `RAPIDAPI_KEY` in the server environment. Deliberately last, normally
    unset, and reported by /health so it cannot be on by accident: whenever it
    is set, every keyless caller bills the deployment owner's subscription.
 
@@ -82,6 +90,22 @@ CONFIG_FIELD_NAMES = (
 # malformed one upstream and letting RapidAPI return its own clear 401.
 MIN_KEY_LENGTH = 20
 
+# Values that are ours, not RapidAPI's, whichever channel they arrive on.
+#
+# /connect hands a user a `fpk_...` token to paste instead of their key, and
+# users paste it wherever the key used to go -- the Authorization header, the
+# `rapidapi_key` query parameter, a client's generic "API key" box. Every one
+# of those is a channel this module reads. Forwarding one of them upstream
+# produces a RapidAPI 401, which reads to the user as "the key you just
+# connected is wrong": the single most confusing failure this feature could
+# ship with. So the prefix is filtered at the one place every channel passes
+# through, and the token is resolved separately (see server.py).
+OUR_TOKEN_PREFIXES = ("fpk_",)
+
+# Where a connect token is expected to arrive on its own name. Not a RapidAPI
+# key channel; listed here so server.py and this module cannot disagree.
+CONNECT_TOKEN_QUERY_NAMES = ("fp_token", "connect_token")
+
 
 @dataclass(frozen=True)
 class Credential:
@@ -120,6 +144,8 @@ def _clean(value: Any) -> str:
     # wrong key rather than a paste artefact.
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
         value = value[1:-1].strip()
+    if value.startswith(OUR_TOKEN_PREFIXES):
+        return ""
     return value
 
 
@@ -315,3 +341,41 @@ def key_looks_malformed(key: str) -> bool:
     blocks a request on its own.
     """
     return bool(key) and len(key) < MIN_KEY_LENGTH
+
+
+def find_connect_token(
+    headers: dict[str, str], query_params: dict[str, str]
+) -> str:
+    """The `fpk_...` connect token on this request, or "".
+
+    Every channel a RapidAPI key can arrive on is checked, plus the two names
+    that are only ever a token. That breadth is the point: the page tells a
+    user to paste the connect URL, but people paste the token wherever they
+    pasted the key last time, and a token that silently does nothing in one
+    of six boxes is a support thread rather than a bug report.
+
+    `headers` keys must already be lowercased, as `resolve_credential`
+    requires.
+    """
+
+    def _token(raw: Any) -> str:
+        if not isinstance(raw, str):
+            return ""
+        value = raw.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1].strip()
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        return value if value.startswith(OUR_TOKEN_PREFIXES) else ""
+
+    for name in (*HEADER_NAMES, BEARER_HEADER):
+        found = _token(headers.get(name))
+        if found:
+            return found
+
+    lowered = {k.lower(): v for k, v in query_params.items()}
+    for name in (*CONNECT_TOKEN_QUERY_NAMES, *QUERY_NAMES):
+        found = _token(lowered.get(name))
+        if found:
+            return found
+    return ""
