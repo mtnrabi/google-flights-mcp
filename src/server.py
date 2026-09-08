@@ -83,6 +83,7 @@ from .schema_docs import document_params
 from .fanout import (
     FanoutResult,
     PlanError,
+    SearchPlan,
     execute_plan,
     normalise_origin,
     plan_oneway,
@@ -538,20 +539,31 @@ def _dedupe(
 MIN_ROWS_PER_COMBO = 1
 
 
-def _select_rows(
+def _select_rows_by_combo(
     groups: list[tuple[dict[str, str], list[dict[str, Any]]]],
     sort_by: str,
     limit: int,
     min_per_combo: int = MIN_ROWS_PER_COMBO,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[int]]:
     """At most `limit` sorted rows, with every answering combination in them.
 
-    Returns `(rows, hidden)`: the rows to answer with, and the searched
-    combinations that found flights and still have no row in the answer,
-    named. `hidden` is empty unless `limit` is smaller than the number of
-    combinations that returned something -- at which point there is no
-    selection that can show them all, and the response says so instead of
-    looking complete.
+    Returns `(rows, hidden, combo_of_row)`: the rows to answer with, the
+    searched combinations that found flights and still have no row in the
+    answer, named, and -- one per returned row, positionally -- the index
+    into `groups` of the combination that row came from. `hidden` is empty
+    unless `limit` is smaller than the number of combinations that returned
+    something -- at which point there is no selection that can show them all,
+    and the response says so instead of looking complete.
+
+    `combo_of_row` exists because the response also answers per requested
+    destination, and once the rows are merged into one price-ordered list
+    there is nothing on a row that reliably says which search produced it.
+    Row fields are the backend's, passed through unchanged, and the ones that
+    look like they would do the job (`to_airport`) are not guaranteed to be
+    there. Positional indices survive the one transform applied after this
+    point (`_annotate_book_labels`, which is 1:1 and copies), so the grouping
+    can be rebuilt off the FINAL rows rather than off objects that were
+    replaced.
 
     The bug this exists for (observed 2026-09-06): `limit` used to be a plain
     slice off one globally price-sorted list, so a destination whose cheapest
@@ -584,7 +596,7 @@ def _select_rows(
     ]
 
     if limit <= 0:
-        return [], []
+        return [], [], []
 
     ranked = sorted(tagged, key=lambda pair: key(pair[1]))
     chosen = [False] * len(ranked)
@@ -615,13 +627,35 @@ def _select_rows(
         taken += 1
 
     selected = [ranked[i][1] for i in range(len(ranked)) if chosen[i]]
+    combo_of_row = [ranked[i][0] for i in range(len(ranked)) if chosen[i]]
     shown = {ranked[i][0] for i in range(len(ranked)) if chosen[i]}
     answered = {index for index, _row in tagged}
     hidden = [
         describe_combination(groups[index][0])
         for index in sorted(answered - shown)
     ]
-    return selected, [name for name in hidden if name]
+    return selected, [name for name in hidden if name], combo_of_row
+
+
+def _select_rows(
+    groups: list[tuple[dict[str, str], list[dict[str, Any]]]],
+    sort_by: str,
+    limit: int,
+    min_per_combo: int = MIN_ROWS_PER_COMBO,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """`_select_rows_by_combo` without the per-row combination indices."""
+    rows, hidden, _combos = _select_rows_by_combo(
+        groups, sort_by, limit, min_per_combo
+    )
+    return rows, hidden
+
+
+def _append_coverage_note(coverage: dict[str, Any], note: str | None) -> None:
+    """Add one sentence to `search_coverage.note`, keeping what is there."""
+    if not note:
+        return
+    existing = coverage.get("note")
+    coverage["note"] = f"{existing} {note}" if existing else note
 
 
 def _note_hidden_combinations(
@@ -652,8 +686,208 @@ def _note_hidden_combinations(
         "answer simply had no room for them. Raise `limit` (roughly "
         "rows-per-combination x dates x destinations) to see them."
     )
-    existing = coverage.get("note")
-    coverage["note"] = f"{existing} {note}" if existing else note
+    _append_coverage_note(coverage, note)
+
+
+#: The ceiling on the automatic `limit` raise below.
+#:
+#: Deliberately larger than either server's hard fan-out cap (15 free, 60
+#: paid), so the raise always reaches every combination a call can possibly
+#: search. It exists so that raising a fan-out cap later cannot silently turn
+#: one tool call into an unbounded response.
+MAX_AUTO_LIMIT = 60
+
+
+def _effective_limit(limit: int, combinations: int) -> tuple[int, str | None]:
+    """`limit`, raised to cover every combination this call will search.
+
+    Returns `(limit, note)`; `note` is None when nothing was changed.
+
+    A `limit` below the number of date/destination combinations cannot show
+    them all, and what it drops is not "some extra rows" -- it is whole
+    searches that ran and answered. The per-combination floor in
+    `_select_rows` makes that visible instead of silent, but visible is the
+    consolation prize. The fix a caller actually wants is to not lose the
+    searches at all, and the server knows the number of combinations before
+    it knows anything else, so it can simply ask for enough rows.
+
+    Raised, never lowered: an explicit `limit: 200` is left alone. The raise
+    is capped at MAX_AUTO_LIMIT so a caller cannot turn a small `limit` into
+    an unbounded response by widening the fan-out.
+
+    Deliberately not an error. Rejecting the call would be the strictest
+    reading of "catch it before the model sees anything", and it would fail a
+    search over a default argument the model never chose -- `limit` defaults
+    to 10 and five destinations over three dates is fifteen combinations, so
+    the common flexible search would start erroring. The response says what
+    was done in `search_coverage.note`.
+    """
+    if combinations <= 0 or limit >= combinations:
+        return limit, None
+    raised = min(combinations, MAX_AUTO_LIMIT)
+    if raised <= limit:
+        return limit, None
+    note = (
+        f"`limit` was {limit}, fewer than the {combinations} date/destination "
+        f"combinations this search covers, so it was raised to {raised} before "
+        "the search ran. Below that, whole combinations -- searches that ran "
+        "and found flights -- would have had no row in `results`. Pass a "
+        "larger `limit` to see more than one fare per combination."
+    )
+    return raised, note
+
+
+def _row_price(row: dict[str, Any]) -> float | None:
+    """The fare on a row, one-way or round-trip, or None."""
+    for field_name in ("price_as_number", "total_price_as_number"):
+        value = row.get(field_name)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _cheapest_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The lowest-priced of `rows`, or None. Unpriced rows sort last."""
+    if not rows:
+        return None
+    return min(rows, key=_row_sort_key("price"))
+
+
+#: Why a requested destination (or one of its dates) has no rows in
+#: `results`. Every value is a fact about OUR pipeline, not a guess about
+#: the route:
+#:
+#:   ok            -- it has rows in `results`
+#:   no_flights    -- searched, answered, and Google had no itineraries
+#:   search_failed -- searched and the search errored; nothing is known
+#:   not_in_limit  -- searched, found flights, and no row fit in `limit`
+#:   not_searched  -- never searched; the fan-out cap sampled it away
+#:
+#: Declared as an enum in src/output_schema.py (DESTINATION_REASONS); add a
+#: value there and here together or a validating client rejects the response.
+
+
+def _combo_key(combo: dict[str, str]) -> tuple[str, str]:
+    return (
+        str(combo.get("to_airport") or ""),
+        str(combo.get("departure_date") or ""),
+    )
+
+
+def _by_destination(
+    plan: SearchPlan,
+    groups: list[tuple[dict[str, str], list[dict[str, Any]]]],
+    failed_combos: list[dict[str, str]],
+    rows: list[dict[str, Any]],
+    combo_of_row: list[int],
+) -> dict[str, dict[str, Any]]:
+    """One entry per REQUESTED destination, present whether or not it has rows.
+
+    Why this exists (a reader of the 2026-09-08 r/AI_Agents post made the
+    point, and he is right): `search_coverage.truncated` is one more boolean
+    in a response, and a boolean is a thing a model can read and not act on.
+    A fixed shape is not. If every destination the caller asked for has an
+    entry, then a destination with an empty `rows` array is a hole the model
+    has to look at to summarise the answer at all -- it cannot skip what is
+    sitting in the structure it is reading.
+
+    So the keys here are the destinations from the REQUEST, in request order,
+    not the destinations that came back. A destination the fan-out cap never
+    searched, one whose searches all failed, and one Google genuinely has no
+    flights for are three different facts, and each gets its own `reason`
+    rather than all three arriving as absence.
+
+    `rows` are the rows for that destination that are in `results` -- the same
+    objects, the same order, no second set of data and nothing hidden here
+    that is not in the answer. `cheapest` is the lowest-priced of them, which
+    on a `sort_by: "duration"` search is the cheapest of what was selected
+    rather than of everything found; the entry is a view of the answer, not a
+    second search.
+
+    `dates` appears only on multi-date searches, for the same reason as the
+    destination keys: on "cheapest week in October", a date that was sampled
+    away is exactly the thing a reader assumes was checked.
+    """
+    requested_keys = [
+        _combo_key(c) for c in (plan.requested_combos or plan.combos)
+    ]
+    executed_keys = {_combo_key(c) for c in plan.combos}
+    failed_keys = {_combo_key(c) for c in failed_combos}
+    # Rows the BACKEND returned per combination, before `limit` cut anything.
+    # The difference between this and the selected rows is what separates
+    # "found nothing" from "found something that did not fit".
+    returned: dict[tuple[str, str], int] = {}
+    for combo, combo_rows in groups:
+        key = _combo_key(combo)
+        returned[key] = returned.get(key, 0) + len(combo_rows)
+
+    # Rows in the ANSWER per combination, mapped positionally: `rows` has been
+    # through `_annotate_book_labels`, which copies, so matching on object
+    # identity would find nothing.
+    # Carries the position so a destination spread over several dates can be
+    # put back into `results` order without comparing row dicts for equality
+    # -- two identical fares on two dates are equal and are not the same row.
+    selected: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
+    for position, (row, index) in enumerate(zip(rows, combo_of_row)):
+        if 0 <= index < len(groups):
+            selected.setdefault(_combo_key(groups[index][0]), []).append(
+                (position, row)
+            )
+
+    def reason_for(keys: list[tuple[str, str]], row_count: int) -> tuple[bool, str]:
+        searched = any(key in executed_keys for key in keys)
+        if row_count:
+            return searched, "ok"
+        if not searched:
+            return False, "not_searched"
+        if any(returned.get(key, 0) for key in keys):
+            return True, "not_in_limit"
+        if any(key in failed_keys for key in keys):
+            return True, "search_failed"
+        return True, "no_flights"
+
+    dates_requested = plan.requested_departure_dates
+    multi_date = len(dates_requested) > 1
+
+    out: dict[str, dict[str, Any]] = {}
+    for destination in plan.requested_destinations:
+        keys = [key for key in requested_keys if key[0] == destination]
+        dest_rows = [
+            row
+            for _position, row in sorted(
+                pair for key in keys for pair in selected.get(key, [])
+            )
+        ]
+        searched, reason = reason_for(keys, len(dest_rows))
+        entry: dict[str, Any] = {
+            "rows": dest_rows,
+            "cheapest": _cheapest_row(dest_rows),
+            "searched": searched,
+            "reason": reason,
+        }
+        if multi_date:
+            per_date: dict[str, dict[str, Any]] = {}
+            for day in dates_requested:
+                key = (destination, day)
+                if key not in keys:
+                    # Never requested for this destination -- a round trip
+                    # whose return date fell before this departure date, for
+                    # one. Claiming it as a hole would be inventing one.
+                    continue
+                day_rows = [row for _position, row in selected.get(key, [])]
+                day_searched, day_reason = reason_for([key], len(day_rows))
+                cheapest = _cheapest_row(day_rows)
+                per_date[day] = {
+                    "searched": day_searched,
+                    "reason": day_reason,
+                    "row_count": len(day_rows),
+                    "cheapest_price": (
+                        _row_price(cheapest) if cheapest is not None else None
+                    ),
+                }
+            entry["dates"] = per_date
+        out[destination] = entry
+    return out
 
 
 def _usage_block(
@@ -857,6 +1091,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
             raise ToolError(str(exc)) from exc
 
+        # Up front, before anything is searched: a `limit` that cannot cover
+        # the fan-out is a defect in the request, not something to discover in
+        # the response. See _effective_limit.
+        limit, raised_limit_note = _effective_limit(
+            limit, plan.executed_combinations
+        )
+
         state = _UpstreamState()
 
         async def run_search(endpoint: str, payload: dict[str, Any]):
@@ -979,7 +1220,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # Not a slice off the merged list: that dropped whole destinations
         # whose cheapest fare fell past `limit` while still naming them in
         # search_coverage. See _select_rows.
-        rows, hidden_combos = _select_rows(outcome.results_by_combo, sort_by, limit)
+        rows, hidden_combos, combo_of_row = _select_rows_by_combo(
+            outcome.results_by_combo, sort_by, limit
+        )
 
         await log(
             requested=plan.requested_combinations,
@@ -992,10 +1235,20 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
         coverage = plan.coverage()
         _note_hidden_combinations(coverage, hidden_combos, limit)
+        _append_coverage_note(coverage, raised_limit_note)
 
         response: dict[str, Any] = {
             "results": rows,
             "result_count": len(rows),
+            # One entry per destination the caller ASKED for, empty ones
+            # included. See _by_destination.
+            "by_destination": _by_destination(
+                plan,
+                outcome.results_by_combo,
+                outcome.failed_combos,
+                rows,
+                combo_of_row,
+            ),
             "search_coverage": coverage,
             "api_usage": _usage_block(
                 outcome.backend_calls_made,
@@ -1144,7 +1397,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "several destinations -- do NOT call it once per date. 'Cheapest "
             "flight to Sri Lanka anywhere in October' is one call, not thirty.\n\n"
             "Each date/destination combination is one billed request; the "
-            "count and the plan's remaining quota come back in `api_usage`."
+            "count and the plan's remaining quota come back in `api_usage`.\n\n"
+            "`by_destination` carries one entry per destination you asked for "
+            "-- empty ones included, each with a `reason` -- so read it before "
+            "telling a user a destination has no flights."
         ),
     )
     @document_params
@@ -1287,7 +1543,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "trip lengths -- '5 to 7 nights in Rome sometime in May' is one "
             "call.\n\n"
             "Each date/destination combination is one billed request; the "
-            "count and the plan's remaining quota come back in `api_usage`."
+            "count and the plan's remaining quota come back in `api_usage`.\n\n"
+            "`by_destination` carries one entry per destination you asked for "
+            "-- empty ones included, each with a `reason` -- so read it before "
+            "telling a user a destination has no flights."
         ),
     )
     @document_params

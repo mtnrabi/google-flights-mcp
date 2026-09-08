@@ -183,6 +183,16 @@ def normalise_origin(from_airport: str | list[str]) -> str:
     return codes[0]
 
 
+def _ordered_unique(values) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
 @dataclass
 class SearchPlan:
     """A capped, ordered list of concrete backend searches."""
@@ -192,10 +202,41 @@ class SearchPlan:
     requested_combinations: int
     cap: int
     degraded_reason: str | None = None
+    #: Every combination the request expanded to, BEFORE the cap sampled it.
+    #: `combos` is what will actually be searched; this is what was asked for.
+    #:
+    #: The count alone (`requested_combinations`) was enough while the only
+    #: question was "how much did we drop". It is not enough to answer "did
+    #: destination X get looked at", because a destination the even sampling
+    #: skipped entirely is absent from `combos` and there is then nothing left
+    #: in the plan that remembers it was ever requested. The response builds
+    #: one entry per requested destination and date off this list, so a
+    #: destination that was never searched is a visible hole rather than a
+    #: silent omission.
+    #:
+    #: Defaults to empty for plans built by hand (tests, older callers); the
+    #: two accessors below fall back to `combos` in that case.
+    requested_combos: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def executed_combinations(self) -> int:
         return len(self.combos)
+
+    @property
+    def requested_destinations(self) -> list[str]:
+        """Destination codes as the caller gave them, in request order."""
+        return _ordered_unique(
+            str(c.get("to_airport") or "")
+            for c in (self.requested_combos or self.combos)
+        )
+
+    @property
+    def requested_departure_dates(self) -> list[str]:
+        """Departure dates as the caller gave them, in request order."""
+        return _ordered_unique(
+            str(c.get("departure_date") or "")
+            for c in (self.requested_combos or self.combos)
+        )
 
     @property
     def truncated(self) -> bool:
@@ -389,6 +430,7 @@ def _cap_plan(
         combos=capped,
         requested_combinations=requested,
         cap=cap,
+        requested_combos=list(combos),
     )
 
 

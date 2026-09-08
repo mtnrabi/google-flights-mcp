@@ -31,7 +31,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: search one-way flights"
       },
-      "description": "FlightPowers one-way fare search: live prices read from Google Flights. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- plus either one departure date or a date range. Returns each flight's price, airline, duration, stops, a bookable buy_link, and Google's historical price range (price_insights_low / price_insights_high) so you can say whether a fare is actually a good deal.\n\nUse it for any one-way fare question, including open-ended ones. For a flexible search make ONE call with a date range and/or several destinations -- do NOT call it once per date. 'Cheapest flight to Sri Lanka anywhere in October' is one call, not thirty.\n\nEach date/destination combination is one billed request; the count and the plan's remaining quota come back in `api_usage`.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
+      "description": "FlightPowers one-way fare search: live prices read from Google Flights. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- plus either one departure date or a date range. Returns each flight's price, airline, duration, stops, a bookable buy_link, and Google's historical price range (price_insights_low / price_insights_high) so you can say whether a fare is actually a good deal.\n\nUse it for any one-way fare question, including open-ended ones. For a flexible search make ONE call with a date range and/or several destinations -- do NOT call it once per date. 'Cheapest flight to Sri Lanka anywhere in October' is one call, not thirty.\n\nEach date/destination combination is one billed request; the count and the plan's remaining quota come back in `api_usage`.\n\n`by_destination` carries one entry per destination you asked for -- empty ones included, each with a `reason` -- so read it before telling a user a destination has no flights.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -290,6 +290,83 @@
             },
             "type": "object"
           },
+          "by_destination": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "properties": {
+                "cheapest": {
+                  "additionalProperties": true,
+                  "description": "The lowest-priced of this destination's rows in `results`, or null when it has none.",
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "dates": {
+                  "additionalProperties": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "cheapest_price": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "enum": [
+                          "ok",
+                          "no_flights",
+                          "search_failed",
+                          "not_in_limit",
+                          "not_searched"
+                        ],
+                        "type": "string"
+                      },
+                      "row_count": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "searched": {
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "description": "Present only on multi-date searches: one entry per departure date requested for this destination, so a date the fan-out cap sampled away is visible rather than absent. `cheapest_price` is null when that date has no row in `results`.",
+                  "type": "object"
+                },
+                "reason": {
+                  "enum": [
+                    "ok",
+                    "no_flights",
+                    "search_failed",
+                    "not_in_limit",
+                    "not_searched"
+                  ],
+                  "type": "string"
+                },
+                "rows": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "searched": {
+                  "description": "Whether at least one search actually ran for this destination. False means the fan-out cap dropped it.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "rows",
+                "searched",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "description": "One entry per destination the REQUEST asked for, in request order, present whether or not that destination has any flights in `results`. A destination with an empty `rows` array is a hole in the answer, and `reason` says which kind of hole: 'no_flights' (searched, answered, Google has nothing), 'search_failed' (searched and the search errored, so nothing is known), 'not_in_limit' (searched, found flights, none fitted in `limit`) or 'not_searched' (never searched -- the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\nRead this rather than inferring coverage from `results`: a destination missing from `results` looks identical to one that has no flights, and they are not the same answer. `rows` are the same row objects that are in `results`, in the same order -- nothing here is data the answer does not already contain.",
+            "type": "object"
+          },
           "message": {
             "description": "Present when there is something the model must relay to the user rather than silently absorb -- no results, a degraded search, a missing key or a spent quota.",
             "type": "string"
@@ -392,7 +469,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: search round-trip flights"
       },
-      "description": "FlightPowers round-trip fare search: live prices read from Google Flights, priced as paired legs rather than two separate one-ways. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure date or range, and either a return date or a trip length in nights. Returns the total price for both legs, per-leg airline, stops and duration, and a single bookable buy_link for the trip.\n\nUse it for any return-trip fare question. For a flexible search make ONE call: pass departure_date_from / departure_date_to for the outbound range and `nights` instead of return_date to compare trip lengths -- '5 to 7 nights in Rome sometime in May' is one call.\n\nEach date/destination combination is one billed request; the count and the plan's remaining quota come back in `api_usage`.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
+      "description": "FlightPowers round-trip fare search: live prices read from Google Flights, priced as paired legs rather than two separate one-ways. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure date or range, and either a return date or a trip length in nights. Returns the total price for both legs, per-leg airline, stops and duration, and a single bookable buy_link for the trip.\n\nUse it for any return-trip fare question. For a flexible search make ONE call: pass departure_date_from / departure_date_to for the outbound range and `nights` instead of return_date to compare trip lengths -- '5 to 7 nights in Rome sometime in May' is one call.\n\nEach date/destination combination is one billed request; the count and the plan's remaining quota come back in `api_usage`.\n\n`by_destination` carries one entry per destination you asked for -- empty ones included, each with a `reason` -- so read it before telling a user a destination has no flights.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -643,6 +720,83 @@
                 "type": "integer"
               }
             },
+            "type": "object"
+          },
+          "by_destination": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "properties": {
+                "cheapest": {
+                  "additionalProperties": true,
+                  "description": "The lowest-priced of this destination's rows in `results`, or null when it has none.",
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "dates": {
+                  "additionalProperties": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "cheapest_price": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "enum": [
+                          "ok",
+                          "no_flights",
+                          "search_failed",
+                          "not_in_limit",
+                          "not_searched"
+                        ],
+                        "type": "string"
+                      },
+                      "row_count": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "searched": {
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "description": "Present only on multi-date searches: one entry per departure date requested for this destination, so a date the fan-out cap sampled away is visible rather than absent. `cheapest_price` is null when that date has no row in `results`.",
+                  "type": "object"
+                },
+                "reason": {
+                  "enum": [
+                    "ok",
+                    "no_flights",
+                    "search_failed",
+                    "not_in_limit",
+                    "not_searched"
+                  ],
+                  "type": "string"
+                },
+                "rows": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "searched": {
+                  "description": "Whether at least one search actually ran for this destination. False means the fan-out cap dropped it.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "rows",
+                "searched",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "description": "One entry per destination the REQUEST asked for, in request order, present whether or not that destination has any flights in `results`. A destination with an empty `rows` array is a hole in the answer, and `reason` says which kind of hole: 'no_flights' (searched, answered, Google has nothing), 'search_failed' (searched and the search errored, so nothing is known), 'not_in_limit' (searched, found flights, none fitted in `limit`) or 'not_searched' (never searched -- the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\nRead this rather than inferring coverage from `results`: a destination missing from `results` looks identical to one that has no flights, and they are not the same answer. `rows` are the same row objects that are in `results`, in the same order -- nothing here is data the answer does not already contain.",
             "type": "object"
           },
           "message": {
