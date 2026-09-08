@@ -783,13 +783,34 @@ class OAuthSupport:
         if not token or not token.startswith(ACCESS_TOKEN_PREFIX):
             return None
         try:
-            return await self.store.get_token(hash_secret(token), "access", now=now)
+            record = await self.store.get_token(hash_secret(token), "access", now=now)
         except OAuthStoreError as exc:
             # A database outage is not "your token is bad", but there is no
             # way to serve the request without the lookup, so the caller gets
             # the same 401 and we get the log line.
             logger.warning("access token lookup failed: %s", exc)
             return None
+        if record is None:
+            return None
+        # AUDIENCE. Both products share one deployment, one database and one
+        # stored RapidAPI key per user, so a token approved on the flights
+        # consent page ("search live flight fares") would otherwise be
+        # accepted on the hotels hostname and spend the user's hotels
+        # subscription -- a grant the user was never shown. MCP 2025-06-18
+        # requires a resource server to check that a token was issued for it,
+        # and RFC 8707 exists for exactly this confused-deputy case. The
+        # `resource` column was already written down for this; this is where
+        # it is read. An empty value can only come from a row predating the
+        # column's default and is treated as unscoped, which is what
+        # `resource_matches` already means by "".
+        if not self.resource_matches(record.resource):
+            logger.warning(
+                "access token for %s presented at %s; refused",
+                record.resource,
+                self.resource_url,
+            )
+            return None
+        return record
 
     def challenge_header(self, error: str = "", description: str = "") -> str:
         parts = [f'Bearer resource_metadata="{self.resource_metadata_url}"']

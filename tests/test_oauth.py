@@ -48,7 +48,7 @@ from src.oauth import (
     REFRESH_TOKEN_PREFIX,
     pkce_challenge,
 )
-from src.oauthstore import AuthCode, MemoryOAuthStore, hash_secret
+from src.oauthstore import AuthCode, MemoryOAuthStore, TokenRecord, hash_secret
 from src.webauth import SESSION_COOKIE
 
 GOOGLE_CLIENT_ID = "1234.apps.googleusercontent.com"
@@ -587,6 +587,68 @@ class TestTheInjectedHeaderCannotBeForged:
             )
         assert response.status_code == 401
         assert live.upstream.keys_seen == []
+
+
+class TestATokenIsBoundToTheResourceItWasApprovedFor:
+    """The two products share one deployment, one database and one stored
+    RapidAPI key per user, so a token approved on the flights consent page --
+    which says "search live flight fares" and nothing else -- must not be
+    accepted on the hotels hostname and spend the user's hotels plan. MCP
+    2025-06-18 requires a resource server to check that a token was issued
+    for it; the `resource` column exists for that and this is where it is
+    read."""
+
+    @staticmethod
+    async def _token_for(store, resource: str) -> str:
+        token = oauth_module.mint(ACCESS_TOKEN_PREFIX)
+        await store.put_token(
+            TokenRecord(
+                token_hash=hash_secret(token),
+                kind="access",
+                client_id="fpcl_probe",
+                user_sub=SUB,
+                provider="google",
+                scope="flightpowers:search",
+                resource=resource,
+                expires_at=time.time() + 3600,
+            )
+        )
+        return token
+
+    async def test_a_token_for_the_other_product_is_refused(self, live):
+        await live.key_store.put(SUB, EMAIL, USER_KEY)
+        token = await self._token_for(
+            live.oauth_store, "https://hotels.flightpowers.test/mcp/oauth"
+        )
+        async with Session(live) as session:
+            response = await session.http.post(
+                MCP_OAUTH_PATH,
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={**MCP_HEADERS, "authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 401
+        assert "invalid_token" in response.headers["www-authenticate"]
+        # The point of the test: no search ran and no key was spent.
+        assert live.upstream.keys_seen == []
+
+    @pytest.mark.parametrize(
+        "resource",
+        [ORIGIN, f"{ORIGIN}/", f"{ORIGIN}/mcp", f"{ORIGIN}{MCP_OAUTH_PATH}", ""],
+    )
+    async def test_every_spelling_of_this_server_still_works(self, live, resource):
+        """The check is strict about the host and forgiving about the path:
+        clients in the wild send all of these for the same server."""
+        await live.key_store.put(SUB, EMAIL, USER_KEY)
+        token = await self._token_for(live.oauth_store, resource)
+        async with Session(live) as session:
+            result = await call_tool(
+                session.http,
+                MCP_OAUTH_PATH,
+                SEARCH_ARGS,
+                {"authorization": f"Bearer {token}"},
+            )
+        assert result["result_count"] == 1
+        assert live.upstream.keys_seen == [USER_KEY]
 
 
 # ── the ways it must fail ────────────────────────────────────────────────

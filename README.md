@@ -285,6 +285,14 @@ Everything is opaque and stored as a SHA-256 hash, a dump of the database contai
 can be replayed. Tokens are **not** JWTs, deliberately: a signed token stays valid until it
 expires whatever we decide afterwards, and Disconnect has to mean disconnect.
 
+An access token is checked against the resource it was approved for before it is accepted, not
+only when it is issued. Both products are the same deployment, the same database and the same
+stored RapidAPI key per user, so without that check a token approved on the flights consent page
+— which says "search live flight fares" and nothing else — would be accepted on the hotels
+hostname and spend the user's hotels plan. The check is strict about the host and forgiving about
+the path, because clients in the wild send the origin, `/mcp` and `/mcp/oauth` for the same
+server. `tests/test_oauth.py::TestATokenIsBoundToTheResourceItWasApprovedFor` pins both halves.
+
 ### Running it on your own deployment
 
 **No new environment variable.** It comes on wherever `/connect` is configured, because it reuses
