@@ -18,7 +18,12 @@ import json
 import httpx
 import pytest
 
-from src.server import _select_rows
+from src.server import (
+    MAX_AUTO_LIMIT,
+    _effective_limit,
+    _note_hidden_combinations,
+    _select_rows,
+)
 from tests.test_server import build_with_upstream, call
 
 DESTINATIONS = ["BCN", "LIS", "ATH", "IST", "CDG"]
@@ -118,18 +123,36 @@ class TestTheLisbonCase:
 
 
 class TestLimitSmallerThanTheFanout:
+    """A `limit` that cannot cover the fan-out is fixed before the search.
+
+    Every combination here is a request billed to the caller's own RapidAPI
+    plan, which makes the old behaviour worse on this server than on the free
+    one: fifteen paid searches, four rows, and an explanation of which eleven
+    they could not see. The number of combinations is known before any of them
+    runs, so `limit` is raised to cover them and the coverage says so.
+    """
+
     @pytest.mark.asyncio
-    async def test_coverage_is_marked_truncated_and_names_the_missing(self):
+    async def test_limit_is_raised_to_cover_every_combination(self):
         data = await call(build(), "search_oneway_flights", **ONEWAY_ARGS, limit=4)
 
-        coverage = data["search_coverage"]
-        assert data["result_count"] == 4
-        assert coverage["truncated"] is True
-        note = coverage["note"]
+        assert data["result_count"] == TOTAL_COMBOS
+        assert {row["to_airport"] for row in data["results"]} == set(DESTINATIONS)
+
+    @pytest.mark.asyncio
+    async def test_the_note_says_what_was_done_and_why(self):
+        data = await call(build(), "search_oneway_flights", **ONEWAY_ARGS, limit=4)
+
+        note = data["search_coverage"]["note"]
         assert "`limit` was 4" in note
-        assert "11 of them have no row" in note
-        assert "2026-10-06 to LIS" in note
-        assert "and 3 more" in note
+        assert f"raised to {TOTAL_COMBOS}" in note
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_hidden_so_nothing_is_called_truncated(self):
+        data = await call(build(), "search_oneway_flights", **ONEWAY_ARGS, limit=4)
+
+        assert data["search_coverage"]["truncated"] is False
+        assert "have no row" not in data["search_coverage"]["note"]
 
     @pytest.mark.asyncio
     async def test_a_generous_limit_says_nothing_about_hidden_rows(self):
@@ -139,6 +162,18 @@ class TestLimitSmallerThanTheFanout:
 
         assert data["search_coverage"]["truncated"] is False
         assert "note" not in data["search_coverage"]
+
+    def test_the_raise_never_lowers_an_explicit_limit(self):
+        assert _effective_limit(200, TOTAL_COMBOS) == (200, None)
+
+    def test_the_raise_is_bounded(self):
+        raised, note = _effective_limit(10, 500)
+
+        assert raised == MAX_AUTO_LIMIT
+        assert f"raised to {MAX_AUTO_LIMIT}" in note
+
+    def test_a_single_combination_needs_no_raise(self):
+        assert _effective_limit(1, 1) == (1, None)
 
 
 class TestSelectRows:
@@ -167,6 +202,27 @@ class TestSelectRows:
         rows, hidden = _select_rows(groups, "price", 1)
         assert [row["price_as_number"] for row in rows] == [40]
         assert hidden == []
+
+    def test_a_limit_below_the_answering_combinations_names_them(self):
+        """Unreachable through the tool now that the raise happens first, but
+        the floor is a general function; this is the last line of defence."""
+        groups = [
+            self._group("CDG", 40),
+            self._group("BCN", 70),
+            self._group("LIS", 900),
+        ]
+        rows, hidden = _select_rows(groups, "price", 2)
+
+        assert [row["to_airport"] for row in rows] == ["CDG", "BCN"]
+        assert hidden == ["2026-10-06 to LIS"]
+
+    def test_the_note_for_hidden_combinations_still_reads_correctly(self):
+        coverage = {}
+        _note_hidden_combinations(coverage, ["2026-10-06 to LIS"], 2)
+
+        assert coverage["truncated"] is True
+        assert "`limit` was 2" in coverage["note"]
+        assert "2026-10-06 to LIS" in coverage["note"]
 
     def test_a_fare_returned_by_two_combinations_counts_once(self):
         shared = {"buy_link": "https://book/same", "price_as_number": 40}

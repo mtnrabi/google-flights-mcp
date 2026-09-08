@@ -157,6 +157,87 @@ _ACCOUNT_PROPERTIES: dict[str, Any] = {
     },
 }
 
+#: The `reason` vocabulary on a `by_destination` entry. `_by_destination` in
+#: src/server.py is what produces the values; the comment above it says what
+#: each one means.
+DESTINATION_REASONS = (
+    "ok",
+    "no_flights",
+    "search_failed",
+    "not_in_limit",
+    "not_searched",
+)
+
+_BY_DESTINATION: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "One entry per destination the REQUEST asked for, in request order, "
+        "present whether or not that destination has any flights in "
+        "`results`. A destination with an empty `rows` array is a hole in the "
+        "answer, and `reason` says which kind of hole: 'no_flights' (searched, "
+        "answered, Google has nothing), 'search_failed' (searched and the "
+        "search errored, so nothing is known), 'not_in_limit' (searched, found "
+        "flights, none fitted in `limit`) or 'not_searched' (never searched -- "
+        "the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\n"
+        "Read this rather than inferring coverage from `results`: a "
+        "destination missing from `results` looks identical to one that has "
+        "no flights, and they are not the same answer. `rows` are the same "
+        "row objects that are in `results`, in the same order -- nothing here "
+        "is data the answer does not already contain."
+    ),
+    "additionalProperties": {
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "items": {"type": "object", "additionalProperties": True},
+            },
+            "cheapest": {
+                "type": ["object", "null"],
+                "description": (
+                    "The lowest-priced of this destination's rows in "
+                    "`results`, or null when it has none."
+                ),
+                "additionalProperties": True,
+            },
+            "searched": {
+                "type": "boolean",
+                "description": (
+                    "Whether at least one search actually ran for this "
+                    "destination. False means the fan-out cap dropped it."
+                ),
+            },
+            "reason": {"type": "string", "enum": list(DESTINATION_REASONS)},
+            "dates": {
+                "type": "object",
+                "description": (
+                    "Present only on multi-date searches: one entry per "
+                    "departure date requested for this destination, so a date "
+                    "the fan-out cap sampled away is visible rather than "
+                    "absent. `cheapest_price` is null when that date has no "
+                    "row in `results`."
+                ),
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "searched": {"type": "boolean"},
+                        "reason": {
+                            "type": "string",
+                            "enum": list(DESTINATION_REASONS),
+                        },
+                        "row_count": {"type": "integer", "minimum": 0},
+                        "cheapest_price": {"type": ["number", "null"]},
+                    },
+                    "additionalProperties": True,
+                },
+            },
+        },
+        "required": ["rows", "searched", "reason"],
+        "additionalProperties": True,
+    },
+}
+
+
 FLIGHTS_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "title": "Flight search result",
@@ -167,6 +248,7 @@ FLIGHTS_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "results": _RESULT_ROWS,
         "result_count": {"type": "integer", "minimum": 0},
+        "by_destination": _BY_DESTINATION,
         "search_status": {
             "type": "string",
             "enum": list(SEARCH_STATUS_VALUES),
