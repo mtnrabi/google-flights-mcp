@@ -208,8 +208,8 @@ tool actually runs. Step 4 has to be a **real search**.
 
 ## A fifth way: sign in from inside your MCP client (`/mcp/oauth`)
 
-`/connect` works, but no MCP client will ever *start* a sign-in on its own. Nothing on the wire
-tells it one is available. A client only begins an OAuth flow when a request comes back `401` with
+`/connect` works, but no MCP client will ever *start* a sign-in on its own, because nothing on
+the wire tells it one is available. A client only begins an OAuth flow when a request comes back `401` with
 a `WWW-Authenticate: Bearer resource_metadata=…` header, and `/mcp` must never do that: every
 paying caller today authenticates with a RapidAPI key and no bearer token, so challenging them
 would be an outage rather than a feature.
@@ -281,14 +281,14 @@ else would mean either widening that cookie or making the user sign in twice.
 
 Codes live 10 minutes and are single-use (`DELETE … RETURNING`, so two concurrent exchanges race
 on one row and exactly one wins). Access tokens live 1 hour, refresh tokens 30 days with rotation.
-Everything is opaque and stored as a SHA-256 hash, a dump of the database contains nothing that
-can be replayed. Tokens are **not** JWTs, deliberately: a signed token stays valid until it
+Everything is opaque and stored as a SHA-256 hash, so a dump of the database contains nothing
+that can be replayed. Tokens are **not** JWTs, deliberately: a signed token stays valid until it
 expires whatever we decide afterwards, and Disconnect has to mean disconnect.
 
 An access token is checked against the resource it was approved for before it is accepted, not
 only when it is issued. Both products are the same deployment, the same database and the same
-stored RapidAPI key per user, so without that check a token approved on the flights consent page
-— which says "search live flight fares" and nothing else — would be accepted on the hotels
+stored RapidAPI key per user, so without that check a token approved on the flights consent
+page, which says "search live flight fares" and nothing else, would be accepted on the hotels
 hostname and spend the user's hotels plan. The check is strict about the host and forgiving about
 the path, because clients in the wild send the origin, `/mcp` and `/mcp/oauth` for the same
 server. `tests/test_oauth.py::TestATokenIsBoundToTheResourceItWasApprovedFor` pins both halves.
@@ -302,8 +302,8 @@ that Google sign-in and that key store. It needs one more table in the same data
 psql "$DATABASE_URL" -f migrations/002_mcp_oauth.sql
 ```
 
-`/health` then reports `oauth_enabled: true` and `oauth_mcp_endpoint`, that URL is what goes in a
-directory listing. `MCP_OAUTH=off` disables it while leaving `/connect` running; that is the
+`/health` then reports `oauth_enabled: true` and `oauth_mcp_endpoint`; that URL is what goes in
+a directory listing. `MCP_OAUTH=off` disables it while leaving `/connect` running; that is the
 rollback that needs no code change.
 
 Nothing has to change on the Google OAuth client. The redirect URI is still
