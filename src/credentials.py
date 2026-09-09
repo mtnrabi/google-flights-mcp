@@ -386,3 +386,113 @@ def find_connect_token(
         if found:
             return found
     return ""
+
+
+# ── one key per source ──────────────────────────────────────────────────
+#
+# Each accommodation source is its own RapidAPI listing and therefore its own
+# subscription. Most callers hold ONE RapidAPI key that is subscribed to
+# several listings, and for them nothing below matters: the generic resolution
+# above finds that key and it is used for every source. The names here exist
+# for the caller who genuinely has two -- two accounts, or a key issued to a
+# different team -- and who today has no way to say so.
+#
+# The order is rule 6's order, unchanged and for the same reason. A source
+# name makes a channel MORE specific, never less, so the provider-scoped names
+# are read before the unscoped ones, and the unscoped ones are read by the
+# function that already gets the gateway case right. A generic name is still
+# last, and still skipped entirely when a `config` parameter is present,
+# because a gateway's own key under a generic name is not our key no matter
+# which source we are resolving for.
+
+
+def provider_header_names(provider: str) -> tuple[str, ...]:
+    """Header spellings that can only mean "the key for THIS source"."""
+    provider = provider.strip().lower()
+    return (
+        f"x-rapidapi-key-{provider}",
+        f"x-{provider}-rapidapi-key",
+        f"x-{provider}-key",
+    )
+
+
+def provider_query_names(provider: str) -> tuple[str, ...]:
+    """Query spellings that can only mean "the key for THIS source"."""
+    provider = provider.strip().lower()
+    return (
+        f"rapidapi_key_{provider}",
+        f"rapidapi-key-{provider}",
+        f"rapidapikey{provider}",
+        f"{provider}_rapidapi_key",
+        f"{provider}_key",
+    )
+
+
+def provider_config_field_names(provider: str) -> tuple[str, ...]:
+    """Smithery config fields that can only mean "the key for THIS source"."""
+    provider = provider.strip().lower()
+    return (
+        f"rapidapikey{provider}",
+        f"rapidapi_key_{provider}",
+        f"{provider}rapidapikey",
+        f"{provider}_api_key",
+        f"{provider}apikey",
+        f"{provider}_key",
+    )
+
+
+def _provider_specific(
+    provider: str, headers: dict[str, str], query_params: dict[str, str]
+) -> Credential:
+    """A key named for this source, or NO_CREDENTIAL. Never a generic name."""
+    for name in provider_header_names(provider):
+        value = _clean(headers.get(name))
+        if value:
+            return Credential(key=value, source=f"header:{name}")
+
+    lowered = {k.lower(): v for k, v in query_params.items()}
+    for name in provider_query_names(provider):
+        value = _clean(lowered.get(name))
+        if value:
+            return Credential(key=value, source=f"query:{name}")
+
+    fields = provider_config_field_names(provider)
+    for name, value in lowered.items():
+        if not name.startswith(CONFIG_QUERY_PREFIX):
+            continue
+        if name[len(CONFIG_QUERY_PREFIX) :] in fields:
+            cleaned = _clean(value)
+            if cleaned:
+                return Credential(key=cleaned, source=f"query:{name}")
+
+    blob = _decode_config_blob(lowered.get("config", ""))
+    for name, value in blob.items():
+        if name.lower() in fields:
+            cleaned = _clean(value)
+            if cleaned:
+                return Credential(key=cleaned, source=f"query:config:{provider}")
+
+    return NO_CREDENTIAL
+
+
+def resolve_provider_credential(
+    provider: str,
+    headers: dict[str, str],
+    query_params: dict[str, str],
+    shared: Credential = NO_CREDENTIAL,
+) -> Credential:
+    """The key to bill THIS source against.
+
+    `shared` is the credential already resolved for the request -- the header
+    key, the query key, or a key read out of the connect/OAuth store. It is the
+    answer for almost everybody, and it is used unless the caller named a key
+    for this source specifically.
+
+    Returns NO_CREDENTIAL when there is neither. The caller reports that as a
+    SKIPPED source with a subscribe URL; it never falls back to a server-side
+    key, because a source billed to us is a gateway we pay for.
+    """
+    specific = _provider_specific(provider, headers, query_params)
+    if specific.present:
+        return specific
+    return shared if shared.present else NO_CREDENTIAL

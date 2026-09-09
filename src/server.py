@@ -36,8 +36,11 @@ Design notes carried over from the free server, still true here
 
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import logging
 import os
+import statistics
 import time
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Callable
@@ -67,6 +70,7 @@ from .connect import (
     signed_out_html,
 )
 from .credentials import (
+    resolve_provider_credential,
     NO_CREDENTIAL,
     Credential,
     find_connect_token,
@@ -116,8 +120,17 @@ from .hotels_client import (
     unknown_filters,
 )
 from .output_schema import (
+    COMPARE_OUTPUT_SCHEMA,
     FLIGHTS_OUTPUT_SCHEMA,
     HOTELS_OUTPUT_SCHEMA,
+)
+from . import providers as ota
+from .providers import (
+    BOOKING,
+    DEFAULT_COMPARE_PROVIDERS,
+    DEFAULT_SEARCH_PROVIDERS,
+    ProviderOutcome,
+    UnknownProvider,
 )
 from .prompts import register_prompts
 from .schema_docs import document_params
@@ -127,6 +140,7 @@ from .fanout import (
     SearchPlan,
     execute_plan,
     normalise_origin,
+    plan_hotel_stays,
     plan_oneway,
     plan_roundtrip,
 )
@@ -167,6 +181,12 @@ SERVICE_NAME = "google-flights-mcp"
 # Per-deployment name. `service` is what /health reports and what registries
 # poll, so a hotels-only deployment calling itself "google-flights-mcp" is a
 # small lie in a place people read.
+#: The build a client sees in `serverInfo`, and the build the api front sees
+#: in `X-FP-Client` (rule 11: the front overwrites body attribution with its
+#: own conclusion, so the header is the only thing that identifies us). One
+#: constant, so the two can never name different versions of the same process.
+SERVER_VERSION = "1.0.0"
+
 SERVICE_NAMES = {
     "flights": "google-flights-mcp",
     "hotels": "booking-hotels-mcp",
@@ -206,6 +226,24 @@ def upstream_api_name(product: str) -> str:
 BILLING_UNIT_NOTES = {
     "flights": "Each date and destination combination is one billed request.",
     "hotels": "Each hotel search is one billed request; there is no fan-out.",
+    # The date-range form is the one hotel call that can cost more than one
+    # request, so it says so in the same breath as the number. A caller who
+    # believes one question costs one request and finds fifteen on an invoice
+    # does not come back -- and "you asked for fifteen stays" is only a
+    # defensible answer if it was stated at the time.
+    "hotels_range": (
+        "Each stay -- one check-in date paired with one length -- is one "
+        "billed request."
+    ),
+    # Each source is a separate listing and a separate subscription, so two
+    # sources is two billed requests -- one against each plan, not two against
+    # one. Said out loud for the same reason the flights note is: a caller who
+    # believes one question costs one request and finds two on an invoice does
+    # not come back.
+    "hotels_multi": (
+        "Each source searched is one billed request against that source's own "
+        "RapidAPI subscription; there is no fan-out within a source."
+    ),
 }
 
 
@@ -255,6 +293,21 @@ _HOTELS_BODY = (
     "free_cancellation or breakfast_included; an unknown name is rejected "
     "with the valid list rather than silently ignored, so a filtered search "
     "never quietly returns unfiltered results.\n\n"
+    "`compare_hotel_rates` prices the SAME stay on more than one source and "
+    "returns one row per source: cheapest total, median total, how many "
+    "places were priced, the currency and when the rows were read. Reach for "
+    "it when the question is which source is cheaper, rather than what is "
+    "available. Before saying one source wins, read the row: `rating_scale` "
+    "is 10 on Booking.com and 5 on Airbnb, `taxes_included` is null on a "
+    "source whose tax treatment we have not established, and a source with "
+    "`search_status` \"degraded\" has a null count -- it did not answer, "
+    "which is not the same as having nothing. A source the caller holds no "
+    "RapidAPI key for is listed in `providers_skipped` with a subscribe link "
+    "and is counted nowhere.\n\n"
+    "`providers` on `search_hotels` does the same thing for a normal search: "
+    "[\"booking\"] is the default and every existing call keeps it, and "
+    "naming a second source merges its rows in with a `provider` field on "
+    "each one. Each source is its own RapidAPI subscription.\n\n"
     "`find_hotel_by_name` prices ONE named property. Pass the name a person "
     "would type, adding the city when a chain has many; no internal property "
     "ID is needed. Use it for a question about a specific hotel, and call it "
@@ -269,8 +322,21 @@ _HOTELS_BODY = (
     "country can show a gap that is not there; omit it for a neutral price. "
     "Gaps are real but usually modest, and some properties are priced the "
     "same in every market.\n\n"
-    "There is no fan-out here: one tool call is exactly one request "
-    "against the caller's plan, so pricing a five-property set costs five."
+    "`search_hotels` and `find_hotel_by_name` also take a check-in RANGE "
+    "(`checkin_date_from`, `checkin_date_to`) and a `nights` value (a number, "
+    "or a list like [2, 3, 7]) instead of a fixed check-out date, and price "
+    "every stay that expands to in ONE call. Reach for it whenever the dates "
+    "are open -- \"cheapest week in May\", \"is the 12th cheaper than the "
+    "19th\" -- rather than picking one date and calling its price the "
+    "cheapest. The answer is `stays`, one entry per stay with its cheapest "
+    "property, its per-night price and its median, plus `cheapest_overall`; "
+    "`results` holds the full property list for the cheapest stay only. "
+    "`search_coverage` names the exact stays priced, a stay the cap sampled "
+    "away says `not_searched` rather than going missing, and a stay whose "
+    "search errored says `degraded`, which is not \"no rooms\".\n\n"
+    "That range is the only fan-out here: every other call is exactly one "
+    "request against the caller's plan, so pricing a five-property set costs "
+    "five, and a range costs one request per stay. `max_searches` caps it."
 )
 
 # What a model calls this when it writes the answer. Without a name in the
@@ -931,6 +997,293 @@ def _by_destination(
     return out
 
 
+# ── hotel stays ──────────────────────────────────────────────────────────
+
+
+def hotel_rows(body: Any) -> list[dict[str, Any]]:
+    """The property rows in a hotels response, whatever shape it arrived in.
+
+    `/search` answers with an object carrying `properties`; `/hotel_by_name`
+    answers with a single property. Normalised to a list so nothing
+    downstream -- and no model -- has to branch on the shape.
+    """
+    if isinstance(body, dict):
+        rows = body.get("properties")
+        if rows is None:
+            rows = [body]
+    elif isinstance(body, list):
+        rows = body
+    else:
+        rows = []
+    return rows
+
+
+#: Row fields dropped from the per-stay summaries.
+#:
+#: Measured on one real search (Rome, 2 nights, 25 properties): 25,892 bytes
+#: of JSON, 18,989 of them URLs -- a Booking deep link carrying a session blob
+#: plus an image CDN URL on every row. 73% of what the model is handed, it
+#: never reads. A fan-out repeats that per stay, so the summaries keep the
+#: booking link, which is the actionable half, and drop the image URL, which
+#: no model can open. Full rows, image URLs included, are still returned for
+#: the one stay that won.
+_SUMMARY_DROPPED_FIELDS = (
+    "image_url",
+    "image",
+    "images",
+    "photo",
+    "photos",
+    "thumbnail",
+    "thumbnail_url",
+)
+
+
+def _property_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k not in _SUMMARY_DROPPED_FIELDS}
+
+
+#: Why a requested stay has no cheapest property. Every value is a fact about
+#: our own pipeline, not a guess about the hotel:
+#:
+#:   ok              -- it was priced
+#:   no_availability -- searched, answered, and nothing came back at all
+#:   no_price        -- searched, properties came back, none carried a price
+#:                      (`available: false` on a named property lands here)
+#:   search_failed   -- searched and the search errored; nothing is known
+#:   not_searched    -- never searched; the fan-out cap sampled it away
+#:
+#: Declared as an enum in src/output_schema.py (STAY_REASONS); add a value
+#: there and here together or a validating client rejects the response.
+STAY_REASONS = (
+    "ok",
+    "no_availability",
+    "no_price",
+    "search_failed",
+    "not_searched",
+)
+
+
+def _stay_key(combo: dict[str, str]) -> tuple[str, str]:
+    return (str(combo.get("checkin_date") or ""), str(combo.get("checkout_date") or ""))
+
+
+def _priced(rows: list[dict[str, Any]]) -> list[tuple[float, dict[str, Any]]]:
+    """`(total, row)` for the rows that carry a price, cheapest first.
+
+    Unpriced rows are excluded rather than sorted last: a property with no
+    number on it is not evidence about what the stay costs, which is the same
+    rule `providers.summarise` applies to a cross-source comparison.
+    """
+    pairs = [(ota.row_total(row), row) for row in rows]
+    priced = [(total, row) for total, row in pairs if total is not None]
+    priced.sort(key=lambda pair: pair[0])
+    return priced
+
+
+def _per_night(total: float | None, nights: int | None) -> float | None:
+    if total is None or not nights:
+        return None
+    return round(total / nights, 2)
+
+
+def _stay_entries(
+    plan: SearchPlan, outcome: FanoutResult
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str], list[dict[str, Any]]]]:
+    """One entry per stay the REQUEST asked for, in request order.
+
+    The same argument as `_by_destination` on the flights side: a boolean in
+    `search_coverage` is a thing a model can read and not act on, and a fixed
+    shape is not. A stay the cap never priced, a stay whose search errored and
+    a stay Booking genuinely has nothing for are three different facts, and
+    each carries its own `reason` rather than all three arriving as absence.
+
+    Returns the entries and the rows per stay, so the caller can hand back the
+    full rows of whichever stay won without grouping them a second time.
+    """
+    executed = {_stay_key(c) for c in plan.combos}
+    failed = {_stay_key(c) for c in outcome.failed_combos}
+
+    rows_by_stay: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for combo, rows in outcome.results_by_combo:
+        rows_by_stay.setdefault(_stay_key(combo), []).extend(rows)
+
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for stay in plan.requested_stays:
+        key = (stay["checkin_date"], stay["checkout_date"])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        entry: dict[str, Any] = {
+            "checkin_date": key[0],
+            "checkout_date": key[1],
+            "nights": _nights_between(key[0], key[1]),
+        }
+        if key not in executed:
+            # Counts stay null rather than zero. Zero reads as "nothing there",
+            # which is precisely what an unsearched stay does not know.
+            entry.update(
+                {
+                    "search_status": "not_searched",
+                    "reason": "not_searched",
+                    "property_count": None,
+                    "priced_count": None,
+                }
+            )
+        elif key in failed:
+            entry.update(
+                {
+                    "search_status": "degraded",
+                    "reason": "search_failed",
+                    "property_count": None,
+                    "priced_count": None,
+                }
+            )
+        else:
+            rows = rows_by_stay.get(key, [])
+            priced = _priced(rows)
+            entry.update(
+                {
+                    "search_status": "ok" if priced else "empty",
+                    "reason": (
+                        "ok"
+                        if priced
+                        else ("no_price" if rows else "no_availability")
+                    ),
+                    "property_count": len(rows),
+                    "priced_count": len(priced),
+                }
+            )
+            if priced:
+                total, row = priced[0]
+                entry["cheapest_total"] = total
+                entry["price_per_night"] = _per_night(total, entry["nights"])
+                entry["median_total"] = float(
+                    statistics.median(t for t, _ in priced)
+                )
+                entry["currency"] = ota.row_currency(row)
+                entry["cheapest"] = _property_summary(row)
+
+        entry.setdefault("cheapest_total", None)
+        entry.setdefault("price_per_night", None)
+        entry.setdefault("median_total", None)
+        entry.setdefault("currency", None)
+        entry.setdefault("cheapest", None)
+        entries.append(entry)
+
+    return entries, rows_by_stay
+
+
+def build_stay_response(
+    plan: SearchPlan,
+    outcome: FanoutResult,
+    quota: dict[str, int],
+) -> dict[str, Any]:
+    """The answer to a date-range hotel search.
+
+    Bounded on purpose. The obvious shape -- every property of every stay --
+    is 25 KB per stay before the cap is reached, most of it URLs nothing
+    reads, and a model handed fifteen of those summarises three of them. So
+    each stay reports its cheapest property, its per-night price and its
+    median, and the FULL rows come back for the one stay that won, which is
+    the stay anybody is going to act on.
+    """
+    entries, rows_by_stay = _stay_entries(plan, outcome)
+
+    winner: dict[str, Any] | None = None
+    for entry in entries:
+        if entry["cheapest_total"] is None:
+            continue
+        if winner is None or entry["cheapest_total"] < winner["cheapest_total"]:
+            winner = entry
+
+    results: list[dict[str, Any]] = []
+    cheapest_overall: dict[str, Any] | None = None
+    if winner is not None:
+        key = (winner["checkin_date"], winner["checkout_date"])
+        results = rows_by_stay.get(key, [])
+        cheapest_overall = {
+            "checkin_date": winner["checkin_date"],
+            "checkout_date": winner["checkout_date"],
+            "nights": winner["nights"],
+            "total": winner["cheapest_total"],
+            "price_per_night": winner["price_per_night"],
+            "currency": winner["currency"],
+            "property": winner["cheapest"],
+        }
+
+    searched = [e for e in entries if e["search_status"] != "not_searched"]
+    degraded = [e for e in searched if e["search_status"] == "degraded"]
+    priced = [e for e in searched if e["search_status"] == "ok"]
+    if priced:
+        status = "partial" if degraded else "ok"
+    else:
+        status = "degraded" if degraded else "empty"
+
+    response: dict[str, Any] = {
+        "results": results,
+        "result_count": len(results),
+        # Which stay `results` belongs to. Without it the rows read as "the
+        # search's results" and a model quotes them against whichever date it
+        # had in mind.
+        "results_for_stay": (
+            {
+                "checkin_date": winner["checkin_date"],
+                "checkout_date": winner["checkout_date"],
+                "nights": winner["nights"],
+            }
+            if winner is not None
+            else None
+        ),
+        "stays": entries,
+        "cheapest_overall": cheapest_overall,
+        "search_status": status,
+        "search_coverage": plan.coverage(),
+        "api_usage": _usage_block(
+            outcome.backend_calls_made, quota, BILLING_UNIT_NOTES["hotels_range"]
+        ),
+    }
+
+    if degraded:
+        response["partial"] = (
+            f"{len(degraded)} of {len(searched)} stays could not be priced "
+            "(the search errored); the other stays are unaffected. A stay with "
+            "search_status \"degraded\" is not a stay with no availability."
+        )
+    if not priced:
+        if degraded:
+            response["message"] = (
+                f"None of the {len(searched)} stays searched could be priced -- "
+                "every search errored, so nothing is known about availability "
+                "on these dates. This is not \"no rooms\"; it is safe to retry."
+            )
+        else:
+            response["message"] = (
+                f"No priced availability came back for any of the "
+                f"{len(searched)} stays searched. Booking has nothing bookable "
+                "for some destination and date combinations; try different "
+                "dates, a wider check-in range, or a different length of stay."
+            )
+    return response
+
+
+def _nights_between(checkin_date: str, checkout_date: str) -> int | None:
+    """Nights between two ISO dates, or None when they are not readable.
+
+    None rather than a raise: the dates are validated upstream, and a
+    comparison that succeeded must not be thrown away because a convenience
+    field could not be derived from a string the backend accepted.
+    """
+    try:
+        start = dt.date.fromisoformat(str(checkin_date).strip())
+        end = dt.date.fromisoformat(str(checkout_date).strip())
+    except (TypeError, ValueError):
+        return None
+    nights = (end - start).days
+    return nights if nights > 0 else None
+
+
 def _usage_block(
     calls: int,
     quota: dict[str, int],
@@ -1018,7 +1371,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     mcp = FastMCP(
         name=service_name(settings.products),
-        version="1.0.0",
+        version=SERVER_VERSION,
         # Carried in `serverInfo` and shown by clients next to the server's
         # name. Both directories ask for a documentation URL on the listing;
         # advertising it on the wire as well means a reviewer connecting
@@ -1891,6 +2244,36 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # here and a caller who has bought both gets everything -- which is why
     # one server can carry both without a second credential.
 
+    def _hotels_no_key_reply(
+        credential: Credential, headers: dict[str, str]
+    ) -> dict[str, Any]:
+        """What a hotels caller with no usable key is told.
+
+        Shared by every hotel tool rather than repeated per tool: this reply is
+        read aloud to a human, it names a listing and a price, and the four
+        product-copy defects in tests/test_product_copy.py were all one copy of
+        a sentence drifting from another.
+        """
+        if credential.source in STORE_MISS_SOURCES:
+            return _reconnect_message(
+                hotels_signup,
+                upstream_api_name("hotels"),
+                credential.source,
+                email=(headers.get(EMAIL_HEADER) or "").strip(),
+            )
+        return {
+            "needs_api_key": True,
+            "results": [],
+            "result_count": 0,
+            "signup_url": hotels_signup,
+            "message": missing_key_message(
+                hotels_signup, upstream_api_name("hotels")
+            ),
+            "how_to_get_a_key": _howto(
+                hotels_signup, upstream_api_name("hotels")
+            ),
+        }
+
     async def _hotels_call(
         endpoint: str,
         payload: dict[str, Any],
@@ -1903,25 +2286,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         credential: Credential = await _resolve(headers, params)
 
         if not credential.present:
-            if credential.source in STORE_MISS_SOURCES:
-                return _reconnect_message(
-                    hotels_signup,
-                    upstream_api_name("hotels"),
-                    credential.source,
-                    email=(headers.get(EMAIL_HEADER) or "").strip(),
-                )
-            return {
-                "needs_api_key": True,
-                "results": [],
-                "result_count": 0,
-                "signup_url": hotels_signup,
-                "message": missing_key_message(
-                    hotels_signup, upstream_api_name("hotels")
-                ),
-                "how_to_get_a_key": _howto(
-                    hotels_signup, upstream_api_name("hotels")
-                ),
-            }
+            return _hotels_no_key_reply(credential, headers)
 
         quota: dict[str, int] = {}
         async with HotelsClient(
@@ -1958,17 +2323,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             except RapidAPIError as exc:
                 raise ToolError(str(exc)) from exc
 
-        # The hotels API answers `/search` with an object carrying
-        # `properties`, and `/hotel_by_name` with a single property. Normalise
-        # to a list so a model does not have to branch on the shape.
-        if isinstance(body, dict):
-            rows = body.get("properties")
-            if rows is None:
-                rows = [body]
-        elif isinstance(body, list):
-            rows = body
-        else:
-            rows = []
+        rows = hotel_rows(body)
 
         logger.info(
             "tool=%s duration_ms=%d results=%d key_source=%s",
@@ -1986,6 +2341,312 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if isinstance(body, dict) and body.get("applied_filters"):
             result["applied_filters"] = body["applied_filters"]
         return result
+
+    async def _hotels_stay_fanout(
+        *,
+        tool: str,
+        endpoint: str,
+        plan_builder,
+        payload_builder,
+        max_searches: int | None,
+    ) -> dict[str, Any]:
+        """Price every stay a check-in range expands to, under the cap.
+
+        The flights path with hotel parts: same planner module, same even
+        sampling, same coverage contract, same "one failing combination does
+        not fail the search". What is deliberately NOT shared is `_run` --
+        that reads `X-Search-Status`, builds `by_destination` and speaks about
+        fares, none of which exists here.
+        """
+        started = time.perf_counter()
+        headers, params = _request_context()
+        credential: Credential = await _resolve(headers, params)
+        if not credential.present:
+            return _hotels_no_key_reply(credential, headers)
+
+        cap = settings.max_searches_per_tool_call
+        if max_searches is not None:
+            if max_searches < 1:
+                raise ToolError("max_searches must be at least 1")
+            cap = min(max_searches, cap)
+
+        try:
+            plan = plan_builder(cap)
+        except PlanError as exc:
+            raise ToolError(str(exc)) from exc
+
+        quota: dict[str, int] = {}
+        state = _UpstreamState()
+        # Kept from the first stay that reports it. A filtered search must
+        # never look like an unfiltered one, and the confirmation the upstream
+        # sends back is the only evidence of which filters it honoured -- the
+        # same reason an unknown filter name is rejected instead of dropped.
+        applied_filters: list[Any] = []
+
+        async with HotelsClient(
+            timeout_seconds=settings.request_timeout_seconds,
+            client=get_shared_client(settings),
+        ) as client:
+
+            async def run_search(_endpoint: str, payload: dict[str, Any]):
+                try:
+                    body = await client.call(
+                        endpoint, payload, api_key=credential.key, quota_sink=quota
+                    )
+                except AuthError as exc:
+                    state.auth_error = str(exc)
+                    raise
+                except QuotaError as exc:
+                    state.quota_error = str(exc)
+                    raise
+                if (
+                    not applied_filters
+                    and isinstance(body, dict)
+                    and body.get("applied_filters")
+                ):
+                    applied_filters.append(body["applied_filters"])
+                return hotel_rows(body)
+
+            outcome: FanoutResult = await execute_plan(
+                plan,
+                build_payload=payload_builder,
+                run_search=run_search,
+                max_concurrency=settings.max_concurrent_searches,
+            )
+
+        async def log(*, results: int, error: str | None) -> None:
+            await telemetry.record(
+                CallRecord(
+                    timestamp=time.time(),
+                    tool=tool,
+                    requested_combinations=plan.requested_combinations,
+                    upstream_calls=outcome.backend_calls_made,
+                    upstream_failures=outcome.backend_failures,
+                    results_returned=results,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    truncated=plan.truncated,
+                    credential_source=credential.source,
+                    error=error,
+                )
+            )
+
+        # Account-level failures first: one fact about the caller, not N
+        # independent search failures, and each has a different fix.
+        if state.auth_error is not None:
+            await log(results=0, error="auth")
+            return {
+                "needs_api_key": True,
+                "results": [],
+                "result_count": 0,
+                "signup_url": hotels_signup,
+                "message": (
+                    f"{state.auth_error} Subscribe to the "
+                    f"{upstream_api_name('hotels')} at {hotels_signup} -- a "
+                    "flights-only subscription does not cover hotel search."
+                ),
+                "how_to_get_a_key": _howto(
+                    hotels_signup, upstream_api_name("hotels")
+                ),
+            }
+        if state.quota_error is not None:
+            await log(results=0, error="quota")
+            raise ToolError(
+                f"{state.quota_error} A check-in range costs one request per "
+                "stay, so a narrower range or a lower max_searches makes a "
+                "remaining quota go further."
+            )
+        if outcome.backend_failures == plan.executed_combinations:
+            await log(results=0, error=outcome.first_error)
+            raise ToolError(
+                f"Hotel search is temporarily unavailable ({outcome.first_error})"
+            )
+
+        response = build_stay_response(plan, outcome, quota)
+        if applied_filters:
+            response["applied_filters"] = applied_filters[0]
+        await log(results=response["result_count"], error=None)
+        logger.info(
+            "tool=%s duration_ms=%d stays=%d searched=%d failed=%d results=%d "
+            "key_source=%s",
+            tool,
+            int((time.perf_counter() - started) * 1000),
+            plan.requested_combinations,
+            outcome.backend_calls_made,
+            outcome.backend_failures,
+            response["result_count"],
+            credential.source,
+        )
+        return response
+
+    # ── more than one source ─────────────────────────────────────────────
+    #
+    # Everything below is reached only when a caller NAMES a source other than
+    # the default. `search_hotels` with no `providers` argument, and
+    # `search_hotels(providers=["booking"])`, both take the single-source path
+    # above and produce the byte-identical response they produced before this
+    # existed. That is asserted, not assumed -- see tests/test_providers.py.
+
+    def _provider_keys(
+        names: list[str],
+        headers: dict[str, str],
+        params: dict[str, str],
+        shared: Credential,
+    ) -> tuple[dict[str, Credential], list[ProviderOutcome]]:
+        """A key per source, and a SKIPPED outcome for each source with none.
+
+        A source with no key is never called on a key of ours. It is named,
+        with the URL where the caller subscribes, and it contributes nothing
+        to the results -- because a source that quietly disappears looks
+        exactly like a source that had nothing, and those are opposite
+        answers.
+        """
+        creds: dict[str, Credential] = {}
+        skips: list[ProviderOutcome] = []
+        for name in names:
+            credential = resolve_provider_credential(name, headers, params, shared)
+            if credential.present:
+                creds[name] = credential
+            else:
+                skips.append(ota.skipped(name, "no_key", ota.no_key_detail(name)))
+        return creds, skips
+
+    async def _booking_outcome(
+        payload: dict[str, Any], api_key: str
+    ) -> ProviderOutcome:
+        """Booking, on the path it has always used: the RapidAPI edge.
+
+        Every failure becomes an outcome rather than an exception. One source
+        failing must not take the other source's rows down with it, which is
+        exactly what a raised ToolError inside an asyncio.gather would do.
+        """
+        quota: dict[str, int] = {}
+        async with HotelsClient(
+            timeout_seconds=settings.request_timeout_seconds,
+            client=get_shared_client(settings),
+        ) as client:
+            try:
+                body = await client.call(
+                    "search", payload, api_key=api_key, quota_sink=quota
+                )
+            except AuthError as exc:
+                return ota.skipped(
+                    BOOKING,
+                    "not_subscribed",
+                    ota.not_subscribed_detail(BOOKING, str(exc)),
+                )
+            except QuotaError as exc:
+                return ota.degraded(BOOKING, "quota_exhausted", str(exc))
+            except RapidAPIError as exc:
+                return ota.degraded(BOOKING, "upstream_error", str(exc))
+
+        applied: Any = None
+        if isinstance(body, dict):
+            raw = body.get("properties")
+            if raw is None:
+                raw = [body] if body.get("name") else []
+            applied = body.get("applied_filters")
+        elif isinstance(body, list):
+            raw = body
+        else:
+            raw = []
+
+        rows = ota.stamp_rows(raw, BOOKING)
+        status = "ok" if rows else "empty"
+        return ProviderOutcome(
+            provider=BOOKING,
+            status=status,
+            reason=status,
+            rows=rows,
+            quota=quota,
+            applied_filters=applied,
+        )
+
+    async def _front_outcome(
+        provider: str, payload: dict[str, Any], api_key: str
+    ) -> ProviderOutcome:
+        """A source that is not on the RapidAPI edge, through our own front."""
+        return await ota.search_via_front(
+            get_shared_client(settings),
+            provider=provider,
+            base_url=settings.api_front_base_url,
+            api_key=api_key,
+            payload=payload,
+            version=SERVER_VERSION,
+            timeout_seconds=settings.request_timeout_seconds,
+        )
+
+    async def _price_on_sources(
+        creds: dict[str, Credential],
+        *,
+        destination: str,
+        checkin_date: str,
+        checkout_date: str,
+        adults: int | None,
+        children: int | None,
+        currency: str | None,
+        budget_per_night: int | None = None,
+        price_as_seen_from: str | None = None,
+        filters: list[str] | None = None,
+    ) -> list[ProviderOutcome]:
+        """Price one stay on each source, concurrently, in request order.
+
+        Concurrent because the sources are independent and a caller waiting
+        for two serial live page reads waits twice as long for an answer
+        neither half needed the other to produce.
+        """
+        calls = []
+        for name, credential in creds.items():
+            if name == BOOKING:
+                payload = build_search_payload(
+                    destination=destination,
+                    checkin_date=checkin_date,
+                    checkout_date=checkout_date,
+                    adults=adults,
+                    children=children,
+                    currency=currency,
+                    budget_per_night=budget_per_night,
+                    proxy_country=price_as_seen_from,
+                    filters=filters,
+                )
+                calls.append(_booking_outcome(payload, credential.key))
+            else:
+                payload = ota.build_front_payload(
+                    provider=name,
+                    destination=destination,
+                    checkin_date=checkin_date,
+                    checkout_date=checkout_date,
+                    adults=adults,
+                    children=children,
+                    currency=currency,
+                    budget_per_night=budget_per_night,
+                )
+                calls.append(_front_outcome(name, payload, credential.key))
+        return list(await asyncio.gather(*calls))
+
+    def _sort_outcomes(
+        names: list[str], outcomes: list[ProviderOutcome]
+    ) -> list[ProviderOutcome]:
+        """Request order, whatever order the network answered in."""
+        by_name = {o.provider: o for o in outcomes}
+        return [by_name[name] for name in names if name in by_name]
+
+    def _all_failed_message(
+        provider_rows: list[dict[str, Any]], skipped: list[dict[str, Any]]
+    ) -> str:
+        """Said out loud when nothing priced, because an empty list is not an
+        answer on its own -- and here it is not even a 'no'."""
+        degraded_names = [
+            r["provider"] for r in provider_rows if r["search_status"] == "degraded"
+        ]
+        parts = []
+        if degraded_names:
+            parts.append(
+                f"{', '.join(degraded_names)} was asked and could not answer, "
+                "so nothing is known about it -- this is not 'no places found'."
+            )
+        for row in skipped:
+            parts.append(f"{row['provider']} was not searched: {row['detail']}")
+        return " ".join(parts)
 
     @mcp.tool(
         name="search_hotels",
@@ -2012,6 +2673,24 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "usually modest and property-dependent, and rates move between "
             "calls, so hold one named property fixed, call each country a few "
             "times, and never read one call per country as a gap.\n\n"
+            "A date range and a nights value price several stays in one "
+            "call, like the flights tools: pass checkin_date_from, "
+            "checkin_date_to and nights (a number, or a list like [2, 3, 7]) "
+            "instead of a fixed checkin_date/checkout_date, and every "
+            "check-in date is priced separately. The answer is stays -- one "
+            "entry per stay with its cheapest property, per-night price and "
+            "median -- plus cheapest_overall, and the full property list for "
+            "the cheapest stay only. Each stay is one request billed to your "
+            "plan; max_searches caps it, and a request that expands past the "
+            "cap is sampled evenly across the range and says so in "
+            "search_coverage.\n\n"
+            "Set providers to price the same stay on more than one source in "
+            "one call: [\"booking\"] (the default), [\"airbnb\"], or both. "
+            "Booking rows rate out of 10 and Airbnb rows out of 5, so read "
+            "rating_scale on every row before comparing two of them. A source "
+            "you have no RapidAPI key for is not called and is named in "
+            "providers_skipped with a subscribe link, never quietly "
+            "dropped.\n\n"
             "Rates go stale within minutes: never reuse an earlier result, "
             "search again."
         ),
@@ -2019,23 +2698,43 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     @document_params
     async def search_hotels(
         destination: str,
-        checkin_date: str,
-        checkout_date: str,
+        checkin_date: str | None = None,
+        checkout_date: str | None = None,
+        checkin_date_from: str | None = None,
+        checkin_date_to: str | None = None,
+        nights: int | list[int] | None = None,
+        max_searches: int | None = None,
         adults: int | None = None,
         children: int | None = None,
         currency: str | None = None,
         budget_per_night: int | None = None,
         price_as_seen_from: str | None = None,
         filters: list[str] | None = None,
+        providers: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Args:
             destination: Where to stay, in free text the way a person would
                 say it, e.g. "Rome" or "Tokyo Shibuya". A city, district,
                 landmark or region all work; no internal location ID is needed.
-            checkin_date: First night of the stay, "YYYY-MM-DD".
+            checkin_date: First night of the stay, "YYYY-MM-DD". Give this
+                with checkout_date for one stay, or use checkin_date_from
+                plus checkin_date_to for a range of check-in dates.
             checkout_date: Departure morning, "YYYY-MM-DD". Must be after
-                checkin_date.
+                checkin_date. Give either this or nights, not both.
+            checkin_date_from: First check-in date of a range, "YYYY-MM-DD".
+                Needs checkin_date_to and nights, and prices one stay per
+                check-in date in the range -- the hotel equivalent of the
+                flights date range.
+            checkin_date_to: Last check-in date of the range, "YYYY-MM-DD".
+            nights: How many nights to stay, as a number (3) or a list
+                ([2, 3, 7]) to price several lengths. Derives the check-out
+                date from each check-in date, so it replaces checkout_date
+                rather than joining it.
+            max_searches: Cap the billed requests this call may make. One
+                stay is one request, so a 30-day range at two lengths is 60;
+                lower this to spend less and the range is sampled evenly
+                across the calendar rather than cut short at the front.
             adults: Number of adult guests. Defaults to the upstream default
                 when omitted.
             children: Number of children sharing the room.
@@ -2052,6 +2751,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             filters: Property filters to apply, e.g. ["free_cancellation",
                 "breakfast_included"]. An unknown name is rejected with the
                 list of valid ones rather than being ignored.
+            providers: Which sources to price this stay on, e.g. ["booking"],
+                ["airbnb"] or ["booking", "airbnb"]. Defaults to ["booking"].
+                Each source is a separate RapidAPI subscription, so a source
+                you have no key for is not called; it comes back named in
+                providers_skipped with the reason and where to subscribe,
+                rather than silently missing. filters and price_as_seen_from
+                apply to booking only; airbnb takes price_min, price_max and
+                room_types instead, and rows from it carry rating_scale 5
+                where booking's carry 10.
         """
         bad = unknown_filters(filters)
         if bad:
@@ -2059,6 +2767,73 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 f"Unknown filter(s): {', '.join(bad)}. Valid filters are: "
                 f"{', '.join(sorted(VALID_FILTERS))}"
             )
+        try:
+            names = ota.normalise_providers(
+                providers, default=DEFAULT_SEARCH_PROVIDERS
+            )
+        except UnknownProvider as exc:
+            raise ToolError(str(exc)) from exc
+
+        ranged = (
+            checkin_date_from is not None
+            or checkin_date_to is not None
+            or nights is not None
+        )
+        if ranged:
+            if names != [BOOKING]:
+                # Refused rather than half-honoured. A stay range on two
+                # sources is a fan-out multiplied by a per-source fan-out,
+                # billed to two different subscriptions, and neither the
+                # coverage report nor api_usage can describe that honestly
+                # today. One or the other, per call.
+                raise ToolError(
+                    "a check-in range prices one source at a time. Call this "
+                    "once per source, or drop the range and use providers "
+                    "with a single stay."
+                )
+
+            def stay_plan(cap: int):
+                return plan_hotel_stays(
+                    checkin_date=checkin_date,
+                    checkout_date=checkout_date,
+                    checkin_date_from=checkin_date_from,
+                    checkin_date_to=checkin_date_to,
+                    nights=nights,
+                    cap=cap,
+                )
+
+            def stay_payload(combo: dict[str, str]) -> dict[str, Any]:
+                return build_search_payload(
+                    destination=destination,
+                    checkin_date=combo["checkin_date"],
+                    checkout_date=combo["checkout_date"],
+                    adults=adults,
+                    children=children,
+                    currency=currency,
+                    budget_per_night=budget_per_night,
+                    proxy_country=price_as_seen_from,
+                    filters=filters,
+                )
+
+            return await _hotels_stay_fanout(
+                tool="search_hotels",
+                endpoint="search",
+                plan_builder=stay_plan,
+                payload_builder=stay_payload,
+                max_searches=max_searches,
+            )
+
+        if checkin_date is None or checkout_date is None:
+            raise ToolError(
+                "a stay needs checkin_date and checkout_date -- or a check-in "
+                "range: checkin_date_from and checkin_date_to with nights"
+            )
+        if max_searches is not None:
+            raise ToolError(
+                "max_searches only applies to a check-in range; a single stay "
+                "is always one billed request"
+            )
+
         payload = build_search_payload(
             destination=destination,
             checkin_date=checkin_date,
@@ -2070,7 +2845,99 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             proxy_country=price_as_seen_from,
             filters=filters,
         )
-        return await _hotels_call("search", payload, tool="search_hotels")
+        if names == [BOOKING]:
+            # The path every existing caller is on, unchanged: same request,
+            # same response keys, same billing. The default is only a default
+            # if it costs nothing to have kept it.
+            return await _hotels_call("search", payload, tool="search_hotels")
+
+        if BOOKING not in names and (filters or price_as_seen_from):
+            # Refused rather than dropped. A silently discarded filter returns
+            # more properties than were asked for and nothing says so -- the
+            # same argument the api front makes for refusing Booking-only
+            # filters on an Airbnb request (flight_rabbi #472).
+            raise ToolError(
+                "filters and price_as_seen_from apply to booking only, and "
+                "booking is not in providers, so they would have been "
+                "silently dropped. Remove them, or add \"booking\" to "
+                "providers."
+            )
+
+        started = time.perf_counter()
+        headers, params = _request_context()
+        shared = await _resolve(headers, params)
+        creds, skips = _provider_keys(names, headers, params, shared)
+        if not creds:
+            # Nobody has a key for any named source. Same reply the
+            # single-source path gives, plus the per-source detail.
+            reply = _hotels_no_key_reply(shared, headers)
+            reply["providers"] = []
+            reply["providers_skipped"] = [ota.skipped_payload(o) for o in skips]
+            return reply
+
+        outcomes = _sort_outcomes(
+            names,
+            await _price_on_sources(
+                creds,
+                destination=destination,
+                checkin_date=checkin_date,
+                checkout_date=checkout_date,
+                adults=adults,
+                children=children,
+                currency=currency,
+                budget_per_night=budget_per_night,
+                price_as_seen_from=price_as_seen_from,
+                filters=filters,
+            ),
+        )
+
+        rows: list[dict[str, Any]] = []
+        provider_rows: list[dict[str, Any]] = []
+        skipped_outcomes: list[ProviderOutcome] = list(skips)
+        quota: dict[str, int] = {}
+        applied_filters: Any = None
+        for outcome in outcomes:
+            if outcome.status == "skipped":
+                skipped_outcomes.append(outcome)
+                continue
+            rows.extend(outcome.rows)
+            summary = ota.summarise(outcome, requested_currency=currency, top=0)
+            # `results` already carries every row; repeating three of them per
+            # source here would be the same data twice in one payload.
+            summary.pop("top", None)
+            provider_rows.append(summary)
+            if outcome.quota and not quota:
+                quota = outcome.quota
+            if applied_filters is None and outcome.applied_filters:
+                applied_filters = outcome.applied_filters
+
+        skipped_rows = [ota.skipped_payload(o) for o in skipped_outcomes]
+        logger.info(
+            "tool=%s duration_ms=%d results=%d providers=%s skipped=%s",
+            "search_hotels",
+            int((time.perf_counter() - started) * 1000),
+            len(rows),
+            ",".join(r["provider"] for r in provider_rows) or "-",
+            ",".join(r["provider"] for r in skipped_rows) or "-",
+        )
+
+        result: dict[str, Any] = {
+            "results": rows,
+            "result_count": len(rows),
+            "providers": provider_rows,
+            "providers_skipped": skipped_rows,
+            "caveats": ota.caveats_for(provider_rows, skipped_rows),
+            "api_usage": _usage_block(
+                len(provider_rows), quota, BILLING_UNIT_NOTES["hotels_multi"]
+            ),
+        }
+        if applied_filters:
+            result["applied_filters"] = applied_filters
+        if not rows:
+            message = _all_failed_message(provider_rows, skipped_rows)
+            if message:
+                result["message"] = message
+        return result
 
     @mcp.tool(
         name="find_hotel_by_name",
@@ -2093,6 +2960,16 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Returns the property's price, review score, room type and a "
             "booking link. Use it to check one specific hotel, or to track a "
             "single property's price over time.\n\n"
+            "A date range and a nights value price several stays in one call, "
+            "like the flights tools: pass checkin_date_from, checkin_date_to "
+            "and nights (a number, or a list like [2, 3, 7]) instead of a "
+            "fixed checkin_date/checkout_date, and this property is priced "
+            "for every check-in date -- a rate calendar for one hotel. The "
+            "answer is stays, one entry per date with that date's price and "
+            "per-night rate, plus cheapest_overall. Each stay is one request "
+            "billed to your plan; max_searches caps it, and a range that "
+            "expands past the cap is sampled evenly across the calendar and "
+            "says so in search_coverage.\n\n"
             "price_as_seen_from prices the stay as a shopper resident in that "
             "country would see it. Gaps are real but usually modest and "
             "property-dependent, and rates move between calls, so call each "
@@ -2104,8 +2981,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     @document_params
     async def find_hotel_by_name(
         hotel_name: str,
-        checkin_date: str,
-        checkout_date: str,
+        checkin_date: str | None = None,
+        checkout_date: str | None = None,
+        checkin_date_from: str | None = None,
+        checkin_date_to: str | None = None,
+        nights: int | list[int] | None = None,
+        max_searches: int | None = None,
         adults: int | None = None,
         children: int | None = None,
         currency: str | None = None,
@@ -2116,9 +2997,22 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             hotel_name: The property name a person would type, e.g. "Hotel
                 Artemide". Adding the city ("Hotel Artemide Rome") disambiguates
                 a chain with many properties. No internal property ID is needed.
-            checkin_date: First night of the stay, "YYYY-MM-DD".
+            checkin_date: First night of the stay, "YYYY-MM-DD". Give this
+                with checkout_date for one stay, or use checkin_date_from
+                plus checkin_date_to for a rate calendar.
             checkout_date: Departure morning, "YYYY-MM-DD". Must be after
-                checkin_date.
+                checkin_date. Give either this or nights, not both.
+            checkin_date_from: First check-in date of a range, "YYYY-MM-DD".
+                Needs checkin_date_to and nights, and prices this property on
+                every check-in date in the range -- one call, a rate calendar.
+            checkin_date_to: Last check-in date of the range, "YYYY-MM-DD".
+            nights: How many nights to stay, as a number (3) or a list
+                ([2, 3, 7]) to price several lengths. Derives the check-out
+                date from each check-in date, so it replaces checkout_date
+                rather than joining it.
+            max_searches: Cap the billed requests this call may make. One
+                stay is one request; lower it and the range is sampled evenly
+                across the calendar rather than cut short at the front.
             adults: Number of adult guests.
             children: Number of children sharing the room.
             currency: ISO currency code for the prices returned, e.g. "usd".
@@ -2128,6 +3022,53 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 reporting a gap, because rates move between calls and gaps are
                 usually modest and property-dependent.
         """
+        ranged = (
+            checkin_date_from is not None
+            or checkin_date_to is not None
+            or nights is not None
+        )
+        if ranged:
+
+            def stay_plan(cap: int):
+                return plan_hotel_stays(
+                    checkin_date=checkin_date,
+                    checkout_date=checkout_date,
+                    checkin_date_from=checkin_date_from,
+                    checkin_date_to=checkin_date_to,
+                    nights=nights,
+                    cap=cap,
+                )
+
+            def stay_payload(combo: dict[str, str]) -> dict[str, Any]:
+                return build_hotel_by_name_payload(
+                    hotel_name=hotel_name,
+                    checkin_date=combo["checkin_date"],
+                    checkout_date=combo["checkout_date"],
+                    adults=adults,
+                    children=children,
+                    currency=currency,
+                    proxy_country=price_as_seen_from,
+                )
+
+            return await _hotels_stay_fanout(
+                tool="find_hotel_by_name",
+                endpoint="hotel_by_name",
+                plan_builder=stay_plan,
+                payload_builder=stay_payload,
+                max_searches=max_searches,
+            )
+
+        if checkin_date is None or checkout_date is None:
+            raise ToolError(
+                "a stay needs checkin_date and checkout_date -- or a check-in "
+                "range: checkin_date_from and checkin_date_to with nights"
+            )
+        if max_searches is not None:
+            raise ToolError(
+                "max_searches only applies to a check-in range; a single stay "
+                "is always one billed request"
+            )
+
         payload = build_hotel_by_name_payload(
             hotel_name=hotel_name,
             checkin_date=checkin_date,
@@ -2141,13 +3082,156 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "hotel_by_name", payload, tool="find_hotel_by_name"
         )
 
+    @mcp.tool(
+        name="compare_hotel_rates",
+        # Declared, not inferred: see src/output_schema.py.
+        output_schema=COMPARE_OUTPUT_SCHEMA,
+        title="FlightPowers: compare hotel rates across sources",
+        annotations=ToolAnnotations(
+            title="FlightPowers: compare hotel rates across sources",
+            readOnlyHint=True,
+            destructiveHint=False,
+            # Two identical calls give two different answers, on purpose: this
+            # reads live rates. A host that read True here would be entitled to
+            # serve a cached comparison, which is how a stale price gets quoted
+            # to somebody about to book.
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+        description=described_hotels(
+            "FlightPowers cross-source comparison: prices one stay on every "
+            "source you have a key for. Input: a "
+            "free-text destination the way a person would say it (\"Rome\", "
+            "\"Tokyo Shibuya\"), check-in and check-out dates, and how many "
+            "adults. Returns one row per source: the cheapest and the median "
+            "stay total, how many places were found, the currency and when it "
+            "was read.\n\n"
+            "Read the caveats on every row before you say one source is cheaper. "
+            "rating_scale is 10 on Booking and 5 on Airbnb. taxes_included is "
+            "true on Booking, where excluded taxes are folded into the price, and "
+            "null on Airbnb, where we have not established the tax treatment of "
+            "the display total; a null is not a no. A source you have no key for "
+            "is listed in providers_skipped with a subscribe link and is not "
+            "counted anywhere in the comparison.\n\n"
+            "Rates go stale within minutes: never reuse an earlier result, "
+            "compare again."
+        ),
+    )
+    @document_params
+    async def compare_hotel_rates(
+        destination: str,
+        checkin_date: str,
+        checkout_date: str,
+        adults: int | None = None,
+        children: int | None = None,
+        currency: str | None = None,
+        providers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Args:
+            destination: Where to stay, in free text the way a person would say
+                it, e.g. "Rome" or "Tokyo Shibuya". A city, district, landmark or
+                region all work; no internal location ID is needed.
+            checkin_date: First night of the stay, "YYYY-MM-DD".
+            checkout_date: Departure morning, "YYYY-MM-DD". Must be after
+                checkin_date.
+            adults: Number of adult guests. Defaults to the upstream default when
+                omitted.
+            children: Number of children sharing the room.
+            currency: ISO currency code for every row, e.g. "usd". Sources are
+                asked for the same currency so the totals are comparable; a row
+                that came back in a different one says so in its own currency
+                field and is not converted.
+            providers: Which sources to price, e.g. ["booking", "airbnb"].
+                Defaults to both. A source you have no RapidAPI key for is not
+                called and appears in providers_skipped.
+        """
+        try:
+            names = ota.normalise_providers(
+                providers, default=DEFAULT_COMPARE_PROVIDERS
+            )
+        except UnknownProvider as exc:
+            raise ToolError(str(exc)) from exc
+
+        started = time.perf_counter()
+        headers, params = _request_context()
+        shared = await _resolve(headers, params)
+        creds, skips = _provider_keys(names, headers, params, shared)
+
+        base: dict[str, Any] = {
+            "destination": destination,
+            "checkin_date": checkin_date,
+            "checkout_date": checkout_date,
+            "nights": _nights_between(checkin_date, checkout_date),
+            "adults": adults,
+            "children": children,
+            "currency": currency.strip().upper() if currency else None,
+        }
+
+        if not creds:
+            reply = _hotels_no_key_reply(shared, headers)
+            reply.pop("results", None)
+            reply.pop("result_count", None)
+            reply.update(base)
+            reply["providers"] = []
+            reply["providers_skipped"] = [ota.skipped_payload(o) for o in skips]
+            return reply
+
+        outcomes = _sort_outcomes(
+            names,
+            await _price_on_sources(
+                creds,
+                destination=destination,
+                checkin_date=checkin_date,
+                checkout_date=checkout_date,
+                adults=adults,
+                children=children,
+                currency=currency,
+            ),
+        )
+
+        provider_rows: list[dict[str, Any]] = []
+        skipped_outcomes: list[ProviderOutcome] = list(skips)
+        quota: dict[str, int] = {}
+        for outcome in outcomes:
+            if outcome.status == "skipped":
+                skipped_outcomes.append(outcome)
+                continue
+            provider_rows.append(
+                ota.summarise(outcome, requested_currency=currency)
+            )
+            if outcome.quota and not quota:
+                quota = outcome.quota
+
+        skipped_rows = [ota.skipped_payload(o) for o in skipped_outcomes]
+        logger.info(
+            "tool=%s duration_ms=%d providers=%s skipped=%s",
+            "compare_hotel_rates",
+            int((time.perf_counter() - started) * 1000),
+            ",".join(r["provider"] for r in provider_rows) or "-",
+            ",".join(r["provider"] for r in skipped_rows) or "-",
+        )
+
+        result: dict[str, Any] = dict(base)
+        result["providers"] = provider_rows
+        result["providers_skipped"] = skipped_rows
+        result["caveats"] = ota.caveats_for(provider_rows, skipped_rows)
+        result["api_usage"] = _usage_block(
+            len(provider_rows), quota, BILLING_UNIT_NOTES["hotels_multi"]
+        )
+        if not any(row["count"] for row in provider_rows):
+            message = _all_failed_message(provider_rows, skipped_rows)
+            if message:
+                result["message"] = message
+        return result
+
     # ── product selection ────────────────────────────────────────────────
     # Everything above registers unconditionally; this prunes down to what
     # this deployment sells. Registering-then-removing rather than wrapping
     # the definitions in a conditional keeps one code path for "both" and
     # avoids two near-identical blocks drifting apart.
     FLIGHT_TOOLS = ("search_oneway_flights", "search_roundtrip_flights")
-    HOTEL_TOOLS = ("search_hotels", "find_hotel_by_name")
+    HOTEL_TOOLS = ("search_hotels", "find_hotel_by_name", "compare_hotel_rates")
 
     if settings.products == "flights":
         drop = HOTEL_TOOLS

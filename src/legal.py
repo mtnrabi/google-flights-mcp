@@ -260,18 +260,30 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
         "REGISTRY_NAME": "com.flightpowers/booking",
         "UPSTREAM_API": "Booking Live API",
         "DATA_NOUN": "hotel",
-        "TOOL_NAMES": "`search_hotels` or `find_hotel_by_name`",
-        "TOOL_BULLETS": "- `search_hotels`\n- `find_hotel_by_name`",
-        "NOT_AFFILIATED": "Booking.com",
+        "TOOL_NAMES": (
+            "`search_hotels`, `find_hotel_by_name` or `compare_hotel_rates`"
+        ),
+        "TOOL_BULLETS": (
+            "- `search_hotels`\n- `find_hotel_by_name`\n- `compare_hotel_rates`"
+        ),
+        # Two brands can appear in a result, so disclaiming affiliation with
+        # one of them is a disclaimer for half the server. `search_hotels`
+        # and `compare_hotel_rates` can price a stay on Airbnb when the
+        # caller names it and holds a key for that listing.
+        "NOT_AFFILIATED": "Booking.com or Airbnb",
         "SIGNUP_URL": "https://rapidapi.com/mtnrabi/api/booking-live-api",
         "TOOL_BEHAVIOUR": (
-            "Both take a stay -- a destination or a property name, plus "
-            "check-in and check-out dates -- and forward it to the Booking "
-            "Live API on RapidAPI as a single request. There is no fan-out: "
-            "one tool call is exactly one upstream request. An optional "
-            "two-letter country code prices the stay through a residential "
-            "connection in that country, so the result is what a shopper "
-            "resident there would be quoted."
+            "Each takes a stay -- a destination or a property name, plus "
+            "check-in and check-out dates -- and forwards it to the Booking "
+            "Live API on RapidAPI as a single request. There is no fan-out "
+            "within a source: one tool call is one request per source asked. "
+            "An optional two-letter country code prices the stay through a "
+            "residential connection in that country, so the result is what a "
+            "shopper resident there would be quoted. `search_hotels` and "
+            "`compare_hotel_rates` also accept a list of sources; a source "
+            "other than Booking.com is only contacted when it is named AND "
+            "the caller holds a RapidAPI key for that source's own listing, "
+            "and it is reported as skipped, by name, when they do not."
         ),
         "SEARCH_PARAM_NOUNS": (
             "Destinations, property names, stay dates, guest counts, currency, "
@@ -321,14 +333,14 @@ PRODUCT_CONTEXT["both"] = dict(
     HOST="google-flights-mcp.flightpowers.com",
     DATA_NOUN="flight and hotel",
     UPSTREAM_API="Google Flights Live API and the Booking Live API",
-    NOT_AFFILIATED="Google or Booking.com",
+    NOT_AFFILIATED="Google, Booking.com or Airbnb",
     TOOL_NAMES=(
         "`search_oneway_flights`, `search_roundtrip_flights`, "
-        "`search_hotels` or `find_hotel_by_name`"
+        "`search_hotels`, `find_hotel_by_name` or `compare_hotel_rates`"
     ),
     TOOL_BULLETS=(
         "- `search_oneway_flights`\n- `search_roundtrip_flights`\n"
-        "- `search_hotels`\n- `find_hotel_by_name`"
+        "- `search_hotels`\n- `find_hotel_by_name`\n- `compare_hotel_rates`"
     ),
     # Written out rather than concatenated: the two single-product paragraphs
     # each open with "Both", which is four tools between them, and one denies

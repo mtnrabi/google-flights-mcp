@@ -14,8 +14,10 @@ is an outage, not a feature.
 
 So this file adds a SECOND endpoint, `/mcp/oauth`, which always challenges:
 
-    /mcp        unchanged forever. Keys, `fpk_` tokens, anonymous
-                tools/list, Smithery's config blob. No 401, no challenge.
+    /mcp        Keys, `fpk_` tokens, anonymous tools/list, Smithery's
+                config blob. Since 2026-09-09 a caller with NO credential is
+                challenged on anything that would spend -- read-only
+                discovery is still answered (src/discovery.py).
     /mcp/oauth  same tools, same product-per-Host routing, but Bearer-only:
                 no token means 401 + the challenge header, which is the
                 signal that makes a client show a Sign in button.
@@ -93,6 +95,7 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from . import cimd
+from .discovery import discovery_probe
 from .keystore import PROVIDER_GOOGLE
 from .oauthstore import (
     AuthCode,
@@ -129,6 +132,12 @@ MCP_PATH = "/mcp"
 #: body said `needs_api_key`, which is correct JSON and is invisible to every
 #: client's auth machinery -- the user saw "the tool failed" and had nowhere
 #: to click.
+#:
+#: Scoped, since 2026-09-09, to the calls that could spend something: a
+#: credential-less `initialize`, `ping`, `tools/list`, `prompts/list` or
+#: `resources/list` is SERVED, because a directory that health-checks a
+#: connector does exactly that with no credentials and marks the listing
+#: unhealthy on a 401 (Glama, hourly). See src/discovery.py.
 #:
 #: The property that makes this safe for the people who pay us: **a request
 #: carrying any credential is never challenged**. An `x-rapidapi-key` header,
@@ -1453,12 +1462,16 @@ class OAuthResourceGate:
     Since 2026-09-09 it guards `/mcp` as well as `/mcp/oauth`, and the two
     differ in exactly one thing:
 
-        /mcp        a credential of ANY kind is served, unchanged. Nothing at
-                    all is answered 401 + the challenge, which is what makes
-                    a client show a Sign in button. `MCP_REQUIRE_AUTH=off` is
-                    the rollback.
-        /mcp/oauth  no access token, no service, whatever the mode. The URL
-                    in printed guides and in connectors already added.
+        /mcp        a credential of ANY kind is served, unchanged. Nothing
+                    at all is served for read-only discovery (`initialize`,
+                    `tools/list` and friends -- src/discovery.py, added
+                    2026-09-09 after directory health checks started failing)
+                    and answered 401 + the challenge for anything that could
+                    spend, which is what makes a client show a Sign in
+                    button. `MCP_REQUIRE_AUTH=off` is the rollback.
+        /mcp/oauth  no access token, no service, whatever the mode -- the
+                    discovery opening does not apply here. The URL in printed
+                    guides and in connectors already added.
     """
 
     def __init__(self, app, support_for_scope) -> None:
@@ -1511,6 +1524,18 @@ class OAuthResourceGate:
             # with NOTHING is challenged, and only when the challenge is on.
             if not always:
                 if not require_auth() or has_credential(headers, _query(scope)):
+                    await self.app(scope, receive, send)
+                    return
+                # Nothing at all. Before the challenge, one question: is this
+                # request only LOOKING? `initialize`, `tools/list` and the
+                # rest of the read-only handshake are served to anybody --
+                # they spend no backend call and touch no user's state, and
+                # refusing them is what marked our listings unhealthy on
+                # every directory that health-checks a connector without
+                # credentials (src/discovery.py). Anything that could spend
+                # something still gets the 401 below.
+                looking, receive = await discovery_probe(scope, receive)
+                if looking:
                     await self.app(scope, receive, send)
                     return
                 await _send_challenge(send, support, MCP_PATH)

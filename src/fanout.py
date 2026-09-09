@@ -26,6 +26,14 @@ does not. The reduction is always reported back in `search_coverage` -- a
 silently truncated search reads as a complete one, which is how a user ends
 up trusting a "cheapest" answer that never looked at the second half of the
 month.
+
+Hotels use the same machinery. `POST /search` takes exactly one stay -- one
+check-in date, one check-out date -- so "cheapest three nights in Rome in
+May" was 31 tool calls or, more often, one arbitrary date and an answer
+presented as the cheapest. `plan_hotel_stays` expands a check-in range and a
+`nights` value into stays under the same cap, samples the same way when it
+does not fit, and reports the same coverage. The wording differs where the
+axes differ (a stay has no destination list) and nothing else does.
 """
 
 from __future__ import annotations
@@ -37,6 +45,11 @@ from datetime import date, timedelta
 from typing import Any, Callable, Literal
 
 MAX_RANGE_DAYS = 180
+
+#: `SearchPlan.endpoint` for a hotel fan-out. Not a backend route name -- the
+#: hotel client picks the route -- but the discriminator `coverage()` reads to
+#: decide whether it is describing dates and destinations or stays.
+STAY_ENDPOINT = "hotel_stays"
 
 
 class PlanError(ValueError):
@@ -197,7 +210,7 @@ def _ordered_unique(values) -> list[str]:
 class SearchPlan:
     """A capped, ordered list of concrete backend searches."""
 
-    endpoint: Literal["oneway", "roundtrip"]
+    endpoint: Literal["oneway", "roundtrip", "hotel_stays"]
     combos: list[dict[str, str]]
     requested_combinations: int
     cap: int
@@ -239,6 +252,22 @@ class SearchPlan:
         )
 
     @property
+    def requested_checkin_dates(self) -> list[str]:
+        """Check-in dates as the caller gave them, in request order."""
+        return _ordered_unique(
+            str(c.get("checkin_date") or "")
+            for c in (self.requested_combos or self.combos)
+        )
+
+    @property
+    def requested_stays(self) -> list[dict[str, str]]:
+        """Every stay the request expanded to, before the cap sampled it."""
+        return [
+            {"checkin_date": c["checkin_date"], "checkout_date": c["checkout_date"]}
+            for c in (self.requested_combos or self.combos)
+        ]
+
+    @property
     def truncated(self) -> bool:
         return self.executed_combinations < self.requested_combinations
 
@@ -248,6 +277,9 @@ class SearchPlan:
         Always present in the tool result, truncated or not, so the model can
         state honestly what the answer is based on.
         """
+        if self.endpoint == STAY_ENDPOINT:
+            return self._stay_coverage()
+
         summary: dict[str, Any] = {
             "requested_combinations": self.requested_combinations,
             "searched_combinations": self.executed_combinations,
@@ -271,6 +303,44 @@ class SearchPlan:
                 "the sample is representative but not exhaustive. Each search is "
                 "one request billed to your plan. Narrow the date range or "
                 "destination list, or raise max_searches, for fuller coverage."
+            )
+        if self.degraded_reason:
+            summary["degraded"] = self.degraded_reason
+        return summary
+
+    def _stay_coverage(self) -> dict[str, Any]:
+        """`coverage()` for a hotel fan-out.
+
+        Same five facts, and `stays_searched` in place of the two flight axes:
+        a stay is a PAIR of dates, so a list of check-in dates alone cannot
+        say which lengths were priced. Both are reported -- the pairs for
+        exactness, the check-in dates because that is the axis a model reasons
+        about when it says "the cheapest date".
+        """
+        summary: dict[str, Any] = {
+            "requested_combinations": self.requested_combinations,
+            "searched_combinations": self.executed_combinations,
+            "truncated": self.truncated,
+            "max_searches_per_request": self.cap,
+            "stays_searched": [
+                {
+                    "checkin_date": c["checkin_date"],
+                    "checkout_date": c["checkout_date"],
+                }
+                for c in self.combos
+            ],
+            "checkin_dates_searched": sorted({c["checkin_date"] for c in self.combos}),
+        }
+        if self.truncated:
+            summary["note"] = (
+                f"This request expanded to {self.requested_combinations} stays, "
+                f"above the {self.cap}-search cap for a single call. "
+                f"{self.executed_combinations} stays were priced, spread evenly "
+                "across the requested check-in range rather than taken from the "
+                "start, so the sample is representative but not exhaustive. Each "
+                "stay is one request billed to your plan. Narrow the check-in "
+                "range or the nights list, or raise max_searches, for fuller "
+                "coverage."
             )
         if self.degraded_reason:
             summary["degraded"] = self.degraded_reason
@@ -375,6 +445,106 @@ def plan_roundtrip(
     return _cap_plan("roundtrip", combos, cap)
 
 
+def plan_hotel_stays(
+    *,
+    checkin_date: str | None = None,
+    checkout_date: str | None = None,
+    checkin_date_from: str | None = None,
+    checkin_date_to: str | None = None,
+    nights: int | list[int] | None = None,
+    cap: int,
+) -> SearchPlan:
+    """The stays one hotel question expands to, capped and evenly sampled.
+
+    `POST /search` prices exactly one stay, so "cheapest three nights in Rome
+    in May" is 31 backend calls. Asking a model to expand that itself has the
+    two failure modes the flights planner was written to remove: it fires 31
+    unbudgeted requests, or -- far more common in practice -- it picks one
+    date, prices it, and reports the number as the cheapest.
+
+    Two forms, and they are alternatives rather than additions:
+
+    * `checkin_date` + `checkout_date` -- one stay, exactly as before.
+    * a check-in range (`checkin_date_from`/`checkin_date_to`) and/or `nights`
+      (a number, or a list like [2, 3, 7]) -- one stay per check-in date per
+      night count, with the check-out date derived.
+
+    A fixed `checkout_date` against a range of check-in dates is allowed and
+    means "get out on the 10th, whenever I arrive": the pairs where check-out
+    is not after check-in are skipped rather than sent, because the upstream
+    computes nights from the two dates and a zero or negative stay fails deep
+    rather than as a clean rejection.
+    """
+    checkins = _resolve_dates(
+        checkin_date,
+        checkin_date_from,
+        checkin_date_to,
+        single_name="checkin_date",
+        from_name="checkin_date_from",
+        to_name="checkin_date_to",
+        label="check-in date",
+    )
+
+    if checkout_date is not None and nights is not None:
+        raise PlanError(
+            "give either checkout_date or nights, not both -- nights derives "
+            "the check-out date from each check-in date"
+        )
+    if checkout_date is None and nights is None:
+        raise PlanError(
+            "a stay needs either checkout_date, or nights (how many nights to "
+            "stay) to pair with each check-in date"
+        )
+
+    combos: list[dict[str, str]] = []
+    if checkout_date is not None:
+        leave = parse_iso_date(checkout_date, "checkout_date")
+        for day in checkins:
+            if leave <= parse_iso_date(day, "checkin_date"):
+                continue
+            combos.append(
+                {"checkin_date": day, "checkout_date": checkout_date.strip()}
+            )
+        if not combos:
+            raise PlanError(
+                f"checkout_date {checkout_date} is not after any requested "
+                "check-in date"
+            )
+    else:
+        night_options = _normalise_stay_nights(nights)
+        # Date-major, so that when the cap samples the list evenly it spreads
+        # across the calendar rather than across trip lengths on the same day.
+        for day in checkins:
+            arrive = parse_iso_date(day, "checkin_date")
+            for count in night_options:
+                combos.append(
+                    {
+                        "checkin_date": day,
+                        "checkout_date": (
+                            arrive + timedelta(days=count)
+                        ).isoformat(),
+                    }
+                )
+
+    return _cap_plan(STAY_ENDPOINT, combos, cap)
+
+
+def _normalise_stay_nights(nights: int | list[int] | None) -> list[int]:
+    """`_normalise_nights`, minus zero.
+
+    A same-day return is a real flight and a zero-night stay is not a stay:
+    the upstream derives nights from the two dates, so 0 asks it to price a
+    check-in and check-out on the same morning.
+    """
+    options = [n for n in _normalise_nights(nights) if n >= 1]
+    if not options:
+        raise PlanError(
+            "nights must include at least one value of 1 or more -- a stay is "
+            "at least one night"
+        )
+    return options
+
+
 def _normalise_nights(nights: int | list[int] | None) -> list[int]:
     if isinstance(nights, int):
         options = [nights]
@@ -390,34 +560,60 @@ def _normalise_nights(nights: int | list[int] | None) -> list[int]:
     return options
 
 
+def _resolve_dates(
+    single: str | None,
+    start: str | None,
+    end: str | None,
+    *,
+    single_name: str,
+    from_name: str,
+    to_name: str,
+    label: str,
+) -> list[str]:
+    """One day or an expanded inclusive range, with the caller's own words.
+
+    Parameterised rather than copied for hotels: the four failure modes here
+    (both forms at once, half a range, no date at all, an unparseable date)
+    are the same four on either axis, and the flights messages are asserted
+    verbatim by tests -- so the names travel as arguments and the sentences
+    stay in one place.
+    """
+    if single and (start or end):
+        raise PlanError(
+            f"give either {single_name} (one day) or "
+            f"{from_name}/{to_name} (a range), not both"
+        )
+    if single:
+        parse_iso_date(single, single_name)
+        return [single.strip()]
+    if start and end:
+        return expand_date_range(start, end, label)
+    if start or end:
+        raise PlanError(f"a {label} range needs both {from_name} and {to_name}")
+    raise PlanError(
+        f"a {label} is required -- either {single_name}, or "
+        f"{from_name} plus {to_name}"
+    )
+
+
 def _resolve_departure_dates(
     departure_date: str | None,
     departure_date_from: str | None,
     departure_date_to: str | None,
 ) -> list[str]:
-    if departure_date and (departure_date_from or departure_date_to):
-        raise PlanError(
-            "give either departure_date (one day) or "
-            "departure_date_from/departure_date_to (a range), not both"
-        )
-    if departure_date:
-        parse_iso_date(departure_date, "departure_date")
-        return [departure_date.strip()]
-    if departure_date_from and departure_date_to:
-        return expand_date_range(departure_date_from, departure_date_to)
-    if departure_date_from or departure_date_to:
-        raise PlanError(
-            "a departure date range needs both departure_date_from and "
-            "departure_date_to"
-        )
-    raise PlanError(
-        "a departure date is required -- either departure_date, or "
-        "departure_date_from plus departure_date_to"
+    return _resolve_dates(
+        departure_date,
+        departure_date_from,
+        departure_date_to,
+        single_name="departure_date",
+        from_name="departure_date_from",
+        to_name="departure_date_to",
+        label="departure date",
     )
 
 
 def _cap_plan(
-    endpoint: Literal["oneway", "roundtrip"],
+    endpoint: Literal["oneway", "roundtrip", "hotel_stays"],
     combos: list[dict[str, str]],
     cap: int,
 ) -> SearchPlan:

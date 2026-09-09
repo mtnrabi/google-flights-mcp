@@ -242,6 +242,7 @@ class TestPerHost:
         assert [t["name"] for t in card["tools"]] == [
             "search_hotels",
             "find_hotel_by_name",
+            "compare_hotel_rates",
         ]
         assert "hotel" in card["description"]
         assert "Booking Live API" in card["description"]

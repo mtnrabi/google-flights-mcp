@@ -328,9 +328,15 @@ class TestPerProductEnvOverrides:
             load_settings("hotel")
 
 
-def test_the_goldens_are_present_and_are_two_tools_each():
+#: How many tools each single-product deployment serves. Written down rather
+#: than derived, so a tool appearing or disappearing fails here with a count
+#: rather than silently agreeing with a regenerated golden.
+GOLDEN_TOOL_COUNTS = {"flights": 2, "hotels": 3}
+
+
+def test_the_goldens_are_present_and_carry_their_whole_tool_set():
     """A missing golden must fail loudly, not quietly skip the comparison."""
-    for product in ("flights", "hotels"):
+    for product, expected in GOLDEN_TOOL_COUNTS.items():
         path = pathlib.Path(path_for(product))
         assert path.exists(), path
-        assert len(golden(product)["tools"]) == 2
+        assert len(golden(product)["tools"]) == expected

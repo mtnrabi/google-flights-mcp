@@ -144,7 +144,11 @@ class TestToolDescriptionsCarryTheTail:
         this deployment shape."""
         tools = {t["name"]: t for t in listed_tools("both")}
         flights_tools = ("search_oneway_flights", "search_roundtrip_flights")
-        hotels_tools = ("search_hotels", "find_hotel_by_name")
+        hotels_tools = (
+            "search_hotels",
+            "find_hotel_by_name",
+            "compare_hotel_rates",
+        )
 
         for name in flights_tools:
             description = tools[name]["description"]

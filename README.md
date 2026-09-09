@@ -446,6 +446,8 @@ before.
 | `search_oneway_flights` | Real-time one-way fares. Input: origin IATA, destination IATA **or a list**, and either one departure date or a date range. Returns price, airline, duration, stops, `buy_link`, and Google's historical price range so you can judge the fare. Use for any one-way question, including open-ended ones: one call with a range, never one call per date. |
 | `search_roundtrip_flights` | Real-time round-trip fares priced as **paired legs**, not two one-ways. Input: origin, destination(s), a departure date or range, and either a `return_date` or a trip length in `nights` (a number or a list like `[5,6,7]`). Returns total price, per-leg airline/stops/duration, and one `buy_link` for the trip. |
 
+The hotels deployment serves `search_hotels`, `find_hotel_by_name` and `compare_hotel_rates` instead; see [Hotels: `providers` and `compare_hotel_rates`](#hotels-providers-and-compare_hotel_rates).
+
 ### `search_oneway_flights`
 
 ```python
@@ -596,6 +598,181 @@ Other response shapes to expect, all of them normal:
   key that is not subscribed to *this* API is the most common cause.
 - **Plan exhausted.** `quota_exhausted: true` with `api_usage`, plus a reminder that narrowing
   the range makes remaining quota go further.
+
+## Hotels: a check-in range
+
+`POST /search` prices exactly one stay, so "cheapest three nights in Rome in May" used to be
+31 tool calls -- or, in practice, one call on a date the model picked and an answer presented as
+the cheapest. Both hotel search tools now take the flights shape instead:
+
+```python
+search_hotels(
+    destination: str,
+    checkin_date: str | None = None,        # one stay: this plus checkout_date
+    checkout_date: str | None = None,
+    checkin_date_from: str | None = None,   # or a range: this, checkin_date_to and nights
+    checkin_date_to: str | None = None,
+    nights: int | list[int] | None = None,  # 3, or [2, 3, 7] to price several lengths
+    max_searches: int | None = None,        # cap the billed requests this call may make
+    ...
+)
+```
+
+Same machinery as the flights fan-out (`src/fanout.py`): one backend call per stay, capped at
+`max_searches_per_tool_call` (30, hard max 60), **sampled evenly across the range** when it does
+not fit, and reported in `search_coverage`. `nights` derives each check-out date, so it replaces
+`checkout_date` rather than joining it. A fixed `checkout_date` against a range of check-in dates
+is allowed and means "out on the 4th, whenever I arrive"; the impossible pairs are dropped.
+
+The response is bounded on purpose. Every property of every stay is ~25 KB per stay (measured:
+25,892 bytes for 25 properties, 18,989 of them URLs), so each stay reports its cheapest property,
+its per-night rate and its median, and the **full property list comes back for the cheapest stay
+only**:
+
+```jsonc
+{
+  "results": [ /* every property of the CHEAPEST stay, upstream rows untouched */ ],
+  "result_count": 18,
+  "results_for_stay": {"checkin_date": "2026-05-12", "checkout_date": "2026-05-15", "nights": 3},
+  "stays": [
+    {
+      "checkin_date": "2026-05-01", "checkout_date": "2026-05-04", "nights": 3,
+      "search_status": "ok", "reason": "ok",
+      "property_count": 22, "priced_count": 19,
+      "cheapest_total": 411.0, "price_per_night": 137.0, "median_total": 690.0,
+      "currency": "USD",
+      "cheapest": { /* the row, minus its image URL */ }
+    },
+    {"checkin_date": "2026-05-02", "search_status": "degraded", "reason": "search_failed",
+     "property_count": null, "priced_count": null, "cheapest": null},
+    {"checkin_date": "2026-05-03", "search_status": "not_searched", "reason": "not_searched",
+     "property_count": null, "cheapest": null}
+  ],
+  "cheapest_overall": {"checkin_date": "2026-05-12", "total": 305.0, "price_per_night": 101.67,
+                       "currency": "USD", "property": { /* ... */ }},
+  "search_status": "partial",
+  "search_coverage": {
+    "requested_combinations": 31,
+    "searched_combinations": 15,
+    "truncated": true,
+    "max_searches_per_request": 30,
+    "stays_searched": [{"checkin_date": "2026-05-01", "checkout_date": "2026-05-04"}, "..."],
+    "checkin_dates_searched": ["2026-05-01", "..."],
+    "note": "This request expanded to 31 stays, above the ..."
+  },
+  "api_usage": {"requests_used_by_this_call": 15, "note": "... Each stay -- one check-in date paired with one length -- is one billed request."}
+}
+```
+
+`reason` on a stay is a fact about our pipeline, never a guess about the hotel:
+
+| `reason` | `search_status` | Means |
+|---|---|---|
+| `ok` | `ok` | priced |
+| `no_availability` | `empty` | searched, answered, nothing came back |
+| `no_price` | `empty` | properties came back, none carried a price (`available: false` lands here) |
+| `search_failed` | `degraded` | the search errored, so **nothing is known** -- not "no rooms" |
+| `not_searched` | `not_searched` | the cap sampled it away |
+
+Counts are `null` rather than `0` on the last two: zero reads as "nothing there", and neither case
+knows that. Top-level `search_status` is `ok` / `partial` / `empty` / `degraded` over the stays;
+every stay failing raises instead of answering with an empty list.
+
+Two deliberate refusals: a check-in range with `providers` naming more than one source (a fan-out
+times a per-source fan-out, billed to two subscriptions, that neither `search_coverage` nor
+`api_usage` can describe honestly today), and `max_searches` on a single stay, which would silently
+do nothing.
+
+**A single stay is byte-identical to what it was before this existed** -- same request body, same
+response keys, no `stays`, no `search_coverage`, no `search_status`. Asserted in
+`tests/test_hotel_date_range.py::TestTheOldShapeIsUntouched` against a frozen expectation captured
+from the previous code.
+
+## Hotels: `providers` and `compare_hotel_rates`
+
+The hotels deployment (`hotels.flightpowers.com`, the same code selected by the `Host` header)
+serves three tools. `search_hotels` and `find_hotel_by_name` also take a check-in range (above);
+`search_hotels` gained one optional argument for sources and there is one new tool.
+
+| Tool | What it does |
+|---|---|
+| `search_hotels` | Live rates for a destination and dates, or for every stay a check-in range expands to. `providers` names the sources to price on: `["booking"]` (the default), `["airbnb"]`, or both. Airbnb becomes available when the Airbnb listing launches on RapidAPI. |
+| `find_hotel_by_name` | One named property, Booking.com only. Airbnb's room page carries no price, so a name lookup there would resolve to something that cannot be priced. |
+| `compare_hotel_rates` | The same stay priced on every source you have a key for, one row per source: cheapest total, median total, how many places were priced, currency, and when the rows were read. |
+
+### The default did not move
+
+`search_hotels` with no `providers` argument sends the same upstream request it always sent, to the
+same host, and answers with the same keys. So does `providers: ["booking"]`. Both are asserted in
+`tests/test_providers.py::TestTheDefaultDidNotMove`, upstream request body included -- a default is
+only a default if keeping it costs nothing.
+
+Naming a second source changes the response shape, and only then:
+
+```jsonc
+{
+  "results": [ /* every source's rows, each carrying "provider" and "rating_scale" */ ],
+  "result_count": 3,
+  "providers":        [ /* one row per source that was CALLED */ ],
+  "providers_skipped":[ /* one row per source that was NOT, with a subscribe_url */ ],
+  "caveats":          [ /* what to read before calling one source cheaper */ ],
+  "api_usage":        { "requests_used_by_this_call": 2 }
+}
+```
+
+### Where each source is called
+
+* **`booking`** goes straight to `booking-live-api.p.rapidapi.com` on the caller's key, billed by
+  RapidAPI to their own subscription. Unchanged.
+* **`airbnb`** goes through our own front door, `POST https://api.flightpowers.com/v1/hotels/search`
+  with `provider: "airbnb"` in the body, because the Airbnb backend is not on
+  the RapidAPI edge. The call carries the caller's key as `x-rapidapi-key` and identifies itself
+  with `X-FP-Client: mcp-hotels/<version>` -- the front overwrites body attribution with its own
+  conclusion, so the header is the only thing that says who called (rule 11). Override the origin
+  with `API_FRONT_BASE_URL` for a preview front; it holds no credential.
+
+**Airbnb is available when the Airbnb listing launches on RapidAPI.** It does not exist there yet, and
+the front ships with the provider off, so today a real `providers: ["airbnb"]` call comes back as a
+`degraded` row saying so. That is the
+designed answer, not a bug: an unmetered source reachable by anyone with any valid key is a gateway
+we pay for.
+
+### Four rules the implementation holds
+
+1. **A source you have no key for is never called on ours.** It is named in `providers_skipped` with
+   `reason` (`no_key`, `not_subscribed`, `key_rejected`) and the URL where you subscribe. Each
+   listing is a separate subscription, so a `403` from the Hub means "not subscribed to *that*
+   listing", not "bad key".
+2. **A degraded source is a named row, not a hole.** `search_status: "degraded"`, `count: null`, no
+   prices -- and the other source's rows still come back. "Booking did not answer" and "Booking had
+   nothing" are opposite answers and must be sayable as different sentences.
+3. **`cheapest_total` and `median_total` cover only the rows that carry a price**, and `count` is
+   that number. A `price_string` is never parsed into a number.
+4. **No cross-currency arithmetic.** Every source is asked for the same currency; if two answer in
+   different ones, each row keeps its own and `caveats` says the totals are not comparable. Nothing
+   is converted.
+
+### Keys, per source
+
+Almost everybody has one RapidAPI key subscribed to several listings, and that key is used for every
+source with no extra configuration. A caller who genuinely holds two can name one per source, and the
+source-scoped name wins:
+
+```
+x-rapidapi-key-airbnb: <key>        # header
+?rapidapi_key_airbnb=<key>          # query
+?config=<base64 {"rapidApiKeyAirbnb": "<key>"}>   # Smithery blob
+```
+
+The order is the one `src/credentials.py` already documents -- source-scoped names, then the
+unscoped specific names, then the config blob, then generic names last and skipped entirely when a
+`config` parameter is present, because a gateway's own key under a generic name is not ours.
+
+### `filters` and `price_as_seen_from` are Booking-only
+
+On a mixed search they are sent to Booking and not to the front. On an Airbnb-only search they are
+**refused**, not dropped: a silently discarded filter returns more properties than you asked for and
+nothing says so.
 
 ## Structured output (`outputSchema`, `structuredContent`, `isError`)
 

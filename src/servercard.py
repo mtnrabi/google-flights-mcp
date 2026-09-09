@@ -143,12 +143,15 @@ def _authentication(oauth, settings, site: str) -> dict[str, Any]:
     Two honest answers, not one:
 
     * OAuth configured -- the endpoint we publish is `/mcp`, which challenges
-      challenges, so authentication is required and the scheme is oauth2. The
-      resource and its metadata URL are the two values a client needs to begin,
-      and they are read off `OAuthSupport` so they cannot disagree with the
-      401 challenge or with the RFC 9728 document.
-    * Not configured -- `/mcp` never 401s (anonymous `initialize` and
-      `tools/list` are answered), so `required` is false. A tool call still
+      a credential-less `tools/call`, so authentication is required and the
+      scheme is oauth2. The resource and its metadata URL are the two values
+      a client needs to begin, and they are read off `OAuthSupport` so they
+      cannot disagree with the 401 challenge or with the RFC 9728 document.
+      `required` describes the tool call, which is the sentence above this
+      list: read-only discovery is served without a credential
+      (src/discovery.py), and a scanner that reads this card has already
+      proved that by fetching it.
+    * Not configured -- `/mcp` never 401s at all, so `required` is false. A tool call still
       needs the caller's own RapidAPI key; that is a per-call credential, not
       a connection-time auth scheme, and it is described under `_meta` with
       the endpoint it belongs to rather than misdeclared here.
@@ -186,7 +189,8 @@ async def build_card(mcp, settings, oauth, site: str) -> dict[str, Any]:
 
     # The endpoint a directory should publish. `/mcp`, always, since
     # 2026-09-09: it is now the single endpoint -- a credential of any kind
-    # is served, nothing at all is answered 401 with the OAuth metadata -- so
+    # is served, a credential-less tool call is answered 401 with the OAuth
+    # metadata, and read-only discovery is answered to anybody -- so
     # a client that can sign in signs in, and a client with a key uses its
     # key, on one URL. `/mcp/oauth` still works and is still the always-
     # challenge alias, but publishing it would ask a keyed caller to sign in

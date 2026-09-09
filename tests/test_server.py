@@ -92,7 +92,7 @@ class TestToolRegistration:
     """
 
     @pytest.mark.asyncio
-    async def test_all_four_tools_exist(self):
+    async def test_all_five_tools_exist(self):
         """Both products on one server. The same RapidAPI key scopes access
         per subscription, so a flights-only caller simply gets a 403 from the
         hotel tools rather than needing a second credential."""
@@ -104,6 +104,7 @@ class TestToolRegistration:
             "search_roundtrip_flights",
             "search_hotels",
             "find_hotel_by_name",
+            "compare_hotel_rates",
         }
 
     @pytest.mark.asyncio
@@ -114,8 +115,11 @@ class TestToolRegistration:
         async with Client(mcp) as client:
             for tool in await client.list_tools():
                 # find_ reads better than search_ for a single named property,
-                # and the point of the rule is that the verb states the action.
-                assert tool.name.startswith(("search_", "find_"))
+                # and compare_ states an action neither of the other two names
+                # -- pricing one stay on several sources and reporting the
+                # difference. The point of the rule is that the verb says what
+                # the tool does, not that there are only two verbs.
+                assert tool.name.startswith(("search_", "find_", "compare_"))
 
     @pytest.mark.asyncio
     async def test_descriptions_state_inputs_outputs_and_the_key(self):
@@ -637,7 +641,7 @@ class TestProductSelection:
         mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
         async with Client(mcp) as client:
             names = {t.name for t in await client.list_tools()}
-        assert len(names) == 4
+        assert len(names) == 5
 
     @pytest.mark.asyncio
     async def test_flights_only_hides_hotel_tools(self):
@@ -655,7 +659,11 @@ class TestProductSelection:
         )
         async with Client(mcp) as client:
             names = {t.name for t in await client.list_tools()}
-        assert names == {"search_hotels", "find_hotel_by_name"}
+        assert names == {
+            "search_hotels",
+            "find_hotel_by_name",
+            "compare_hotel_rates",
+        }
 
     @pytest.mark.asyncio
     async def test_hotels_only_registers_no_prompts(self):

@@ -53,6 +53,12 @@ from tests.test_server import (
 
 FLIGHT_TOOLS = ("search_oneway_flights", "search_roundtrip_flights")
 HOTEL_TOOLS = ("search_hotels", "find_hotel_by_name")
+# The cross-source comparison answers with provider rows rather than property
+# rows, so it declares its own schema and its own required key. Listed apart
+# from HOTEL_TOOLS so the `results`-shaped assertions stay exact rather than
+# being loosened to accommodate it.
+COMPARE_TOOLS = ("compare_hotel_rates",)
+ALL_HOTEL_TOOLS = HOTEL_TOOLS + COMPARE_TOOLS
 
 # The schema FastMCP infers from a bare `-> dict[str, Any]` annotation. It is
 # a valid schema and tells a client nothing, which is the state this work
@@ -92,7 +98,7 @@ def _flights(rows, status=None, reason=None):
 class TestTheSchemaIsDeclaredAndReal:
     """`tools/list` is where a client learns the result shape."""
 
-    @pytest.mark.parametrize("name", FLIGHT_TOOLS + HOTEL_TOOLS)
+    @pytest.mark.parametrize("name", FLIGHT_TOOLS + ALL_HOTEL_TOOLS)
     def test_every_tool_declares_an_output_schema(self, name):
         schema = _tools()[name].get("outputSchema")
         assert schema, f"{name} declares no outputSchema"
@@ -102,7 +108,7 @@ class TestTheSchemaIsDeclaredAndReal:
         )
         assert schema.get("properties"), f"{name} declares no properties"
 
-    @pytest.mark.parametrize("name", FLIGHT_TOOLS + HOTEL_TOOLS)
+    @pytest.mark.parametrize("name", FLIGHT_TOOLS + ALL_HOTEL_TOOLS)
     def test_every_declared_schema_is_itself_valid(self, name):
         # A malformed schema is not a test failure at import time -- FastMCP
         # accepts any object schema -- so it would ship and only break the
@@ -118,14 +124,32 @@ class TestTheSchemaIsDeclaredAndReal:
         # empty array means without reading our documentation.
         assert "empty" in status["description"]
 
-    @pytest.mark.parametrize("name", HOTEL_TOOLS)
-    def test_hotel_tools_claim_no_search_status(self, name):
+    @pytest.mark.parametrize("name", COMPARE_TOOLS)
+    def test_compare_claims_no_search_status(self, name):
         # The hotels upstream sends no X-Search-Status header, so there is no
-        # honest value to put here. Declaring the field anyway would promise
-        # a signal that never arrives.
+        # honest value to put at the top of a single-stay result. Declaring
+        # the field anyway would promise a signal that never arrives.
+        # (Per-source rows carry their own `search_status`; that is a
+        # different field about a different thing.)
         assert "search_status" not in _tools()[name]["outputSchema"]["properties"]
 
-    @pytest.mark.parametrize("name", FLIGHT_TOOLS + HOTEL_TOOLS)
+    @pytest.mark.parametrize("name", HOTEL_TOOLS)
+    def test_the_stay_fanout_status_is_declared_and_scoped(self, name):
+        """The one hotel status we can honestly report.
+
+        A single stay still has none -- one call either answered or raised.
+        A date-range search is many calls, some of which can fail while
+        others answer, and that IS a status this server knows first-hand.
+        So it is declared, and its description says which searches carry it,
+        because a client that finds it missing on a single stay must not read
+        that as a violated schema.
+        """
+        status = _tools()[name]["outputSchema"]["properties"]["search_status"]
+        assert set(status["enum"]) == {"ok", "empty", "partial", "degraded"}
+        assert "range" in status["description"].lower()
+        assert "degraded" in status["description"]
+
+    @pytest.mark.parametrize("name", FLIGHT_TOOLS + ALL_HOTEL_TOOLS)
     def test_unknown_keys_are_permitted(self, name):
         # `additionalProperties: false` would be the stricter-looking choice
         # and would break the first time anything appended a key -- an
@@ -141,13 +165,19 @@ class TestTheSchemaIsDeclaredAndReal:
         # "servers MUST provide structured results that conform".
         assert _tools()[name]["outputSchema"]["required"] == ["results"]
 
+    @pytest.mark.parametrize("name", COMPARE_TOOLS)
+    def test_the_comparison_requires_only_its_provider_rows(self, name):
+        # Same argument, different envelope: `providers` is the one key the
+        # comparison carries on every exit path, the keyless reply included.
+        assert _tools()[name]["outputSchema"]["required"] == ["providers"]
+
     def test_the_schema_survives_the_per_product_deployments(self):
         # Every tool is constructed on both deployments and the unwanted ones
         # are removed afterwards, so a broken schema on the hotel tools would
         # take the flights deployment's cold start down with it.
         for products, expected in (
             ("flights", set(FLIGHT_TOOLS)),
-            ("hotels", set(HOTEL_TOOLS)),
+            ("hotels", set(ALL_HOTEL_TOOLS)),
         ):
             tools = _tools(products)
             assert set(tools) == expected
@@ -348,7 +378,7 @@ class TestDirectoryMetadataSurvived:
     about to book.
     """
 
-    @pytest.mark.parametrize("name", FLIGHT_TOOLS + HOTEL_TOOLS)
+    @pytest.mark.parametrize("name", FLIGHT_TOOLS + ALL_HOTEL_TOOLS)
     def test_title_and_annotations_are_intact(self, name):
         tool = _tools()[name]
         assert tool["title"]

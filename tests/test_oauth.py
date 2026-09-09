@@ -609,18 +609,22 @@ class TestPlainMcpServesEveryCredential:
 
     async def test_a_caller_with_nothing_is_challenged(self, live):
         """The change. A keyless caller used to get a 200 whose body said
-        `needs_api_key`, which no client's auth machinery can see."""
+        `needs_api_key`, which no client's auth machinery can see.
+
+        On a `tools/call`, which is where it matters: the handshake in front
+        of it is read-only discovery and is served to anybody, so that a
+        directory health check sees a working server
+        (`TestDiscoveryWithoutCredentials`)."""
         async with Session(live) as session:
             response = await session.http.post(
                 "/mcp",
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
-                    "method": "initialize",
+                    "method": "tools/call",
                     "params": {
-                        "protocolVersion": "2025-06-18",
-                        "capabilities": {},
-                        "clientInfo": {"name": "t", "version": "1"},
+                        "name": "search_oneway_flights",
+                        "arguments": SEARCH_ARGS,
                     },
                 },
                 headers=dict(MCP_HEADERS),
@@ -684,22 +688,200 @@ class TestPlainMcpServesEveryCredential:
         assert live.upstream.keys_seen == [HEADER_KEY]
 
 
+class TestDiscoveryWithoutCredentials:
+    """A scanner with no credentials must see a healthy server, in full.
+
+    Glama re-checks every connector HOURLY by opening an MCP connection and
+    listing its tools, with no credentials. When `/mcp` started challenging a
+    credential-less caller on 2026-09-09 that check began failing, and both
+    paid listings were marked unhealthy and ranked down (Glama's mail to
+    Matan the same evening). Smithery's release scan, mcpservers.org and
+    M8ven probe the same way, and Claude's own connector dialog probes before
+    it decides which auth mode to offer.
+
+    So the line is drawn at spending, not at connecting: the read-only
+    handshake is served to anybody, `tools/call` still needs a key or a
+    sign-in. The tool list was never a secret -- it is on the RapidAPI
+    listing, in every directory entry and in the README.
+    """
+
+    @staticmethod
+    async def _post(http, message, path="/mcp"):
+        return await http.post(path, json=message, headers=dict(MCP_HEADERS))
+
+    async def test_initialize_without_a_credential_is_served(self, live):
+        async with Session(live) as session:
+            response = await self._post(
+                session.http,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "glama-health-check", "version": "1"},
+                    },
+                },
+            )
+        assert response.status_code == 200, response.text
+        assert "www-authenticate" not in response.headers
+
+    async def test_tools_list_returns_the_whole_menu_with_its_metadata(self, live):
+        """Not just a 200: the reviewable schema. A directory that gets an
+        empty list, or tools with no `title` and no annotations, ranks the
+        listing down for a different reason (Anthropic Directory Policy
+        5.E)."""
+        async with Session(live) as session:
+            response = await self._post(
+                session.http, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+            )
+        assert response.status_code == 200, response.text
+        tools = _payload(response.text)["result"]["tools"]
+        assert {t["name"] for t in tools} >= {
+            "search_oneway_flights",
+            "search_roundtrip_flights",
+        }
+        for tool in tools:
+            assert tool.get("title"), tool["name"]
+            annotations = tool.get("annotations") or {}
+            assert annotations.get("title"), tool["name"]
+            assert annotations.get("readOnlyHint") is True, tool["name"]
+            # A live fare is never idempotent; a host that cached one would
+            # quote a stale price to somebody about to book.
+            assert annotations.get("idempotentHint") is not True, tool["name"]
+        # Nothing was spent to answer it.
+        assert live.upstream.keys_seen == []
+
+    @pytest.mark.parametrize(
+        "method", ["ping", "prompts/list", "resources/list", "resources/templates/list"]
+    )
+    async def test_the_rest_of_the_read_only_handshake_is_served(self, live, method):
+        async with Session(live) as session:
+            response = await self._post(
+                session.http, {"jsonrpc": "2.0", "id": 3, "method": method}
+            )
+        assert response.status_code == 200, response.text
+
+    async def test_the_initialized_notification_is_not_challenged(self, live):
+        """One message after `initialize`. Challenging it would break the
+        handshake one step before the tool list."""
+        async with Session(live) as session:
+            response = await self._post(
+                session.http,
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            )
+        assert response.status_code in (200, 202), response.text
+
+    async def test_a_tool_call_is_still_challenged(self, live):
+        async with Session(live) as session:
+            response = await self._post(
+                session.http,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_oneway_flights",
+                        "arguments": SEARCH_ARGS,
+                    },
+                },
+            )
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"].endswith(
+            f'oauth-protected-resource{MCP_PATH}"'
+        )
+        assert live.upstream.keys_seen == []
+
+    async def test_a_keyed_tool_call_after_an_anonymous_handshake_is_served(
+        self, live
+    ):
+        """The whole point: the scanner's handshake and the customer's call
+        are the same session shape, and only the second one needs a key."""
+        async with Session(live) as session:
+            await self._post(
+                session.http, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"}
+            )
+            result = await call_tool(
+                session.http, "/mcp", SEARCH_ARGS, {"x-rapidapi-key": HEADER_KEY}
+            )
+        assert result["result_count"] == 1
+        assert live.upstream.keys_seen == [HEADER_KEY]
+
+    async def test_a_batch_carrying_one_tool_call_is_challenged(self, live):
+        """A batch is one HTTP response, so it is served whole or refused
+        whole -- and a `tools/call` hidden behind two discovery entries must
+        not be the way through."""
+        async with Session(live) as session:
+            response = await self._post(
+                session.http,
+                [
+                    {"jsonrpc": "2.0", "id": 6, "method": "tools/list"},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "search_oneway_flights",
+                            "arguments": SEARCH_ARGS,
+                        },
+                    },
+                ],
+            )
+        assert response.status_code == 401
+        assert live.upstream.keys_seen == []
+
+    async def test_a_body_that_is_not_a_request_is_challenged(self, live):
+        """Fails closed: if we cannot read what is being asked for, it is not
+        discovery."""
+        async with Session(live) as session:
+            response = await session.http.post(
+                "/mcp", content=b"{not json", headers=dict(MCP_HEADERS)
+            )
+        assert response.status_code == 401
+
+    async def test_the_always_challenge_alias_does_not_open(self, live):
+        """`/mcp/oauth` is what we hand a directory that wants a server which
+        always requires auth, and it is saved in connectors added before
+        2026-09-09. It challenges discovery too."""
+        async with Session(live) as session:
+            response = await self._post(
+                session.http,
+                {"jsonrpc": "2.0", "id": 8, "method": "tools/list"},
+                path=MCP_OAUTH_PATH,
+            )
+        assert response.status_code == 401
+
+
 class TestTheInjectedHeaderCannotBeForged:
     async def test_a_forged_subject_on_plain_mcp_resolves_nothing(self, live):
         """Two things at once, and both matter.
 
         The header is stripped BEFORE the challenge, so forging it does not
-        even buy an anonymous caller a 200 -- they get the 401. And when the
-        same caller brings a real key, the forged subject still resolves
-        nothing: the stored key of `SUB` is never spent, only the key the
-        caller actually sent.
+        even buy an anonymous caller a tool call -- they get the 401. And
+        when the same caller brings a real key, the forged subject still
+        resolves nothing: the stored key of `SUB` is never spent, only the
+        key the caller actually sent.
+
+        The probe is a `tools/call` rather than a `tools/list` because a
+        `tools/list` is read-only discovery and is now served to anybody
+        (src/discovery.py); the forged header buys nothing there either, and
+        `TestDiscoveryWithoutCredentials` pins that.
         """
         await live.key_store.put(SUB, EMAIL, USER_KEY)
         forged = {"x-fp-oauth-subject": SUB, "x-fp-oauth-provider": "google"}
         async with Session(live) as session:
             challenged = await session.http.post(
                 "/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_oneway_flights",
+                        "arguments": SEARCH_ARGS,
+                    },
+                },
                 headers={**dict(MCP_HEADERS), **forged},
             )
             assert challenged.status_code == 401

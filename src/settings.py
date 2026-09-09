@@ -205,8 +205,26 @@ class Settings:
     # broken on first use. Config, not a fork.
     products: str = "both"
 
+    # ── the api front ────────────────────────────────────────────────────
+    # Where a source that is NOT on the RapidAPI edge is reached: today that
+    # is Airbnb, whose backend (`otaLiteAgent`) is only reachable through
+    # api.flightpowers.com with `provider=airbnb` in the body (flight_rabbi
+    # #472). Booking is untouched by this and still goes straight to its own
+    # RapidAPI host, on the caller's key, billed to their subscription.
+    #
+    # This holds no credential and never can: the caller's own key is
+    # forwarded to the front per request, exactly as it is to RapidAPI. If
+    # this server ever needed a secret of its own to reach a source, that
+    # source would be billed to us rather than to the caller, which is the one
+    # thing `src/providers.py` says must not happen quietly.
+    api_front_base_url: str = "https://api.flightpowers.com"
+
 
 VALID_PRODUCTS = ("flights", "hotels", "both")
+
+#: Overridable so a preview deployment can point at a preview front. Never a
+#: path, only an origin: the route is fixed in `providers.API_FRONT_SEARCH_PATH`.
+DEFAULT_API_FRONT_BASE_URL = "https://api.flightpowers.com"
 
 # Where a caller with no key is sent, per deployment. It is quoted back
 # verbatim in `needs_api_key` replies, on /health and on the public index, so
@@ -362,4 +380,7 @@ def load_settings(products: str | None = None) -> Settings:
             "SIGNUP_URL", products, DEFAULT_SIGNUP_URLS[products]
         ),
         products=products,
+        api_front_base_url=_env_str(
+            "API_FRONT_BASE_URL", DEFAULT_API_FRONT_BASE_URL
+        ).rstrip("/"),
     )
