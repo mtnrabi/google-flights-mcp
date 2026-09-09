@@ -110,13 +110,83 @@ logger = logging.getLogger(__name__)
 
 # ── the shape of the deployment ──────────────────────────────────────────
 
-#: The always-challenging MCP endpoint. `/mcp` is untouched.
+#: The always-challenging MCP endpoint. Kept, and still the URL printed in
+#: guides and saved in connectors added before 2026-09-09, so nobody has to
+#: re-add a server.
 MCP_OAUTH_PATH = "/mcp/oauth"
 #: What the gate rewrites the path to before handing the request on. FastMCP
 #: mounts a plain `Route("/mcp")`, not a Mount, so `/mcp/oauth` reaches
 #: nothing on its own -- the rewrite is what makes "same tools" literal
 #: rather than a second copy of the tool registry.
 MCP_PATH = "/mcp"
+
+#: Whether `/mcp` challenges a caller who presents NO credential at all.
+#:
+#: The market norm, and what every remote MCP server offering both an API key
+#: and OAuth does: one endpoint, a credential is served, no credential is
+#: answered `401` + `WWW-Authenticate` so the client can start a sign-in.
+#: Before 2026-09-09 this server answered a keyless caller with a 200 whose
+#: body said `needs_api_key`, which is correct JSON and is invisible to every
+#: client's auth machinery -- the user saw "the tool failed" and had nowhere
+#: to click.
+#:
+#: The property that makes this safe for the people who pay us: **a request
+#: carrying any credential is never challenged**. An `x-rapidapi-key` header,
+#: `?rapidapi_key=`, a Smithery config blob, an `fpk_` connect token or an
+#: `fpo_` access token all reach the tools exactly as they do today, in the
+#: same order (rule 6). Only a caller with nothing at all sees a difference,
+#: and today that caller gets an error either way.
+#:
+#: `MCP_REQUIRE_AUTH=off` is the rollback: `/mcp` stops challenging and goes
+#: back to the 200 + `needs_api_key` body, with no deploy and no code change.
+#: `/mcp/oauth` challenges whatever this says.
+REQUIRE_AUTH_ENV = "MCP_REQUIRE_AUTH"
+
+
+def require_auth() -> bool:
+    """`MCP_REQUIRE_AUTH`, defaulting to on.
+
+    Anything that is not an explicit off word is on. A typo therefore costs a
+    sign-in prompt to a caller who had no credential anyway, which is the
+    harmless direction.
+    """
+    return (os.environ.get(REQUIRE_AUTH_ENV) or "").strip().lower() not in {
+        "0",
+        "off",
+        "false",
+        "no",
+    }
+
+
+def has_credential(headers: dict[str, str], query: dict[str, str]) -> bool:
+    """Whether this request carries anything we would try to authenticate with.
+
+    Deliberately generous, and deliberately NOT a validity check. The question
+    is "did the caller bring something", not "does it work": a wrong key must
+    still reach the tool layer, which is the only place that can tell the user
+    RapidAPI refused it. Challenging a caller who brought a broken key would
+    replace a precise error with a sign-in prompt.
+
+    Every channel `credentials.resolve_credential` reads, plus the two token
+    families, plus -- this is the one that is easy to miss -- the
+    `RAPIDAPI_KEY` env fallback. A deployment with that set serves every
+    keyless caller off its own plan on purpose, and challenging them would
+    turn a working configuration into a wall.
+    """
+    from .credentials import (  # noqa: PLC0415 -- keeps the import graph flat
+        OUR_TOKEN_PREFIXES,
+        find_connect_token,
+        resolve_credential,
+    )
+
+    if os.environ.get("RAPIDAPI_KEY", "").strip():
+        return True
+    if resolve_credential(headers, query, fallback="").present:
+        return True
+    if find_connect_token(headers, query):
+        return True
+    token = bearer_token(headers.get("authorization"))
+    return bool(token and token.startswith(OUR_TOKEN_PREFIXES))
 
 AUTHORIZE_PATH = "/connect/authorize"
 TOKEN_PATH = "/oauth/token"
@@ -384,14 +454,32 @@ class OAuthSupport:
 
     @property
     def resource_url(self) -> str:
-        return f"{self.issuer}{MCP_OAUTH_PATH}"
+        """The canonical protected resource: `/mcp`, the URL we publish.
 
-    @property
-    def resource_metadata_url(self) -> str:
-        # The path-scoped form. A client that read the 401 challenge follows
-        # this URL literally; the unscoped path is served too, for clients
-        # that construct it themselves from the origin.
-        return f"{self.issuer}{PROTECTED_RESOURCE_PATH}{MCP_OAUTH_PATH}"
+        Moved from `/mcp/oauth` on 2026-09-09, when `/mcp` became the single
+        endpoint. One resource identifier, not two, even though two paths
+        reach it: a token's audience is a claim about which SERVER it may be
+        spent at, and these are the same server, the same tools and the same
+        account. Two audiences would mean a token obtained through one path
+        failed on the other, which a user experiences as "sign-in worked and
+        then nothing works".
+
+        Tokens issued before the move carry `…/mcp/oauth` and keep working:
+        `resource_matches` accepts the origin, `/mcp` and `/mcp/oauth` for
+        exactly this reason, and has since day 2.
+        """
+        return f"{self.issuer}{MCP_PATH}"
+
+    def resource_metadata_url(self, path: str = MCP_PATH) -> str:
+        """The RFC 9728 document for one of the two paths.
+
+        Path-scoped, because a client that read a 401 follows the URL in it
+        literally and RFC 9728 §3.1 builds that URL by inserting the
+        resource's path after the well-known segment. The unscoped path is
+        served as well, for clients that construct it from the origin alone.
+        All of them name the same `resource`.
+        """
+        return f"{self.issuer}{PROTECTED_RESOURCE_PATH}{path}"
 
     # ── metadata documents ───────────────────────────────────────────────
 
@@ -1250,8 +1338,17 @@ class OAuthSupport:
             return None
         return record
 
-    def challenge_header(self, error: str = "", description: str = "") -> str:
-        parts = [f'Bearer resource_metadata="{self.resource_metadata_url}"']
+    def challenge_header(
+        self, error: str = "", description: str = "", path: str = MCP_OAUTH_PATH
+    ) -> str:
+        """The `WWW-Authenticate` value for a 401 on `path`.
+
+        `path` decides only which metadata URL is advertised; the resource,
+        the authorization server and the token audience are the same either
+        way. A client challenged on `/mcp` is pointed at `/mcp`'s document so
+        the URL it fetches is the one it asked about.
+        """
+        parts = [f'Bearer resource_metadata="{self.resource_metadata_url(path)}"']
         if error:
             parts.append(f'error="{error}"')
         if description:
@@ -1346,12 +1443,22 @@ def _json_response(status: int, body: dict[str, Any], extra: dict[str, str] | No
 
 
 class OAuthResourceGate:
-    """ASGI wrapper: strip injected headers everywhere, guard /mcp/oauth.
+    """ASGI wrapper: strip injected headers everywhere, guard the MCP paths.
 
     Sits above the host dispatcher rather than inside a product app, because
     the strip has to happen before ANY route sees a request and the guard has
     to know which product's tokens to check -- both of which are properties
     of the process, not of one FastMCP instance.
+
+    Since 2026-09-09 it guards `/mcp` as well as `/mcp/oauth`, and the two
+    differ in exactly one thing:
+
+        /mcp        a credential of ANY kind is served, unchanged. Nothing at
+                    all is answered 401 + the challenge, which is what makes
+                    a client show a Sign in button. `MCP_REQUIRE_AUTH=off` is
+                    the rollback.
+        /mcp/oauth  no access token, no service, whatever the mode. The URL
+                    in printed guides and in connectors already added.
     """
 
     def __init__(self, app, support_for_scope) -> None:
@@ -1364,13 +1471,20 @@ class OAuthResourceGate:
             return
 
         scope = strip_identity_headers(scope)
-        path = scope.get("path", "")
-        if path.rstrip("/") != MCP_OAUTH_PATH:
+        path = (scope.get("path") or "").rstrip("/")
+        if path not in (MCP_OAUTH_PATH, MCP_PATH):
             await self.app(scope, receive, send)
             return
+        always = path == MCP_OAUTH_PATH
 
         support = self.support_for_scope(scope)
         if support is None:
+            if not always:
+                # OAuth is not configured on this deployment. `/mcp` is the
+                # product and must keep answering keyed callers exactly as it
+                # does today.
+                await self.app(scope, receive, send)
+                return
             payload, headers = _json_response(
                 404,
                 {
@@ -1389,7 +1503,18 @@ class OAuthResourceGate:
             for k, v in (scope.get("headers") or [])
         }
         token = bearer_token(headers.get("authorization"))
-        if not token:
+        if not token or not token.startswith(ACCESS_TOKEN_PREFIX):
+            # Not an OAuth token. On `/mcp` that is the normal case and the
+            # request goes on to the tools with whatever credential it
+            # brought -- a key in a header, on the query string or in a
+            # Smithery config blob, or an `fpk_` connect token. Only a caller
+            # with NOTHING is challenged, and only when the challenge is on.
+            if not always:
+                if not require_auth() or has_credential(headers, _query(scope)):
+                    await self.app(scope, receive, send)
+                    return
+                await _send_challenge(send, support, MCP_PATH)
+                return
             payload, out = _json_response(
                 401,
                 {
@@ -1438,6 +1563,45 @@ class OAuthResourceGate:
             (EMAIL_HEADER.encode("ascii"), header_safe(record.user_email).encode("ascii")),
         ]
         await self.app(scope, receive, send)
+
+
+def _query(scope: dict) -> dict[str, str]:
+    """The query string as a flat mapping, last value wins.
+
+    Parsed with the stdlib rather than Starlette's QueryParams so the gate
+    stays a pure-ASGI component that can be unit-tested without building a
+    Request.
+    """
+    from urllib.parse import parse_qsl  # noqa: PLC0415
+
+    raw = scope.get("query_string") or b""
+    if not raw:
+        return {}
+    return dict(parse_qsl(raw.decode("latin-1"), keep_blank_values=True))
+
+
+async def _send_challenge(send, support, path: str) -> None:
+    """401 + the header that makes an MCP client show a Sign in button.
+
+    The header is what a client acts on; the body is the only thing a script,
+    a log or a person running curl will ever read, so it carries the whole
+    instruction and both ways in -- sign in, or bring a key.
+    """
+    payload, out = _json_response(
+        401,
+        {
+            "error": "invalid_request",
+            "error_description": (
+                "This server needs a credential. Either sign in -- your MCP "
+                "client should offer a Sign in button for this URL, and it "
+                "takes one click -- or send your RapidAPI key in an "
+                "`x-rapidapi-key` header or as `?rapidapi_key=` on this URL. "
+                f"Keys come from {support.issuer}/ and BASIC is free."
+            ),
+        },
+        {"WWW-Authenticate": support.challenge_header(path=path)},
+    )
+    await _send(send, 401, out, payload)
 
 
 async def _send(send, status: int, headers: list, body: bytes) -> None:

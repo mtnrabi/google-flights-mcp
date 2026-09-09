@@ -306,12 +306,13 @@ class TestAuthentication:
         origin = ORIGINS["flights"]
         assert auth["required"] is True
         assert auth["schemes"] == ["oauth2"]
-        assert auth["resource"] == f"{origin}{MCP_OAUTH_PATH}"
+        # `/mcp` since 2026-09-09: one endpoint, one resource identifier.
+        assert auth["resource"] == f"{origin}/mcp"
         assert auth["resourceMetadataUrl"] == (
-            f"{origin}/.well-known/oauth-protected-resource{MCP_OAUTH_PATH}"
+            f"{origin}/.well-known/oauth-protected-resource/mcp"
         )
         assert auth["authorizationServers"] == [origin]
-        assert card["transport"]["endpoint"] == MCP_OAUTH_PATH
+        assert card["transport"]["endpoint"] == "/mcp"
 
     async def test_the_metadata_url_is_the_one_the_401_advertises(
         self, with_oauth
@@ -333,11 +334,15 @@ class TestAuthentication:
             in challenged.headers["www-authenticate"]
         )
 
-    async def test_the_keyed_endpoint_is_still_offered(self, with_oauth):
+    async def test_the_always_challenge_alias_is_still_listed(self, with_oauth):
+        """`/mcp` is the published endpoint now, so the alternative is the
+        other direction: the alias that demands sign-in on request one, for
+        clients whose auth mode is fixed when a server is added and for
+        connectors saved on that URL before 2026-09-09."""
         card = (await get_card(with_oauth, "flights.golden.test")).json()
         alternatives = card["_meta"]["com.flightpowers/alternativeTransports"]
-        assert [a["endpoint"] for a in alternatives] == ["/mcp"]
-        assert alternatives[0]["authentication"]["required"] is False
+        assert [a["endpoint"] for a in alternatives] == ["/mcp/oauth"]
+        assert alternatives[0]["authentication"]["required"] is True
         assert "rapidapi.com" in alternatives[0]["authentication"]["signupUrl"]
 
 

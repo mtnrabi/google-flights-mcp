@@ -46,6 +46,7 @@ from src.oauth import (
     ACCESS_TOKEN_PREFIX,
     CODE_TTL_SECONDS,
     MCP_OAUTH_PATH,
+    MCP_PATH,
     REFRESH_TOKEN_PREFIX,
     pkce_challenge,
 )
@@ -365,7 +366,8 @@ class TestTheWholeFlow:
                 r'resource_metadata="([^"]+)"', challenge
             ).group(1)
             resource = (await http.get(urlsplit(metadata_url).path)).json()
-            assert resource["resource"] == f"{ORIGIN}{MCP_OAUTH_PATH}"
+            # `/mcp`, whichever path was challenged: one server, one audience.
+            assert resource["resource"] == f"{ORIGIN}{MCP_PATH}"
             assert resource["authorization_servers"] == [ORIGIN]
 
             server = (
@@ -544,7 +546,17 @@ class TestTheWholeFlow:
 # ── /mcp is untouched ────────────────────────────────────────────────────
 
 
-class TestPlainMcpIsUnchanged:
+class TestPlainMcpServesEveryCredential:
+    """`/mcp` is the single endpoint since 2026-09-09.
+
+    The promise that used to be here -- "`/mcp` never 401s" -- was replaced
+    deliberately: it made the sign-in invisible to every client's auth
+    machinery, so a user with no key saw "the tool failed" and had nowhere to
+    click. The promise that replaced it is narrower and is the one that
+    protects paying integrations: **a request carrying any credential is
+    never challenged.**
+    """
+
     async def test_a_keyed_call_never_sees_a_challenge(self, live):
         async with Session(live) as session:
             result = await call_tool(
@@ -556,20 +568,32 @@ class TestPlainMcpIsUnchanged:
         assert result["result_count"] == 1
         assert live.upstream.keys_seen == [HEADER_KEY]
 
-    async def test_a_keyless_call_is_still_a_reply_not_a_401(self, live):
+    async def test_a_wrong_key_is_still_a_reply_and_not_a_challenge(self, live):
+        """The question the gate asks is "did the caller bring something",
+        not "does it work". A broken key has to reach the tool layer, which
+        is the only place that can say RapidAPI refused it -- replacing that
+        precise error with a sign-in prompt would be a worse answer."""
         async with Session(live) as session:
-            result = await call_tool(session.http, "/mcp", SEARCH_ARGS)
-        assert result["needs_api_key"] is True
-        # The get-a-key reply, not the reconnect one: this caller has no
-        # identity at all, so telling them to sign in again would be wrong.
-        assert "No RapidAPI key was supplied" in result["message"]
-
-    async def test_tools_list_is_still_anonymous(self, live):
-        async with Session(live) as session:
-            started = await mcp_request(
+            result = await call_tool(
                 session.http,
                 "/mcp",
-                {
+                SEARCH_ARGS,
+                # Long enough to be a key, wrong enough to be refused. A
+                # value under MIN_KEY_LENGTH is treated as absent, which is a
+                # different case (and the one the challenge is for).
+                {"x-rapidapi-key": "wrong-key-abcdefghijklmnopqrstuvwxyz0123"},
+            )
+        # It reached the tools. Whether RapidAPI then accepts the key is the
+        # tool layer's business and the stub upstream's; the point here is
+        # that the gate did not turn a key problem into a sign-in prompt.
+        assert isinstance(result, dict)
+        assert "error" not in result
+
+    async def test_a_query_param_key_is_a_credential(self, live):
+        async with Session(live) as session:
+            response = await session.http.post(
+                f"/mcp?rapidapi_key={HEADER_KEY}",
+                json={
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "initialize",
@@ -579,17 +603,65 @@ class TestPlainMcpIsUnchanged:
                         "clientInfo": {"name": "t", "version": "1"},
                     },
                 },
+                headers=dict(MCP_HEADERS),
             )
-            headers = dict(MCP_HEADERS)
-            if started.headers.get("mcp-session-id"):
-                headers["mcp-session-id"] = started.headers["mcp-session-id"]
-            listed = await session.http.post(
+        assert response.status_code == 200
+
+    async def test_a_caller_with_nothing_is_challenged(self, live):
+        """The change. A keyless caller used to get a 200 whose body said
+        `needs_api_key`, which no client's auth machinery can see."""
+        async with Session(live) as session:
+            response = await session.http.post(
                 "/mcp",
-                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "t", "version": "1"},
+                    },
+                },
+                headers=dict(MCP_HEADERS),
             )
-        assert listed.status_code == 200
-        assert _payload(listed.text)["result"]["tools"]
+        assert response.status_code == 401
+        header = response.headers["www-authenticate"]
+        # Pointed at `/mcp`'s own document, which is the URL it asked about.
+        assert header.endswith(
+            f'oauth-protected-resource{MCP_PATH}"'
+        ), header
+        # And the body says both ways in, for the reader who never sees the
+        # header: a script, a log, a person running curl.
+        body = response.json()
+        assert "sign in" in body["error_description"].lower()
+        assert "x-rapidapi-key" in body["error_description"]
+
+    async def test_the_challenge_can_be_switched_off_without_a_deploy(
+        self, live, monkeypatch
+    ):
+        """`MCP_REQUIRE_AUTH=off` is the rollback: `/mcp` stops challenging
+        and answers a keyless caller with the old `needs_api_key` body."""
+        monkeypatch.setenv("MCP_REQUIRE_AUTH", "off")
+        async with Session(live) as session:
+            result = await call_tool(session.http, "/mcp", SEARCH_ARGS)
+        assert result["needs_api_key"] is True
+        assert "No RapidAPI key was supplied" in result["message"]
+
+    async def test_the_alias_challenges_whatever_the_mode_says(
+        self, live, monkeypatch
+    ):
+        """A rollback that silently turned the always-challenge URL into an
+        open one would strand every client that added it expecting a Sign in
+        button."""
+        monkeypatch.setenv("MCP_REQUIRE_AUTH", "off")
+        async with Session(live) as session:
+            response = await session.http.post(
+                MCP_OAUTH_PATH,
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers=dict(MCP_HEADERS),
+            )
+        assert response.status_code == 401
 
     async def test_a_header_key_still_beats_an_oauth_identity(self, live):
         """The request always wins -- the rule that protects paying
@@ -614,16 +686,33 @@ class TestPlainMcpIsUnchanged:
 
 class TestTheInjectedHeaderCannotBeForged:
     async def test_a_forged_subject_on_plain_mcp_resolves_nothing(self, live):
+        """Two things at once, and both matter.
+
+        The header is stripped BEFORE the challenge, so forging it does not
+        even buy an anonymous caller a 200 -- they get the 401. And when the
+        same caller brings a real key, the forged subject still resolves
+        nothing: the stored key of `SUB` is never spent, only the key the
+        caller actually sent.
+        """
         await live.key_store.put(SUB, EMAIL, USER_KEY)
+        forged = {"x-fp-oauth-subject": SUB, "x-fp-oauth-provider": "google"}
         async with Session(live) as session:
+            challenged = await session.http.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={**dict(MCP_HEADERS), **forged},
+            )
+            assert challenged.status_code == 401
+            assert live.upstream.keys_seen == []
+
             result = await call_tool(
                 session.http,
                 "/mcp",
                 SEARCH_ARGS,
-                {"x-fp-oauth-subject": SUB, "x-fp-oauth-provider": "google"},
+                {**forged, "x-rapidapi-key": HEADER_KEY},
             )
-        assert result["needs_api_key"] is True
-        assert live.upstream.keys_seen == []
+        assert result["result_count"] == 1
+        assert live.upstream.keys_seen == [HEADER_KEY]
 
     async def test_a_forged_subject_on_the_oauth_endpoint_is_still_401(self, live):
         await live.key_store.put(SUB, EMAIL, USER_KEY)
@@ -1103,19 +1192,24 @@ class TestMetadataIsServedBothWays:
         "path",
         [
             "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
             "/.well-known/oauth-protected-resource/mcp/oauth",
         ],
     )
     async def test_protected_resource(self, live, path):
         async with Session(live) as session:
             body = (await session.http.get(path)).json()
-        assert body["resource"] == f"{ORIGIN}{MCP_OAUTH_PATH}"
+        # ONE resource identifier whichever document you read. A token
+        # audience that changed with the path would fail on the other one --
+        # "sign-in worked and then nothing works".
+        assert body["resource"] == f"{ORIGIN}{MCP_PATH}"
         assert body["authorization_servers"] == [ORIGIN]
 
     @pytest.mark.parametrize(
         "path",
         [
             "/.well-known/oauth-authorization-server",
+            "/.well-known/oauth-authorization-server/mcp",
             "/.well-known/oauth-authorization-server/mcp/oauth",
         ],
     )

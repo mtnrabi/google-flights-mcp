@@ -6,4 +6,3 @@ logs/
 .pytest_cache/
 .vercel
 .env*.local
-venv/

@@ -2,28 +2,27 @@
 
 **Real-time Google Flights fares for agents.** Three things people do with this server. Scan for deals: one call takes a date range and a list of destination airports, expands every combination server side, and returns each fare with Google's own low, typical or high verdict. Put live search in your app: flat JSON with a bookable link on every result, and round trips priced as paired legs. Run a 24/7 AI travel agent: add the server, sign in with Google, and schedule it. No ads, no sponsored content. You bring your own RapidAPI key, so every search is billed to your plan and never to anyone else's.
 
-**Sign in with Google, nothing to paste into your client:**
+**One URL. Sign in with Google, nothing to paste into your client:**
 
 ```bash
-claude mcp add --transport http google-flights https://flights.flightpowers.com/mcp/oauth
+claude mcp add --transport http google-flights https://flights.flightpowers.com/mcp
 ```
 
-Works in clients that support MCP authorization: a Sign in button appears, you sign in with
-Google, and you paste your RapidAPI key once on the `/connect` page. Nothing goes in your client
-config.
+Your client hits the URL, gets a `401` with the sign-in details, and shows a **Sign in** button. You sign in with Google and paste your RapidAPI key once on the `/connect` page. Nothing goes in your client config.
 
-**Or bring your own RapidAPI key:**
+*The single URL is live from the next deploy of the server; until then `https://flights.flightpowers.com/mcp/oauth` is the URL that shows a Sign in button.*
+
+**Same URL with your key, for scripts, CI and clients without a sign-in button:**
 
 ```bash
 claude mcp add --transport http google-flights https://flights.flightpowers.com/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
 ```
 
-Hosted. Nothing to clone, nothing to build. Listed in the official MCP Registry as
-`com.flightpowers/google-flights`. Health check:
-[`/health`](https://flights.flightpowers.com/health).
+A headless run cannot open a browser, so it sends the key instead. There is no second endpoint to switch to.
 
-**Need a key?** Subscribe to the Google Flights Live API on RapidAPI, free tier available,
-and copy your `x-rapidapi-key`: **https://rapidapi.com/mtnrabi/api/google-flights-live-api**
+Hosted. Nothing to clone, nothing to build. Listed in the official MCP Registry as `com.flightpowers/google-flights`. Health check: [`/health`](https://flights.flightpowers.com/health).
+
+**Need a key?** Subscribe to the Google Flights Live API on RapidAPI, free tier available, and copy your `x-rapidapi-key`: **https://rapidapi.com/mtnrabi/api/google-flights-live-api**
 
 ---
 
@@ -740,8 +739,8 @@ JSON document: `serverInfo`, `description`, `transport`, `capabilities`, `authen
 `instructions`, and the full `tools` and `prompts` lists exactly as `tools/list` serialises
 them. Public, unauthenticated, `Cache-Control: public, max-age=3600`, open CORS.
 
-It exists because the URL we publish in directories is `/mcp/oauth`, which always answers
-401, so an automated scanner cannot read the tool list off the wire. Smithery's publish
+It exists because `/mcp` answers 401 to a scanner that brings no credential, so an
+automated scanner cannot read the tool list off the wire. Smithery's publish
 page names this document as the way out: "If automatic scanning can't complete (auth wall,
 required configuration, or other issues), you can provide server metadata manually via a
 static server card at /.well-known/mcp/server-card.json". The field list follows
@@ -754,8 +753,8 @@ Two things worth knowing:
   the two on both products.
 * It is per hostname, like everything else here: `hotels.flightpowers.com` returns the hotel
   card, both flights hostnames return the flights card, and every URL inside is on that
-  product's own origin. `transport.endpoint` is `/mcp/oauth` where OAuth is configured, with
-  the keyed `/mcp` endpoint listed under `_meta` as an alternative.
+  product's own origin. `transport.endpoint` is `/mcp`, the single endpoint, with the
+  always-challenge `/mcp/oauth` alias listed under `_meta`.
 
 ```bash
 curl -s https://flights.flightpowers.com/.well-known/mcp/server-card.json | python3 -m json.tool

@@ -1362,11 +1362,15 @@ class TestSignedInWithNoKey:
                 {
                     "x-fp-oauth-subject": SUB,
                     "x-fp-oauth-email": "victim@example.test",
+                    # A real key, so the request gets past the 2026-09-09
+                    # challenge on `/mcp` and the forged headers are tested
+                    # where they would do damage: at credential resolution.
+                    "x-rapidapi-key": "header-key-" + "d" * 36,
                 },
             )
-        assert reply["needs_api_key"] is True
-        assert "victim@example.test" not in reply["message"]
-        assert live.upstream.keys_seen == []
+        assert "victim@example.test" not in str(reply)
+        # The caller's own key was spent, never the one stored for SUB.
+        assert live.upstream.keys_seen == ["header-key-" + "d" * 36]
 
 
 # ── 7. output schema portability ─────────────────────────────────────────
@@ -1429,13 +1433,17 @@ class TestOutputSchemaPortability:
                         "clientInfo": {"name": "t", "version": "1"},
                     },
                 },
-                headers=MCP_HEADERS,
+                # `/mcp` challenges a caller with no credential at all
+                # since 2026-09-09, so a schema probe brings a key like every
+                # other caller does.
+                headers={**MCP_HEADERS, "x-rapidapi-key": "probe-key-" + "e" * 36},
             )
             listed = await session.http.post(
                 "/mcp",
                 json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
                 headers={
                     **MCP_HEADERS,
+                    "x-rapidapi-key": "probe-key-" + "e" * 36,
                     "mcp-session-id": started.headers.get("mcp-session-id", ""),
                 },
             )

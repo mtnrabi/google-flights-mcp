@@ -5,8 +5,15 @@ Real-time flight fares with Google's own low/typical/high price verdict on every
 ## Remote URL
 
 ```
-https://google-flights-mcp.flightpowers.com/mcp
+https://flights.flightpowers.com/mcp
 ```
+
+## Sign in, or bring a key
+
+One URL, two ways in. A client that supports MCP authorization gets a `401` with the sign-in
+details and shows a **Sign in** button: the user signs in with Google and pastes a RapidAPI key
+once on the `/connect` page, and nothing goes in the client config. A script or a client without
+a sign-in button sends the key on the same URL instead.
 
 ## Header
 
@@ -17,7 +24,7 @@ x-rapidapi-key: YOUR_RAPIDAPI_KEY
 ## Quick install
 
 ```bash
-claude mcp add --transport http google-flights https://google-flights-mcp.flightpowers.com/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
+claude mcp add --transport http google-flights https://flights.flightpowers.com/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
 ```
 
 ## Get your RapidAPI key
@@ -31,7 +38,7 @@ Copy your `x-rapidapi-key` and use it in the header above.
 
 - **Site:** https://flightpowers.com
 - **Repo:** https://github.com/mtnrabi/google-flights-mcp
-- **Health check:** https://google-flights-mcp.flightpowers.com/health
+- **Health check:** https://flights.flightpowers.com/health
 
 ## What your agent gets
 
@@ -39,7 +46,3 @@ Copy your `x-rapidapi-key` and use it in the header above.
 - **search_roundtrip_flights** (real-time round-trip fares with Google's price insights, low/typical/high)
 
 Every result includes buy links, price range context, and API usage reporting so you know what you spent.
-
----
-
-*Related issue: https://github.com/cline/mcp-marketplace/issues/2381*

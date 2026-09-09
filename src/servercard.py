@@ -142,7 +142,7 @@ def _authentication(oauth, settings, site: str) -> dict[str, Any]:
 
     Two honest answers, not one:
 
-    * OAuth configured -- the endpoint we publish is `/mcp/oauth`, it always
+    * OAuth configured -- the endpoint we publish is `/mcp`, which challenges
       challenges, so authentication is required and the scheme is oauth2. The
       resource and its metadata URL are the two values a client needs to begin,
       and they are read off `OAuthSupport` so they cannot disagree with the
@@ -160,7 +160,7 @@ def _authentication(oauth, settings, site: str) -> dict[str, Any]:
         "schemes": ["oauth2"],
         # RFC 9728 names, for the two things a client fetches next.
         "resource": oauth.resource_url,
-        "resourceMetadataUrl": oauth.resource_metadata_url,
+        "resourceMetadataUrl": oauth.resource_metadata_url(),
         "authorizationServers": [oauth.issuer],
     }
 
@@ -184,10 +184,14 @@ async def build_card(mcp, settings, oauth, site: str) -> dict[str, Any]:
     if resources:
         capabilities["resources"] = {"listChanged": False}
 
-    # The endpoint a directory should publish. `/mcp/oauth` where sign-in
-    # exists, because that is the one a client can connect to without the
-    # user pasting anything; `/mcp` otherwise.
-    endpoint = "/mcp/oauth" if oauth is not None else "/mcp"
+    # The endpoint a directory should publish. `/mcp`, always, since
+    # 2026-09-09: it is now the single endpoint -- a credential of any kind
+    # is served, nothing at all is answered 401 with the OAuth metadata -- so
+    # a client that can sign in signs in, and a client with a key uses its
+    # key, on one URL. `/mcp/oauth` still works and is still the always-
+    # challenge alias, but publishing it would ask a keyed caller to sign in
+    # for no reason.
+    endpoint = "/mcp"
 
     card: dict[str, Any] = {
         "$schema": CARD_SCHEMA,
@@ -219,21 +223,24 @@ async def build_card(mcp, settings, oauth, site: str) -> dict[str, Any]:
         },
     }
 
-    # The keyed endpoint, listed only when it is not already the published
-    # one. On a deployment with no OAuth `/mcp` IS `transport`, and repeating
-    # it here would read as two ways to connect where there is one.
-    if endpoint != "/mcp":
+    # The always-challenge alias, listed only where sign-in exists. It is not
+    # an alternative WAY to connect -- it is the same endpoint with the
+    # anonymous branch removed -- but a directory that saved the old URL
+    # should be able to see that it is still live.
+    if oauth is not None:
         card["_meta"]["com.flightpowers/alternativeTransports"] = [
             {
                 "type": "streamable-http",
-                "endpoint": "/mcp",
+                "endpoint": "/mcp/oauth",
                 "authentication": {
-                    "required": False,
-                    "schemes": [],
+                    "required": True,
+                    "schemes": ["oauth2"],
                     "description": (
-                        "Bring your own RapidAPI key: send it as an "
-                        "x-rapidapi-key header or as ?rapidapi_key= on the "
-                        "URL. This endpoint never returns 401."
+                        "The same server with sign-in demanded on the first "
+                        "request instead of when a credential is missing. "
+                        "For clients whose auth mode is fixed when a server "
+                        "is added, and for connectors saved on this URL "
+                        "before 2026-09-09."
                     ),
                     "signupUrl": settings.signup_url,
                 },

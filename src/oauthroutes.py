@@ -42,6 +42,7 @@ from .oauth import (
     AUTHORIZATION_SERVER_PATH,
     AUTHORIZE_PATH,
     MCP_OAUTH_PATH,
+    MCP_PATH,
     PROTECTED_RESOURCE_PATH,
     REGISTER_PATH,
     REVOKE_PATH,
@@ -217,16 +218,19 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
     # looks; the bare path is where a client that only knows the origin
     # looks. Serving one and not the other is a discovery failure that
     # presents as "this server does not support sign-in".
-    for path in (
-        PROTECTED_RESOURCE_PATH,
-        f"{PROTECTED_RESOURCE_PATH}{MCP_OAUTH_PATH}",
-    ):
-        mcp.custom_route(path, methods=["GET"])(_protected_resource)
-    for path in (
-        AUTHORIZATION_SERVER_PATH,
-        f"{AUTHORIZATION_SERVER_PATH}{MCP_OAUTH_PATH}",
-    ):
-        mcp.custom_route(path, methods=["GET"])(_authorization_server)
+    # Three forms of each since 2026-09-09: the bare path, `/mcp` and
+    # `/mcp/oauth`. A client that read a 401 on either endpoint follows the
+    # path-scoped URL from that challenge literally; a client that only knows
+    # the origin builds the bare one. Serving one and not the others is a
+    # discovery failure that presents to a user as "this server does not
+    # support sign-in".
+    for suffix in ("", MCP_PATH, MCP_OAUTH_PATH):
+        mcp.custom_route(f"{PROTECTED_RESOURCE_PATH}{suffix}", methods=["GET"])(
+            _protected_resource
+        )
+        mcp.custom_route(f"{AUTHORIZATION_SERVER_PATH}{suffix}", methods=["GET"])(
+            _authorization_server
+        )
 
     # ── dynamic client registration ──────────────────────────────────────
 
