@@ -175,10 +175,22 @@ def is_local_path(target: str) -> bool:
 # ── identity ─────────────────────────────────────────────────────────────
 
 
+#: Values for `GoogleIdentity.flow` -- what this browser session was started
+#: FOR, not what the account has. See `issue_session`.
+FLOW_OAUTH = "oauth"    #: signed in on the way to an MCP client authorization
+FLOW_DIRECT = ""        #: someone opened /connect themselves
+
+
 @dataclass(frozen=True)
 class GoogleIdentity:
     sub: str
     email: str
+    #: Why this session exists. Carried in the session cookie so /connect can
+    #: tell "I got here from Claude asking to connect" from "I typed the URL",
+    #: and show a page that answers the question the visitor actually has.
+    #: Empty for every session issued before this field existed, which is the
+    #: right default: it means "direct visit", the behaviour that shipped.
+    flow: str = FLOW_DIRECT
 
 
 def _decode_id_token_claims(id_token: str) -> dict[str, Any]:
@@ -334,17 +346,30 @@ class GoogleWebAuth:
 
     # ── sessions and connect tokens ──────────────────────────────────────
 
-    def issue_session(self, identity: GoogleIdentity, now: float | None = None) -> str:
+    def issue_session(
+        self,
+        identity: GoogleIdentity,
+        now: float | None = None,
+        flow: str = FLOW_DIRECT,
+    ) -> str:
+        """A one-hour browser session for /connect.
+
+        `flow` records what the sign-in was for. It is a UI hint and nothing
+        else -- no route grants anything on the strength of it -- but it is
+        signed with everything else here rather than put in a query
+        parameter, because a hint the browser can edit is a hint that will be
+        edited and then trusted by the next person who reads the code.
+        """
         now = now if now is not None else time.time()
-        return sign_payload(
-            {
-                "typ": "session",
-                "sub": identity.sub,
-                "email": identity.email,
-                "exp": int(now) + SESSION_TTL_SECONDS,
-            },
-            self.session_secret,
-        )
+        payload = {
+            "typ": "session",
+            "sub": identity.sub,
+            "email": identity.email,
+            "exp": int(now) + SESSION_TTL_SECONDS,
+        }
+        if flow:
+            payload["f"] = flow
+        return sign_payload(payload, self.session_secret)
 
     def read_session(
         self, cookie: str | None, now: float | None = None
@@ -360,7 +385,11 @@ class GoogleWebAuth:
         sub = str(payload.get("sub", ""))
         if not sub:
             return None
-        return GoogleIdentity(sub=sub, email=str(payload.get("email", "")))
+        return GoogleIdentity(
+            sub=sub,
+            email=str(payload.get("email", "")),
+            flow=str(payload.get("f", "") or FLOW_DIRECT),
+        )
 
     def issue_connect_token(self, sub: str, now: float | None = None) -> str:
         now = now if now is not None else time.time()

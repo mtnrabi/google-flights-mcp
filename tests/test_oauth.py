@@ -27,6 +27,7 @@ money or trust if they broke:
 """
 
 import base64
+import html as html_module
 import json
 import re
 import time
@@ -320,6 +321,25 @@ def field(html: str, name: str) -> str:
 
 def query_of(location: str) -> dict[str, str]:
     return {k: v[0] for k, v in parse_qs(urlsplit(location).query).items()}
+
+
+def bounced_params(response) -> dict[str, str]:
+    """What the client is told, whichever way the server chose to tell it.
+
+    Every client registered in this file uses a loopback `redirect_uri`
+    (REDIRECT_URI is `http://127.0.0.1:33418/callback`, which is what a real
+    native client uses), so an error is rendered as our own page with the
+    RFC redirect offered as a link rather than followed automatically --
+    see `oauth.is_loopback_redirect`. The parameters are the same either
+    way, and they are what these tests are about.
+    """
+    if response.status_code in (302, 303):
+        return query_of(response.headers["location"])
+    assert response.status_code == 200, response.status_code
+    href = re.search(
+        r'<a href="([^"]+)">Tell it you cancelled</a>', response.text
+    ).group(1)
+    return query_of(html_module.unescape(href))
 
 
 # ── the flow ─────────────────────────────────────────────────────────────
@@ -768,9 +788,7 @@ class TestPkce:
                 registered["client_id"], code_challenge="", code_challenge_method=""
             )
             response = await http.get(f"/connect/authorize?{query}")
-        assert response.status_code == 302
-        params = query_of(response.headers["location"])
-        assert response.headers["location"].startswith(REDIRECT_URI)
+        params = bounced_params(response)
         assert params["error"] == "invalid_request"
         assert params["state"] == "state-123"
 
@@ -784,8 +802,7 @@ class TestPkce:
                 code_challenge_method="plain",
             )
             response = await http.get(f"/connect/authorize?{query}")
-        assert response.status_code == 302
-        assert query_of(response.headers["location"])["error"] == "invalid_request"
+        assert bounced_params(response)["error"] == "invalid_request"
 
 
 class TestCodeLifetime:
@@ -881,8 +898,7 @@ class TestAuthorizeValidation:
                 registered["client_id"], resource="https://someone-else.test/mcp"
             )
             response = await http.get(f"/connect/authorize?{query}")
-        assert response.status_code == 302
-        assert query_of(response.headers["location"])["error"] == "invalid_target"
+        assert bounced_params(response)["error"] == "invalid_target"
 
     async def test_deny_sends_access_denied_back(self, live):
         async with Session(live) as session:
@@ -900,8 +916,7 @@ class TestAuthorizeValidation:
                     "decision": "deny",
                 },
             )
-        assert denied.status_code == 303
-        params = query_of(denied.headers["location"])
+        params = bounced_params(denied)
         assert params["error"] == "access_denied"
         assert params["state"] == "state-123"
 

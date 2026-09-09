@@ -38,6 +38,28 @@ rather than after it.
 
 `MCP_CONNECT_VALIDATE=0` turns the check off for a deployment that would
 rather store first and fail later.
+
+Two audiences, two pages
+------------------------
+Since day 2 there are two ways to reach the tools, and the people using them
+arrive at /connect with different questions:
+
+* **the OAuth flow** -- the user added `…/mcp/oauth` as a connector in
+  Claude, Cursor or ChatGPT, signed in with Google and approved it. The
+  client holds a token already. Their question is "did that work?", and the
+  answer is one line: you are set, nothing to paste. Handing this user a
+  `fp_token` URL is worse than useless -- the obvious next move is to paste
+  it into the same client, which leaves them with two connectors to one
+  server for one key.
+* **the token flow** -- a client that cannot do OAuth. Their question is
+  "what URL do I paste?", and the connect URL is the answer.
+
+`signed_in_html` renders one or the other from `flow`; `src/server.py`
+decides which, and documents how. The connect URL is never printed for the
+OAuth reader, and even in the token flow it is collapsed behind a Reveal
+control: it is a 90-day bearer credential for somebody's RapidAPI plan, and
+a page that prints one by default leaks it to every screenshot, screen share
+and person walking past.
 """
 
 from __future__ import annotations
@@ -180,6 +202,13 @@ input[type=text], input[type=password] {
 .good { border-left: 3px solid #27865a; padding-left: .75rem; }
 pre { background: rgba(128,128,128,.12); padding: .8rem; border-radius: 6px;
       overflow-x: auto; font-size: .9rem; }
+details.reveal > summary { cursor: pointer; font-weight: 600;
+      display: inline-block; border: 1px solid rgba(128,128,128,.55);
+      border-radius: 6px; padding: .45rem .9rem;
+      background: rgba(128,128,128,.12); list-style: none; }
+details.reveal > summary::-webkit-details-marker { display: none; }
+details.reveal { margin: .6rem 0; }
+.masked { user-select: none; opacity: .75; }
 </style>
 """
 
@@ -222,20 +251,77 @@ def signed_out_html(product: str, banner: str = "") -> str:
     )
 
 
-def _connect_url_block(mcp_url: str, token: str) -> str:
+#: Which page a signed-in visitor gets. Decided in `src/server.py`; passed in
+#: rather than worked out here so the rendering stays a pure function.
+FLOW_OAUTH = "oauth"
+FLOW_TOKEN = "token"
+
+#: Where a signed-in OAuth user goes when their OTHER client cannot sign in.
+#: One link, so the connect URL is reachable without being printed at anyone.
+TOKEN_FLOW_PATH = "/connect?token=1"
+
+#: Reveal + Copy. Twelve lines rather than a dependency, and the page works
+#: with the script blocked: the <details> element opens on its own, and the
+#: Copy button starts hidden and is only shown by this script, so nobody is
+#: offered a button that cannot work.
+_REVEAL_SCRIPT = """
+<script>
+(function () {
+  var url = document.getElementById("fp-connect-url");
+  var copy = document.getElementById("fp-copy");
+  if (!url || !copy || !navigator.clipboard) { return; }
+  copy.hidden = false;
+  copy.addEventListener("click", function () {
+    navigator.clipboard.writeText(url.textContent.trim()).then(function () {
+      copy.textContent = "Copied";
+      setTimeout(function () { copy.textContent = "Copy"; }, 2000);
+    });
+  });
+})();
+</script>
+"""
+
+
+#: The stand-in for the token in the collapsed view. Deliberately NOT the
+#: first few characters of the real one: a placeholder that starts with
+#: `fpk_` is a placeholder that gets copied, pasted and reported as broken.
+_MASK = "•" * 16
+
+
+def connect_url_of(mcp_url: str, token: str) -> str:
     joiner = "&" if "?" in mcp_url else "?"
-    full = f"{mcp_url}{joiner}fp_token={token}"
+    return f"{mcp_url}{joiner}fp_token={token}"
+
+
+def _connect_url_block(mcp_url: str, token: str) -> str:
+    """The token flow's answer: a URL to paste, hidden until asked for.
+
+    The URL is in the HTML -- it has to be, this page exists to hand it over
+    -- but it is inside a closed <details>, so it is not on screen, not in a
+    screenshot and not in a screen share unless the user opens it. That is
+    the whole of the protection being claimed here, and it is the right size
+    for the risk: the reader is alone on their own machine, and the thing
+    that leaked it in practice was a shared screen.
+    """
+    full = connect_url_of(mcp_url, token)
+    masked = connect_url_of(mcp_url, _MASK)
     return (
         "<h2>Your connect URL</h2>"
         "<p>Paste this into your MCP client as the server URL. It carries a "
         "token, not your key.</p>"
-        f"<pre>{_e(full)}</pre>"
+        f'<pre class="masked">{_e(masked)}</pre>'
+        '<details class="reveal"><summary>Reveal the URL</summary>'
+        f'<pre id="fp-connect-url">{_e(full)}</pre></details>'
+        '<p><button class="btn" type="button" id="fp-copy" hidden>Copy</button></p>'
+        '<p class="note">Hidden on purpose. Anyone who reads this URL can '
+        "spend your RapidAPI plan until you disconnect, so keep it out of "
+        "screenshots and screen shares.</p>"
         "<p>Clients that let you set a header can send the same token as "
         f"<code>Authorization: Bearer {_e(token[:8])}…</code> instead, which "
         "keeps it out of the URL.</p>"
         '<p class="note">The token is valid for 90 days and stops working the '
         "moment you disconnect below. It is not your RapidAPI key and cannot "
-        "be turned back into it.</p>"
+        "be turned back into it.</p>" + _REVEAL_SCRIPT
     )
 
 
@@ -249,7 +335,16 @@ def signed_in_html(
     csrf: str,
     notice: str = "",
     error: str = "",
+    flow: str = FLOW_TOKEN,
 ) -> str:
+    """The page for a signed-in visitor.
+
+    `flow` picks which of the two questions in the module docstring is being
+    answered. `token` is only ever rendered in `FLOW_TOKEN`, and the caller
+    is expected not to mint one at all for the other flow -- both halves of
+    that are asserted in tests, because "we pass None there" is exactly the
+    kind of caller-side promise that a later refactor breaks quietly.
+    """
     blocks = [_EXTRA_STYLE, "<h1>Connect your RapidAPI key</h1>"]
     blocks.append(
         f'<p class="note">Signed in as <strong>{_e(email or "your Google account")}'
@@ -261,17 +356,40 @@ def signed_in_html(
         blocks.append(f'<p class="good">{_e(notice)}</p>')
 
     if summary is not None:
-        blocks.append(
+        oauth_reader = flow == FLOW_OAUTH
+        connected = (
             '<div class="card"><h2>Connected</h2>'
             f"<p>RapidAPI key ending <code>…{_e(summary.key_last4)}</code>.</p>"
-            "</div>"
         )
-        if token:
+        if oauth_reader:
+            # The whole point of this branch: someone whose assistant is
+            # already connected needs one sentence telling them to go back to
+            # it, not a URL to paste into a second connector.
+            connected += (
+                "<p><strong>You are set. There is nothing to paste.</strong> "
+                "Go back to your assistant and ask it for a fare.</p>"
+                '<p class="note">Searches it runs are billed to your own '
+                "RapidAPI plan, and stop the moment you disconnect below.</p>"
+            )
+        connected += "</div>"
+        blocks.append(connected)
+        if oauth_reader:
+            blocks.append(
+                '<p class="note">Using another client that cannot sign in? '
+                f'<a href="{_e(TOKEN_FLOW_PATH)}">Get a connect URL</a> for '
+                "it instead.</p>"
+            )
+        elif token:
             blocks.append(_connect_url_block(mcp_url, token))
         blocks.append(
             "<h2>Replace it</h2>"
-            "<p>Paste a different key to overwrite the stored one. The connect "
-            "URL above keeps working.</p>"
+            "<p>Paste a different key to overwrite the stored one. "
+            + (
+                "Your connected clients keep working and start using the new "
+                "key straight away.</p>"
+                if oauth_reader
+                else "The connect URL above keeps working.</p>"
+            )
         )
     else:
         blocks.append("<h2>Paste your key</h2>")
@@ -297,8 +415,13 @@ def signed_in_html(
             '<form method="post" action="/connect/disconnect">'
             f'<input type="hidden" name="csrf" value="{_e(csrf)}">'
             '<p><button class="btn danger" type="submit">Disconnect</button></p>'
-            '<p class="note">Disconnecting deletes the stored key and makes '
-            "every connect URL for this account stop resolving. It does not "
+            '<p class="note">Disconnecting deletes the stored key, '
+            + (
+                "signs out every assistant you connected"
+                if flow == FLOW_OAUTH
+                else "makes every connect URL for this account stop resolving"
+            )
+            + ", and takes effect immediately. It does not "
             "touch your RapidAPI account or your subscription -- only the copy "
             "we hold.</p></form>"
         )

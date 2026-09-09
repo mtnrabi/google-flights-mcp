@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import hashlib
 import hmac
 import html
@@ -1530,6 +1531,71 @@ def error_html(title: str, message: str) -> str:
         + '<p class="note">Nothing was approved and nothing was changed. '
         'Start the sign-in again from your MCP client, or '
         '<a href="/connect">manage your key</a>.</p>'
+    )
+
+
+def is_loopback_redirect(uri: str) -> bool:
+    """True when this `redirect_uri` can only be a server on the user's own
+    machine.
+
+    RFC 8252 §7.3: a native app receives its authorization response on
+    `http://127.0.0.1:<port>` (or `[::1]`), on an ephemeral port it opened
+    for the occasion. That listener exists while the client is waiting for
+    an answer and not a moment longer, and for a client that registered by
+    hand it may never have existed at all -- MCP Inspector's own probe
+    registration uses `http://127.0.0.1:9999/cb`.
+
+    So a loopback address is the one case where we can say, from the URL
+    alone and without touching the network, that the redirect stands a good
+    chance of landing the user on the browser's own connection-error page.
+    That is the judgement this function encodes, and it is deliberately the
+    ONLY case: a remote `https://` callback might be down too, but we cannot
+    know that without a request we have no business making (it would be an
+    outbound fetch to an address a stranger registered), and a working
+    redirect is a better outcome than a page saying "we did not try".
+    """
+    host = (urlsplit(uri).hostname or "").strip().strip("[]").lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    # `0.0.0.0` is unspecified rather than loopback, and a client that
+    # registered it is a client whose callback is just as unreachable.
+    return address.is_loopback or address.is_unspecified
+
+
+def cancelled_html(target: str, *, title: str, lead: str) -> str:
+    """Our own end of the road for a flow that ended without a token.
+
+    Shown instead of bouncing the browser at a loopback callback. It says
+    the one thing the user needs (nothing was stored) and still offers the
+    RFC-conformant redirect as a link, because a client that IS listening
+    should get its `error=access_denied` and stop spinning -- the change
+    here is that the redirect stops being a thing that happens TO the user
+    and becomes a thing they can choose.
+    """
+    from .connect import _EXTRA_STYLE  # local: keeps the import graph flat
+
+    # `target` is the full RFC redirect, error parameters and all: the link
+    # below has to carry them or a client that follows it learns nothing.
+    host = _e(urlsplit(target).netloc or target)
+    return (
+        _EXTRA_STYLE
+        + f"<h1>{_e(title)}</h1>"
+        + f"<p>{_e(lead)}</p>"
+        + '<div class="card"><p>Nothing was stored and nothing was shared. '
+        "Your RapidAPI key, if you had already connected one, is exactly as "
+        "it was.</p>"
+        "<p>You can close this tab.</p></div>"
+        f'<p class="note">Your client was waiting at <code>{host}</code>. '
+        f'<a href="{_e(target)}">Tell it you cancelled</a> if it is '
+        "still open, or just close it and try again from the client.</p>"
+        '<p class="note"><a href="/connect">Manage your key</a> &middot; '
+        '<a href="/privacy">Privacy</a> &middot; <a href="/terms">Terms</a></p>'
     )
 
 

@@ -207,6 +207,10 @@ class OAuthStore(Protocol):
 
     async def revoke_for_user(self, user_sub: str, provider: str) -> int: ...
 
+    async def count_live_grants(
+        self, user_sub: str, provider: str, now: float | None = None
+    ) -> int: ...
+
     async def purge_expired(self, now: float | None = None) -> int: ...
 
 
@@ -265,6 +269,11 @@ class NullOAuthStore:
         return 0
 
     async def revoke_for_user(self, user_sub: str, provider: str) -> int:
+        return 0
+
+    async def count_live_grants(
+        self, user_sub: str, provider: str, now: float | None = None
+    ) -> int:
         return 0
 
     async def purge_expired(self, now: float | None = None) -> int:
@@ -378,6 +387,19 @@ class MemoryOAuthStore:
         for h in doomed:
             del self._tokens[h]
         return len(doomed)
+
+    async def count_live_grants(
+        self, user_sub: str, provider: str, now: float | None = None
+    ) -> int:
+        cutoff = now if now is not None else time.time()
+        return sum(
+            1
+            for t in self._tokens.values()
+            if t.user_sub == user_sub
+            and t.provider == provider
+            and t.revoked_at is None
+            and t.expires_at > cutoff
+        )
 
     async def purge_expired(self, now: float | None = None) -> int:
         cutoff = now if now is not None else time.time()
@@ -493,6 +515,16 @@ _REVOKE_FAMILY = "DELETE FROM mcp_oauth_tokens WHERE family_id = $1"
 _REVOKE_USER = (
     "DELETE FROM mcp_oauth_tokens WHERE user_sub = $1 AND provider = $2"
 )
+
+#: "Does this account have a client connected right now?" -- one number, not
+#: the rows. Revoked and expired tokens are excluded, so a user who denied
+#: everything, revoked everything, or has not touched the server in 30 days
+#: counts zero and is shown the paste-a-URL page again.
+_COUNT_LIVE_GRANTS = """
+SELECT count(*) FROM mcp_oauth_tokens
+ WHERE user_sub = $1 AND provider = $2 AND revoked_at IS NULL
+   AND expires_at > $3
+"""
 
 _PURGE = """
 WITH t AS (DELETE FROM mcp_oauth_tokens WHERE expires_at < $1 RETURNING 1),
@@ -746,6 +778,18 @@ class PostgresOAuthStore:
         status = await self._run(go)
         tail = str(status).rsplit(" ", 1)[-1].strip()
         return int(tail) if tail.isdigit() else 0
+
+    async def count_live_grants(
+        self, user_sub: str, provider: str, now: float | None = None
+    ) -> int:
+        cutoff = _dt(now if now is not None else time.time())
+
+        async def go(conn):
+            return await conn.fetchval(
+                _COUNT_LIVE_GRANTS, user_sub, provider, cutoff
+            )
+
+        return int(await self._run(go) or 0)
 
     async def purge_expired(self, now: float | None = None) -> int:
         cutoff = _dt(now if now is not None else time.time())

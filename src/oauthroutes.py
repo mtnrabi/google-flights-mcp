@@ -48,8 +48,10 @@ from .oauth import (
     TOKEN_PATH,
     OAuthError,
     OAuthSupport,
+    cancelled_html,
     consent_html,
     error_html,
+    is_loopback_redirect,
     redirect_with,
 )
 from . import cimd
@@ -89,6 +91,33 @@ def _too_many(limit: Limit) -> JSONResponse:
             "Cache-Control": "no-store",
         },
     )
+
+
+def _bounce(
+    redirect_uri: str,
+    params: dict[str, str],
+    *,
+    status: int,
+    title: str,
+    lead: str,
+) -> Response:
+    """Send the error back to the client -- unless nobody can receive it.
+
+    RFC 6749 §4.1.2.1 says an error on a registered `redirect_uri` goes back
+    to the client, and for a hosted client that is right: their page can say
+    "you declined" far better than we can. For a loopback callback it is a
+    coin flip, and the losing side is Chrome's own "site can't be reached"
+    error on a user who has just pressed Deny -- which is what a real user
+    hit on 2026-09-09. `is_loopback_redirect` documents why that is the only
+    case we second-guess; the redirect is still one click away on the page.
+    """
+    target = redirect_with(redirect_uri, params)
+    if is_loopback_redirect(redirect_uri):
+        return HTMLResponse(
+            page(title, cancelled_html(target, title=title, lead=lead)),
+            status_code=200,
+        )
+    return RedirectResponse(target, status_code=status)
 
 
 def caller_ip(request: Request) -> str:
@@ -291,17 +320,19 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
             # Past this point the redirect_uri has been checked against the
             # registration, so bouncing the error back is the RFC's answer
             # and is what lets the client show the user something useful.
-            target = (params.get("redirect_uri") or "").strip()
-            return RedirectResponse(
-                redirect_with(
-                    target,
-                    {
-                        "error": exc.code,
-                        "error_description": exc.description,
-                        "state": params.get("state") or "",
-                    },
+            return _bounce(
+                (params.get("redirect_uri") or "").strip(),
+                {
+                    "error": exc.code,
+                    "error_description": exc.description,
+                    "state": params.get("state") or "",
+                },
+                status=302,
+                title="That sign-in could not be completed",
+                lead=(
+                    "Your client sent a request this server could not accept: "
+                    + (exc.description or exc.code)
                 ),
-                status_code=302,
             )
 
         identity = connect.auth.read_session(request.cookies.get(SESSION_COOKIE))
@@ -381,16 +412,19 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
 
         state = validated.get("state", "")
         if str(form.get("decision", "")) != "approve":
-            return RedirectResponse(
-                redirect_with(
-                    validated["redirect_uri"],
-                    {
-                        "error": "access_denied",
-                        "error_description": "the user declined",
-                        "state": state,
-                    },
+            return _bounce(
+                validated["redirect_uri"],
+                {
+                    "error": "access_denied",
+                    "error_description": "the user declined",
+                    "state": state,
+                },
+                status=303,
+                title="You cancelled",
+                lead=(
+                    "No access was given. That client cannot search on your "
+                    "behalf."
                 ),
-                status_code=303,
             )
 
         try:

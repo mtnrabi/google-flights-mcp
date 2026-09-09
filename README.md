@@ -116,9 +116,16 @@ Where a deployment has it enabled (check `connect_enabled` on `/health`), there 
 1. Open **https://google-flights-mcp.flightpowers.com/connect** (hotels:
    **https://hotels.flightpowers.com/connect**) and sign in with Google.
 2. Paste your RapidAPI key once, into a form, over TLS.
-3. Copy the connect URL it gives you back, `…/mcp?fp_token=fpk_…`, and use that as the server
-   URL in your MCP client. Clients that let you set headers can send the same token as
-   `Authorization: Bearer fpk_…` instead.
+3. Press **Reveal the URL** and copy the connect URL, `…/mcp?fp_token=fpk_…`, and use that as
+   the server URL in your MCP client. Clients that let you set headers can send the same token
+   as `Authorization: Bearer fpk_…` instead. (It is hidden until you ask for it: that URL is a
+   90-day bearer credential for your plan, and a page that prints one by default puts it in
+   every screenshot and screen share.)
+
+If your client signed you in itself -- Claude, Cursor, ChatGPT and anything else that speaks
+MCP authorization -- there is **no URL to copy**. `/connect` says so: it shows the key you
+connected and tells you to go back to your assistant. There is a link on it for the case where a
+second client cannot sign in and does need a connect URL.
 
 What that buys you: your RapidAPI key is not in your client config, not in a URL, and not in
 whatever logs that URL passes through. What it costs: the server stores your key, encrypted, and
@@ -195,7 +202,7 @@ curl -s https://google-flights-mcp.flightpowers.com/health | grep connect_enable
 curl -sI https://google-flights-mcp.flightpowers.com/connect        # 200
 curl -sI https://google-flights-mcp.flightpowers.com/connect/start  # 302 to accounts.google.com
 
-# 3. Sign in in a browser, paste a key, copy the connect URL.
+# 3. Sign in in a browser, paste a key, press Reveal and copy the connect URL.
 
 # 4. MCP Inspector against that URL -- list the tools, then run one real search.
 npx @modelcontextprotocol/inspector
@@ -706,7 +713,7 @@ claude mcp add --transport http google-flights-local http://localhost:8000/mcp -
 ```
 <!-- untested, developer verify -->
 
-Tests (760 passing, verified):
+Tests (791 passing, verified):
 
 ```bash
 .venv/bin/python -m pytest -q

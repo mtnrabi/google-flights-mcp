@@ -59,6 +59,8 @@ from starlette.responses import (
 )
 
 from .connect import (
+    FLOW_OAUTH,
+    FLOW_TOKEN,
     build_connect_support,
     check_rapidapi_key,
     signed_in_html,
@@ -77,6 +79,7 @@ from .credentials import (
 )
 from .keystore import PROVIDER_GOOGLE, KeyStoreError
 from .oauth import (
+    AUTHORIZE_PATH,
     EMAIL_HEADER,
     MCP_OAUTH_PATH,
     PROVIDER_HEADER,
@@ -95,6 +98,9 @@ from .webauth import (
     SESSION_TTL_SECONDS,
     WebAuthError,
 )
+from .webauth import FLOW_OAUTH as SESSION_FLOW_OAUTH  # the session's marker,
+# not the page's: webauth records why a browser signed in, connect.py names
+# which page that produces, and they are deliberately separate vocabularies.
 from .legal import (
     CONTACT_EMAIL,
     FAVICON_SVG,
@@ -2320,6 +2326,51 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 return None
             return RedirectResponse(f"{site_origin}/connect", status_code=302)
 
+        # ── which page a signed-in visitor gets ──────────────────────────
+        # Day 2 gave this server a second front door, and the two audiences
+        # want opposite things (see the module docstring in src/connect.py).
+        # The visitor never says which one they are, so it is worked out from
+        # three signals, cheapest first:
+        #
+        #   1. `?token=1`  -- they clicked "get a connect URL". Explicit
+        #      beats inferred, always.
+        #   2. the session cookie's `flow` -- this browser signed in ON THE
+        #      WAY to an MCP client authorization (/connect/start?next=
+        #      /connect/authorize...). True mid-flow, before any token
+        #      exists, and free to read.
+        #   3. a live OAuth grant for the account -- one COUNT against
+        #      mcp_oauth_tokens. This is the one that catches the case that
+        #      started all this: connect Claude on Monday, open /connect on
+        #      Friday in a fresh session.
+        #
+        # Every failure lands on the token flow, which is the page that
+        # shipped -- a store outage must not hide somebody's connect URL.
+        TOKEN_FLOW_VALUES = {"1", "true", "yes", "on"}
+
+        def _asked_for_token_url(request: Request) -> bool:
+            return (
+                request.query_params.get("token", "").strip().lower()
+                in TOKEN_FLOW_VALUES
+            )
+
+        async def _has_live_grant(sub: str) -> bool:
+            if oauth is None or not sub:
+                return False
+            try:
+                return await oauth.store.count_live_grants(sub, PROVIDER_GOOGLE) > 0
+            except OAuthStoreError as exc:
+                logger.warning("could not count OAuth grants: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - a UI hint, never a gate
+                logger.warning("counting OAuth grants failed: %s", exc)
+            return False
+
+        async def _flow_for(identity, request: Request | None = None) -> str:
+            if request is not None and _asked_for_token_url(request):
+                return FLOW_TOKEN
+            if identity.flow == SESSION_FLOW_OAUTH:
+                return FLOW_OAUTH
+            return FLOW_OAUTH if await _has_live_grant(identity.sub) else FLOW_TOKEN
+
         @mcp.custom_route("/connect", methods=["GET"])
         async def connect_page(request: Request) -> Response:
             redirect = _wrong_host(request)
@@ -2342,18 +2393,23 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     ),
                     status_code=503,
                 )
+            flow = await _flow_for(identity, request)
             return HTMLResponse(
                 signed_in_html(
                     email=identity.email,
                     product=settings.products,
                     mcp_url=settings.public_url,
                     summary=summary,
+                    # Not minted at all for a reader who is not being shown
+                    # one. A 90-day bearer credential that is never created
+                    # cannot leak out of a template.
                     token=(
                         connect.auth.issue_connect_token(identity.sub)
-                        if summary is not None
+                        if summary is not None and flow == FLOW_TOKEN
                         else None
                     ),
                     csrf=connect.csrf(identity.sub),
+                    flow=flow,
                 )
             )
 
@@ -2416,14 +2472,24 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     ),
                     status_code=400,
                 )
-            response = RedirectResponse(
-                connect.auth.next_from_state(state_cookie) or "/connect",
-                status_code=303,
-            )
+            # Where this sign-in was headed is also WHY it happened: a
+            # `next` pointing at the consent page means the user is here
+            # because a client asked, not because they came looking for a
+            # URL to paste. Recorded in the session so /connect can answer
+            # the right question even before any token exists.
+            landing = connect.auth.next_from_state(state_cookie) or "/connect"
+            response = RedirectResponse(landing, status_code=303)
             _set_cookie(
                 response,
                 SESSION_COOKIE,
-                connect.auth.issue_session(identity),
+                connect.auth.issue_session(
+                    identity,
+                    flow=(
+                        SESSION_FLOW_OAUTH
+                        if landing.split("?", 1)[0] == AUTHORIZE_PATH
+                        else ""
+                    ),
+                ),
                 SESSION_TTL_SECONDS,
             )
             response.delete_cookie(OAUTH_COOKIE, path=COOKIE_PATH)
@@ -2437,6 +2503,17 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             status: int = 200,
             headers: dict[str, str] | None = None,
         ) -> Response:
+            """The same page after a form post.
+
+            The flow is recomputed rather than carried through the form: a
+            POST that has just stored the first key can turn a token-flow
+            reader into an OAuth one (they signed in from their client and
+            now have a grant), and the page they are sent back to should be
+            the one that matches what is now true. The cost is that a reader
+            who reached the connect URL with `?token=1` and then pressed
+            Save lands back on the "you are set" page; there is a link on it
+            back to the URL, and that is the cheaper of the two mistakes.
+            """
             try:
                 summary = await connect.store.summary(identity.sub)
             except KeyStoreError as exc:
@@ -2450,6 +2527,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     "The key store is not reachable right now, so this page "
                     "may not reflect your latest change."
                 )
+            flow = await _flow_for(identity)
             return HTMLResponse(
                 signed_in_html(
                     email=identity.email,
@@ -2458,12 +2536,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     summary=summary,
                     token=(
                         connect.auth.issue_connect_token(identity.sub)
-                        if summary is not None
+                        if summary is not None and flow == FLOW_TOKEN
                         else None
                     ),
                     csrf=connect.csrf(identity.sub),
                     notice=notice,
                     error=error,
+                    flow=flow,
                 ),
                 status_code=status,
                 headers=headers or {},
