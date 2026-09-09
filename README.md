@@ -1,6 +1,6 @@
 # Google Flights MCP: real-time fares your agent can search across a whole date range, ad-free
 
-**Sign in, no key to paste:**
+**Sign in with Google, nothing to paste into your client:**
 
 ```bash
 claude mcp add --transport http google-flights https://flights.flightpowers.com/mcp/oauth

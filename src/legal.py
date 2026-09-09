@@ -497,7 +497,8 @@ pricing. It is not affiliated with, endorsed by, or sponsored by
 
 
 SIGN_IN_MD = """
-**Sign in, no key to paste:** `{{OAUTH_URL}}`, transport: streamable HTTP.
+**Sign in with Google, nothing to paste into your client:** `{{OAUTH_URL}}`,
+transport: streamable HTTP.
 
 Works in clients that support MCP authorization: a Sign in button appears, you
 sign in with Google, and you paste your RapidAPI key once on the `{{SITE}}/connect`
