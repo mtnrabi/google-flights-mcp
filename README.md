@@ -1,5 +1,7 @@
 # Google Flights MCP: real-time fares your agent can search across a whole date range, ad-free
 
+**Real-time Google Flights fares for agents.** Three things people do with this server. Scan for deals: one call takes a date range and a list of destination airports, expands every combination server side, and returns each fare with Google's own low, typical or high verdict. Put live search in your app: flat JSON with a bookable link on every result, and round trips priced as paired legs. Run a 24/7 AI travel agent: add the server, sign in with Google, and schedule it. No ads, no sponsored content. You bring your own RapidAPI key, so every search is billed to your plan and never to anyone else's.
+
 **Sign in with Google, nothing to paste into your client:**
 
 ```bash
