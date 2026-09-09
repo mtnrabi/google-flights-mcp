@@ -10,8 +10,6 @@ claude mcp add --transport http google-flights https://flights.flightpowers.com/
 
 Your client hits the URL, gets a `401` with the sign-in details, and shows a **Sign in** button. You sign in with Google and paste your RapidAPI key once on the `/connect` page. Nothing goes in your client config.
 
-*The single URL is live from the next deploy of the server; until then `https://flights.flightpowers.com/mcp/oauth` is the URL that shows a Sign in button.*
-
 **Same URL with your key, for scripts, CI and clients without a sign-in button:**
 
 ```bash
@@ -98,7 +96,7 @@ The installer will prompt for your RapidAPI key. Subscribe at
 https://rapidapi.com/mtnrabi/api/google-flights-live-api (free tier available) and copy your
 `x-rapidapi-key`.
 
-## A fourth way: sign in once at `/connect`
+## Sign in once at `/connect`
 
 This is the page the sign-in URL at the top of this README sends you to. A client that speaks MCP
 authorization walks you through it on its own; the steps below are the same thing done by hand.
@@ -223,26 +221,24 @@ claude mcp list          # shows it connected
 A `tools/list` that succeeds proves nothing about any of this: a token is only consulted when a
 tool actually runs. Step 4 has to be a **real search**.
 
-## A fifth way: sign in from inside your MCP client (`/mcp/oauth`)
+## Sign in from inside your MCP client
 
-`/connect` works, but no MCP client will ever *start* a sign-in on its own, because nothing on
-the wire tells it one is available. A client only begins an OAuth flow when a request comes back `401` with
-a `WWW-Authenticate: Bearer resource_metadata=…` header, and `/mcp` must never do that: every
-paying caller today authenticates with a RapidAPI key and no bearer token, so challenging them
-would be an outage rather than a feature.
+`/connect` works by hand, but a client only *starts* a sign-in on its own when a request comes
+back `401` with a `WWW-Authenticate: Bearer resource_metadata=…` header. `/mcp` does exactly that
+now, and only when it has to:
 
-So there is a **second endpoint** that always challenges:
-
-| URL | Who it is for |
+| Request to `https://flights.flightpowers.com/mcp` | What it gets |
 |---|---|
-| `https://flights.flightpowers.com/mcp` | Unchanged, forever. A RapidAPI key, an `fpk_` connect token, a Smithery config blob, or an anonymous `tools/list`. No 401, ever. |
-| `https://flights.flightpowers.com/mcp/oauth` | Bearer-only. Paste this one and your client shows a **Sign in** button, walks you through Google, and manages the token itself. |
-| `https://hotels.flightpowers.com/mcp/oauth` | The same, for hotels. |
+| Carries a credential: an `x-rapidapi-key` header, `?rapidapi_key=`, an `fpk_` connect token, an OAuth token, a Smithery config blob | Served, the way it always was. No 401, no sign-in. |
+| Carries nothing | `401` plus the sign-in metadata, so a client that can sign in shows a **Sign in** button. |
 
-Same tools, same product-per-hostname routing, same everything else. The OAuth endpoint is the
-identical tool registry behind a token check, not a second copy of the server.
+`https://hotels.flightpowers.com/mcp` behaves the same way for hotels. One URL per product,
+whichever way you authenticate, and there is nothing to choose between when you add the server.
 
-**What it is like to use.** Paste the `/mcp/oauth` URL into your client. It registers itself,
+The older `…/mcp/oauth` address still answers as the always-challenge alias, for connectors saved
+on it before 2026-09-09; nothing new needs it.
+
+**What it is like to use.** Paste the URL into your client. It registers itself,
 opens a browser, you sign in with Google, and you approve *that client by name* on a page that
 says exactly what it will be able to do: run searches billed to your own RapidAPI plan, nothing
 else. The client never sees your RapidAPI key. If you have not connected one yet, the approval
@@ -258,17 +254,17 @@ connected stops working immediately. Individually, a client can call `/oauth/rev
 ```bash
 # Claude Code
 claude mcp add --transport http flightpowers \
-  "https://flights.flightpowers.com/mcp/oauth"
+  "https://flights.flightpowers.com/mcp"
 claude mcp list            # shows "needs authentication" until you sign in
 /mcp                       # in a session: pick the server, follow the sign-in
 
 # Cursor -- Settings -> MCP -> Add, URL above. Or ~/.cursor/mcp.json:
 #   { "mcpServers": { "flightpowers": {
-#       "url": "https://flights.flightpowers.com/mcp/oauth" } } }
+#       "url": "https://flights.flightpowers.com/mcp" } } }
 # Cursor discovers the 401, registers itself and opens the browser.
 
 # ChatGPT -- Settings -> Connectors -> Create. It asks for:
-#   MCP server URL:  https://flights.flightpowers.com/mcp/oauth
+#   MCP server URL:  https://flights.flightpowers.com/mcp
 #   Authentication:  OAuth
 # Leave client id and secret EMPTY: this server supports dynamic client
 # registration, so ChatGPT registers itself. Nothing else has to be filled in.
@@ -276,7 +272,7 @@ claude mcp list            # shows "needs authentication" until you sign in
 # MCP Inspector -- the quickest way to watch the whole handshake.
 npx @modelcontextprotocol/inspector
 #   Transport: Streamable HTTP
-#   URL: https://flights.flightpowers.com/mcp/oauth
+#   URL: https://flights.flightpowers.com/mcp
 #   Auth: OAuth 2.0  ->  "Guided OAuth Flow" walks metadata -> DCR ->
 #   authorize -> token, and shows each response. Then run ONE real search.
 ```
@@ -285,8 +281,8 @@ npx @modelcontextprotocol/inspector
 
 | Route | Spec |
 |---|---|
-| `GET /.well-known/oauth-protected-resource` and `…/mcp/oauth` | RFC 9728 |
-| `GET /.well-known/oauth-authorization-server` and `…/mcp/oauth` | RFC 8414 |
+| `GET /.well-known/oauth-protected-resource`, `…/mcp` and `…/mcp/oauth` | RFC 9728 |
+| `GET /.well-known/oauth-authorization-server`, `…/mcp` and `…/mcp/oauth` | RFC 8414 |
 | `POST /oauth/register` | RFC 7591, dynamic client registration, open |
 | `GET /connect/authorize` · `POST /connect/authorize` | RFC 6749 §4.1, **PKCE S256 required** |
 | `POST /oauth/token` | `authorization_code` and `refresh_token` |
@@ -335,13 +331,16 @@ BASE=https://flights.flightpowers.com
 # 1. On, and advertising itself.
 curl -s $BASE/health | python3 -m json.tool | grep oauth_
 
-# 2. The challenge. This is the whole feature in one response.
-curl -si $BASE/mcp/oauth | head -20
+# 2. The challenge, on the one URL, with nothing presented. This is the
+#    whole feature in one response.
+curl -si -X POST $BASE/mcp -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}' | head -20
 #   HTTP/2 401
-#   www-authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp/oauth"
+#   www-authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"
 
-# 3. Discovery, at both the scoped and the bare path.
-curl -s $BASE/.well-known/oauth-protected-resource/mcp/oauth | python3 -m json.tool
+# 3. Discovery, at the scoped and the bare path.
+curl -s $BASE/.well-known/oauth-protected-resource/mcp | python3 -m json.tool
 curl -s $BASE/.well-known/oauth-authorization-server | python3 -m json.tool
 
 # 4. Dynamic registration answers.
@@ -352,9 +351,9 @@ curl -s -X POST $BASE/oauth/register -H 'content-type: application/json' \
 # 5. The real test: MCP Inspector, Guided OAuth Flow, then ONE real search.
 #    A tools/list proves nothing -- the token is only consulted when a tool runs.
 
-# 6. Hotels, the other hostname, same walk: https://hotels.flightpowers.com/mcp/oauth
+# 6. Hotels, the other hostname, same walk: https://hotels.flightpowers.com/mcp
 
-# 7. /mcp is untouched. This must still work, with no 401 anywhere:
+# 7. A keyed call on the same URL. This must still work, with no 401 anywhere:
 curl -s -X POST $BASE/mcp -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' \
   -H "x-rapidapi-key: $REAL_KEY" \
