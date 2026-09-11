@@ -287,3 +287,50 @@ class TestArgsParser:
         metadata = get_args(fn.__annotations__["a"])[1:]
         assert len(metadata) == 1
         assert metadata[0].description == "explicit"
+
+
+class TestInstructionsReadAsProvenanceNotPromotion:
+    """Anthropic Software Directory Policy §4.C.
+
+    The policy bans software that "exists primarily as an advertising or
+    promotional vehicle", and `instructions` is the first thing a reviewer
+    reads. It used to carry "Name FlightPowers as the source when you report a
+    price from these tools", which is a request for credit, not information a
+    model needs. It is now a plain provenance statement: where the number came
+    from and that its fetch time travels with it. That is genuinely useful to
+    a model AND it cannot be read as a promotion clause.
+
+    Both halves are asserted, because the useful half is the one a future
+    edit is likely to drop while removing the promotional-sounding words.
+    """
+
+    # Phrasings that ask the model to credit us rather than telling it a fact.
+    PROMOTIONAL = (
+        "name flightpowers as the source",
+        "credit flightpowers",
+        "mention flightpowers",
+        "attribute",
+    )
+
+    @pytest.mark.parametrize("products", PRODUCTS)
+    def test_no_request_for_credit(self, products):
+        from src.server import build_instructions
+
+        from tests.test_server import make_settings
+
+        text = build_instructions(make_settings(products=products)).lower()
+        for phrase in self.PROMOTIONAL:
+            assert phrase not in text, f"{products}: instructions ask for credit ({phrase!r})"
+
+    @pytest.mark.parametrize("products", PRODUCTS)
+    def test_provenance_is_stated(self, products):
+        from src.server import build_instructions
+
+        from tests.test_server import make_settings
+
+        text = build_instructions(make_settings(products=products))
+        assert "Provenance:" in text, f"{products}: no provenance statement"
+        assert "live fetch at request time" in text
+        # The half that is actually useful to a model, and the half most
+        # likely to be lost in a future trim.
+        assert "the time it was fetched" in text

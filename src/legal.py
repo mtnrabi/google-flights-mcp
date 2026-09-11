@@ -28,7 +28,7 @@ from pathlib import Path
 
 LEGAL_DIR = Path(__file__).resolve().parent.parent / "legal"
 
-CONTACT_EMAIL = "mtnrabi@gmail.com"
+CONTACT_EMAIL = "matan@flightpowers.com"
 
 _STYLE = """
 :root { color-scheme: light dark; }
@@ -431,7 +431,7 @@ SUPPORT_MD = """# Support — {{PRODUCT}}
 
 ## Contact
 
-Email **mtnrabi@gmail.com**. Include the tool you called, the arguments, and
+Email **matan@flightpowers.com**. Include the tool you called, the arguments, and
 the UTC time of the call. There is no account to look up — the server stores no
 user identity — so those three things are what make a report actionable.
 
@@ -497,7 +497,7 @@ Both are read-only. They cannot book, hold, pay for or cancel anything.
 
 - Privacy policy: `{{SITE}}/privacy`
 - Terms of service: `{{SITE}}/terms`
-- Support: `{{SITE}}/support` — mtnrabi@gmail.com
+- Support: `{{SITE}}/support` — matan@flightpowers.com
 - Health and current configuration: `{{SITE}}/health`
 
 ## Non-affiliation

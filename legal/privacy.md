@@ -3,7 +3,7 @@
 **Service:** `https://{{HOST}}/mcp`
 **Registry name:** `{{REGISTRY_NAME}}`
 **Effective date:** 2026-08-17
-**Contact:** mtnrabi@gmail.com
+**Contact:** matan@flightpowers.com
 
 This policy describes exactly what the hosted MCP server at
 `{{HOST}}` does with data. It is written from the
@@ -278,4 +278,4 @@ effective date. The version in force is the one published here.
 
 ## 11. Contact
 
-mtnrabi@gmail.com
+matan@flightpowers.com

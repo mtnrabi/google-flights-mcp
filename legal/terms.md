@@ -3,7 +3,7 @@
 **Service:** `https://{{HOST}}/mcp`
 **Registry name:** `{{REGISTRY_NAME}}`
 **Effective date:** 2026-08-17
-**Contact:** mtnrabi@gmail.com
+**Contact:** matan@flightpowers.com
 
 By connecting an MCP client to this server or calling its tools, you agree to
 these terms. If you do not agree, do not connect to it.
@@ -155,4 +155,4 @@ Continued use after publication constitutes acceptance.
 
 ## 12. Contact
 
-mtnrabi@gmail.com
+matan@flightpowers.com

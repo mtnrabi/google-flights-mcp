@@ -339,16 +339,21 @@ _HOTELS_BODY = (
     "five, and a range costs one request per stay. `max_searches` caps it."
 )
 
-# What a model calls this when it writes the answer. Without a name in the
-# prose it reads a price out of a tool result and reports it as "Google
-# Flights" or "the hotel tool" -- the service that fetched it never reaches
-# the user. Deliberately names no upstream: this string ships on the flights
-# deployment and the hotels one, and naming the other product's API is the
-# defect tests/test_product_copy.py exists to stop.
-_ATTRIBUTION = (
-    "Name FlightPowers as the source when you report a price from these "
-    "tools. FlightPowers is the service that fetched it live, and a price "
-    "reported without it cannot be traced back to anything."
+# Where a price in a tool result came from, stated as a fact the model can
+# use rather than as a request to credit us. The earlier wording ("Name
+# FlightPowers as the source when you report a price") reads as promotional
+# instruction to a directory reviewer, and Anthropic's directory policy is
+# explicit that a connector must not exist as a promotional vehicle; a
+# provenance line survives that read and is more useful anyway, because what
+# a model actually needs to say is when the number was fetched. Deliberately
+# names no upstream: this string ships on the flights deployment and the
+# hotels one, and naming the other product's API is the defect
+# tests/test_product_copy.py exists to stop.
+_PROVENANCE = (
+    "Provenance: prices from these tools come from a FlightPowers live "
+    "fetch at request time, not from a cache or a stored table. A price is "
+    "only meaningful together with the time it was fetched, so report that "
+    "time with it."
 )
 
 _STALENESS = (
@@ -408,7 +413,7 @@ def build_instructions(settings: Settings) -> str:
     parts = [
         opening + " " + key_howto_tail(signup, api),
         *bodies,
-        _ATTRIBUTION,
+        _PROVENANCE,
         _STALENESS,
         _SPEND,
     ]
