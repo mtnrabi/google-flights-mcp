@@ -55,19 +55,40 @@ Two tools that answer a *fare question*, not a *date lookup*.
 Results are live fares. **They go stale within minutes: never cache a fare or reuse an earlier
 result; search again and state when the data was fetched.**
 
+## Try it with no key: sign in with Google
+
+Where a deployment has the allowance enabled (check `trial_enabled` and `trial_day_cap` on
+`/health` -- it is off by default and needs both `PAID_TRIAL_DAY_CAP` and
+`PAID_TRIAL_RAPIDAPI_KEY` set on purpose), a signed-in account gets **`trial_day_cap` free
+searches per UTC day** on our key, ad-free, with nothing to paste into your client. Sign in the
+way your client offers it, or at `https://google-flights-mcp.flightpowers.com/connect`, and ask
+for a fare.
+
+A search is one date x destination combination, so one call with a three-day range spends three.
+The allowance is held for the whole plan before the first request goes out and whatever the
+fan-out did not send is given straight back, so two calls at once cannot both spend it. Every
+result carries a `trial` block with the count and the cap. Past the cap the tools answer with
+`search_status: "trial_exhausted"` and no results -- never an error, and retrying does not help;
+the allowance renews at 00:00 UTC.
+
+Comparing several sources in one call (`compare_hotel_rates`, or `search_hotels` with more than
+one `providers` entry) is not part of the allowance and asks for your own key.
+
+Connecting your own RapidAPI key removes the cap entirely. That is the next section.
+
 ## Get a key (free tier available)
 
-The server holds no upstream credential of its own. Every search is billed to *your* RapidAPI
-subscription, which is why the key travels with the request.
+The server holds no upstream credential of its own. Every search beyond the free allowance is
+billed to *your* RapidAPI subscription, which is why the key travels with the request.
 
 1. Subscribe to the Google Flights Live API:
    **https://rapidapi.com/mtnrabi/api/google-flights-live-api**
 2. Copy your `x-rapidapi-key`.
 3. Pass it to the server in any one of the three ways below.
 
-If a key is missing, the tools do not fail silently and do not spend anything. They return
-`needs_api_key: true` with the signup URL and these instructions, phrased for the model to read
-back to you.
+If a key is missing and the allowance is not available to you, the tools do not fail silently and
+do not spend anything. They return `needs_api_key: true` with the signup URL and these
+instructions, phrased for the model to read back to you.
 
 ## Three ways to pass your key
 

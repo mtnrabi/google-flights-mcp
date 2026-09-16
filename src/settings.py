@@ -18,6 +18,13 @@ never be listed there. This one can.
 import os
 from dataclasses import dataclass
 
+#: Backend searches a signed-in caller with no key of their own may run each
+#: UTC day on OUR key. The default is 0 -- OFF -- because this is the one
+#: setting on this server that spends our own money; `PAID_TRIAL_DAY_CAP` is
+#: how it is switched on, and setting it back to 0 is the rollback that needs
+#: no code change. See src/trial.py.
+from .trial import DEFAULT_DAY_CAP as DEFAULT_TRIAL_DAY_CAP
+
 # The caller pays per backend request, so the ceiling exists to stop a model
 # burning someone's plan quota on a single over-broad question -- not to
 # protect our own bill. Higher than the free server's 15 for exactly that
@@ -197,6 +204,33 @@ class Settings:
             return self.signup_url
         return wanted
 
+    # ── the keyless allowance (src/trial.py) ─────────────────────────────
+    # What a caller who has signed in with Google but connected no RapidAPI
+    # key gets: this many BACKEND searches per account per UTC day, run on the
+    # key below. Both halves are required -- a cap with no key would refuse
+    # every trial caller after pretending to offer one, and a key with a cap
+    # of 0 is a key that can never be spent. `trial_enabled` is the single
+    # place that pairing is decided.
+    trial_day_cap: int = DEFAULT_TRIAL_DAY_CAP
+    #: PAID_TRIAL_RAPIDAPI_KEY, and ONLY that name. Deliberately not inherited
+    #: from `RAPIDAPI_KEY`: that variable already means something else and
+    #: something blunter (serve every keyless caller on the deployment owner's
+    #: plan), and a deployment that has it set has not thereby agreed to run a
+    #: public allowance. Two switches, two decisions, neither implying the
+    #: other.
+    trial_rapidapi_key: str = ""
+
+    @property
+    def trial_enabled(self) -> bool:
+        """Whether the allowance can serve anyone on this deployment.
+
+        Identity is the other half and it is NOT checked here: a trial needs a
+        signed-in user, so `build_server` also requires the OAuth support to
+        exist. Kept separate so a deployment can be diagnosed one fact at a
+        time -- "no key configured" and "OAuth is off" are different fixes.
+        """
+        return self.trial_day_cap > 0 and bool(self.trial_rapidapi_key)
+
     # Which product this deployment serves: "flights", "hotels", or "both".
     #
     # One codebase, three deployments. A subscriber to the Google Flights API
@@ -353,6 +387,11 @@ def load_settings(products: str | None = None) -> Settings:
 
     host = _env_str("RAPIDAPI_HOST", "google-flights-live-api.p.rapidapi.com")
 
+    # Negative is a typo, not "unlimited". Clamped rather than raised, because
+    # a cap that fails the boot of a live deployment is worse than a cap of 0 --
+    # and 0 is the default anyway, so the clamp lands on "off", never on "open".
+    trial_day_cap = max(0, _env_int("PAID_TRIAL_DAY_CAP", DEFAULT_TRIAL_DAY_CAP))
+
     return Settings(
         rapidapi_host=host,
         # Derived from the host by default so the two can never disagree.
@@ -383,4 +422,9 @@ def load_settings(products: str | None = None) -> Settings:
         api_front_base_url=_env_str(
             "API_FRONT_BASE_URL", DEFAULT_API_FRONT_BASE_URL
         ).rstrip("/"),
+        trial_day_cap=trial_day_cap,
+        # No fallback to RAPIDAPI_KEY. See the field's comment: the allowance
+        # must never be able to turn itself on from a variable that was set
+        # for a different reason.
+        trial_rapidapi_key=_env_str("PAID_TRIAL_RAPIDAPI_KEY", ""),
     )

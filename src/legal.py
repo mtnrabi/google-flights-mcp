@@ -518,8 +518,25 @@ page. Nothing goes in the client config.
 """
 
 
+#: Appended to the sign-in block on a deployment where the keyless allowance
+#: is live. Separate from SIGN_IN_MD, not folded into it, because the two are
+#: configured independently: OAuth can be on with no allowance behind it, and
+#: a landing page that promises free searches a deployment cannot serve is the
+#: same mistake as one that advertises a 404.
+TRIAL_MD = """
+There is nothing to paste to try it: the first {{TRIAL_CAP}} searches each UTC
+day are free on every signed-in account, ad-free, on our own key. Connect your
+RapidAPI key at `{{SITE}}/connect` to remove the cap; searches are then billed
+to your own plan and nothing is capped on our side.
+"""
+
+
 def index_html(
-    products: str, site: str, signup_url: str, oauth_url: str | None = None
+    products: str,
+    site: str,
+    signup_url: str,
+    oauth_url: str | None = None,
+    trial_day_cap: int = 0,
 ) -> str:
     """The landing page at `/`.
 
@@ -534,7 +551,10 @@ def index_html(
     # `/mcp/oauth` is not registered. `/health` reports the same fact as
     # `oauth_enabled`; a landing page that advertises a 404 is worse than a
     # landing page that says nothing.
-    md = md.replace("{{SIGN_IN_BLOCK}}", SIGN_IN_MD if oauth_url else "")
+    sign_in = SIGN_IN_MD if oauth_url else ""
+    if sign_in and trial_day_cap > 0:
+        sign_in += TRIAL_MD.replace("{{TRIAL_CAP}}", str(trial_day_cap))
+    md = md.replace("{{SIGN_IN_BLOCK}}", sign_in)
     md = (
         md.replace("{{SITE}}", site)
         .replace("{{MCP_URL}}", f"{site}/mcp")

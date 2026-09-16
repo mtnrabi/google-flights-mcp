@@ -336,6 +336,7 @@ def signed_in_html(
     notice: str = "",
     error: str = "",
     flow: str = FLOW_TOKEN,
+    trial_line: str = "",
 ) -> str:
     """The page for a signed-in visitor.
 
@@ -350,6 +351,12 @@ def signed_in_html(
         f'<p class="note">Signed in as <strong>{_e(email or "your Google account")}'
         "</strong>.</p>"
     )
+    if trial_line:
+        # The keyless allowance, in one sentence. Rendered high on the page on
+        # purpose: a signed-in visitor who has not pasted a key is already
+        # able to search, and a page that only ever says "paste a key" tells
+        # them the opposite of what is true.
+        blocks.append(f'<p class="note">{_e(trial_line)}</p>')
     if error:
         blocks.append(f'<p class="bad">{_e(error)}</p>')
     if notice:
