@@ -119,7 +119,18 @@ class TestTheSchemaIsDeclaredAndReal:
     def test_flight_tools_publish_the_search_status_vocabulary(self, name):
         status = _tools()[name]["outputSchema"]["properties"]["search_status"]
         assert status["enum"] == list(SEARCH_STATUS_VALUES)
-        assert set(status["enum"]) == {"ok", "empty", "partial", "degraded"}
+        # The four backend statuses, plus `trial_exhausted` -- the keyless
+        # allowance's refusal, which is not a backend status at all: no search
+        # ran. It is declared for the same reason the free server declares
+        # `rate_limited`: a client validating the payload has to find the
+        # value the payload carries.
+        assert set(status["enum"]) == {
+            "ok",
+            "empty",
+            "partial",
+            "degraded",
+            "trial_exhausted",
+        }
         # The whole point of publishing it: a client can be told what an
         # empty array means without reading our documentation.
         assert "empty" in status["description"]
@@ -145,7 +156,19 @@ class TestTheSchemaIsDeclaredAndReal:
         that as a violated schema.
         """
         status = _tools()[name]["outputSchema"]["properties"]["search_status"]
-        assert set(status["enum"]) == {"ok", "empty", "partial", "degraded"}
+        # The four range statuses, plus `trial_exhausted` -- which is NOT a
+        # range status and is the reason the description has to say which
+        # searches carry which. The hotel tools refuse a spent allowance the
+        # same way the flight ones do, so the published enum has to contain
+        # the value the published payload carries.
+        assert status["enum"] == list(SEARCH_STATUS_VALUES)
+        assert set(status["enum"]) == {
+            "ok",
+            "empty",
+            "partial",
+            "degraded",
+            "trial_exhausted",
+        }
         assert "range" in status["description"].lower()
         assert "degraded" in status["description"]
 

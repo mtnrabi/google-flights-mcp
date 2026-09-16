@@ -170,6 +170,21 @@ from .settings import (
     load_settings,
 )
 from .stores import build_counter_store
+from .trial import (
+    REASON_UNAVAILABLE,
+    TRIAL_EXHAUSTED,
+    TRIAL_SOURCE,
+    TrialState,
+    body_tags as trial_body_tags,
+    compare_needs_own_key_message,
+    log_line as trial_log_line,
+    trial_exhausted_result,
+    trial_note,
+    trial_tail,
+    trial_unavailable_reason,
+    utc_day as trial_utc_day,
+)
+from .trialstore import TrialStoreError, build_trial_store
 from .telemetry import CallRecord, Telemetry
 
 logger = logging.getLogger(__name__)
@@ -368,8 +383,14 @@ _SPEND = (
 )
 
 
-def build_instructions(settings: Settings) -> str:
-    """The `instructions` string for THIS deployment's products."""
+def build_instructions(settings: Settings, trial_tail: str = "") -> str:
+    """The `instructions` string for THIS deployment's products.
+
+    `trial_tail` is one sentence about the keyless allowance, passed in rather
+    than derived here because whether the allowance exists depends on things
+    settings alone cannot see (OAuth, a database). Empty on every deployment
+    that has none, which is what keeps this string byte-identical there.
+    """
     products = settings.products if settings.products in VALID_PRODUCTS else "both"
 
     api = upstream_api_name(products)
@@ -411,7 +432,10 @@ def build_instructions(settings: Settings) -> str:
         ]
 
     parts = [
-        opening + " " + key_howto_tail(signup, api),
+        opening
+        + " "
+        + key_howto_tail(signup, api)
+        + (f" {trial_tail}" if trial_tail else ""),
         *bodies,
         _PROVENANCE,
         _STALENESS,
@@ -1358,6 +1382,59 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     flights_signup = settings.signup_url_for("flights")
     hotels_signup = settings.signup_url_for("hotels")
 
+    # ── connected keys (optional) ────────────────────────────────────────
+    # None on any deployment that has not been given GOOGLE_OAUTH_CLIENT_ID,
+    # GOOGLE_OAUTH_CLIENT_SECRET, MCP_KEY_MASTER and DATABASE_URL -- which is
+    # every deployment until ops sets them. When it is None no route is
+    # registered and `_resolve` is byte-for-byte the call that was here
+    # before, so this whole feature is off by absence rather than by a flag
+    # somebody has to remember to leave alone.
+    connect = build_connect_support(
+        settings.products, site_origin, settings.public_url
+    )
+    if connect is not None:
+        logger.info("/connect is enabled for %s", settings.products)
+
+    # ── MCP-protocol OAuth (optional, and only where /connect exists) ────
+    # Day 2. `/mcp` is untouched by all of it: the OAuth surface is a second
+    # endpoint, `/mcp/oauth`, that always challenges, plus the discovery and
+    # token routes a client needs to answer that challenge. See src/oauth.py
+    # for why one endpoint could not do both jobs.
+    oauth = build_oauth_support(settings.products, site_origin, connect)
+
+    # ── the keyless allowance (optional) ─────────────────────────────────
+    # Built here, above the tool descriptions, because whether it exists
+    # changes what they say: a description that tells every reader a key is
+    # required is wrong on a deployment where it is not, and a description
+    # that promises a free allowance on a deployment that has none is worse.
+    #
+    # Three things must all be true, and they are three because they fail
+    # separately: a cap and a key of our own (`settings.trial_enabled`), a way
+    # to know WHO is calling (OAuth -- an allowance with no identity is an
+    # open bar), and a durable counter (`DATABASE_URL`). Any one missing and
+    # the server behaves exactly as it did before this existed.
+    trial_store = build_trial_store()
+    trial_on = (
+        settings.trial_enabled
+        and oauth is not None
+        and getattr(trial_store, "available", False)
+    )
+    if trial_on:
+        logger.info(
+            "keyless allowance is ON for %s: %d backend searches per signed-in "
+            "account per UTC day, on this deployment's own key",
+            settings.products,
+            settings.trial_day_cap,
+        )
+    elif settings.trial_enabled and oauth is None:
+        logger.warning(
+            "PAID_TRIAL_DAY_CAP and a trial key are set but MCP OAuth is not "
+            "configured, so nobody can be identified and the allowance stays "
+            "off."
+        )
+    _connect_url = f"{site_origin}/connect"
+    _trial_tail = trial_tail(settings.trial_day_cap, _connect_url) if trial_on else ""
+
     # The same short self-serve path -- get a key, three ways to pass it,
     # usage counts against your own plan -- on the tail of every tool
     # description, per product. `instructions` and a refusal are not the
@@ -1369,10 +1446,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     _hotels_key_tail = key_howto_tail(hotels_signup, upstream_api_name("hotels"))
 
     def described_flights(description: str) -> str:
-        return f"{description}\n\n{_flights_key_tail}"
+        tail = _flights_key_tail + (f" {_trial_tail}" if _trial_tail else "")
+        return f"{description}\n\n{tail}"
 
     def described_hotels(description: str) -> str:
-        return f"{description}\n\n{_hotels_key_tail}"
+        tail = _hotels_key_tail + (f" {_trial_tail}" if _trial_tail else "")
+        return f"{description}\n\n{tail}"
 
     mcp = FastMCP(
         name=service_name(settings.products),
@@ -1382,7 +1461,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # advertising it on the wire as well means a reviewer connecting
         # directly -- not through the listing -- can still reach the policies.
         website_url=settings.site_origin(),
-        instructions=build_instructions(settings),
+        instructions=build_instructions(settings, trial_tail=_trial_tail),
     )
 
     # The shared httpx client is built on first use, not here. Constructing
@@ -1406,25 +1485,6 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             redact(settings.fallback_rapidapi_key),
         )
 
-    # ── connected keys (optional) ────────────────────────────────────────
-    # None on any deployment that has not been given GOOGLE_OAUTH_CLIENT_ID,
-    # GOOGLE_OAUTH_CLIENT_SECRET, MCP_KEY_MASTER and DATABASE_URL -- which is
-    # every deployment until ops sets them. When it is None no route is
-    # registered and `_resolve` is byte-for-byte the call that was here
-    # before, so this whole feature is off by absence rather than by a flag
-    # somebody has to remember to leave alone.
-    connect = build_connect_support(
-        settings.products, site_origin, settings.public_url
-    )
-    if connect is not None:
-        logger.info("/connect is enabled for %s", settings.products)
-
-    # ── MCP-protocol OAuth (optional, and only where /connect exists) ────
-    # Day 2. `/mcp` is untouched by all of it: the OAuth surface is a second
-    # endpoint, `/mcp/oauth`, that always challenges, plus the discovery and
-    # token routes a client needs to answer that challenge. See src/oauth.py
-    # for why one endpoint could not do both jobs.
-    oauth = build_oauth_support(settings.products, site_origin, connect)
 
     async def _resolve(headers: dict[str, str], params: dict[str, str]) -> Credential:
         """The caller's key, in the order credentials.py documents.
@@ -1464,9 +1524,23 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     stored = None
                 if stored is not None:
                     return Credential(key=stored.key, source="store:oauth")
-                # Signed in, but never pasted a key. A distinct source so the
-                # reply can say "connect one at /connect" rather than walking
-                # them through an OAuth sign-in they have already done.
+                # Signed in, but never pasted a key.
+                #
+                # Where the allowance is configured this is the caller it
+                # exists for, and they are served on OUR key -- capped, in
+                # src/trial.py, counted per account in Postgres. The source is
+                # distinct from every other one for a reason: the call sites
+                # have to know this is our money before they spend it, and a
+                # key value cannot tell them.
+                #
+                # Where it is not configured, nothing changes: a distinct
+                # empty-key source so the reply can say "connect one at
+                # /connect" rather than walking them through an OAuth sign-in
+                # they have already done.
+                if trial_on:
+                    return Credential(
+                        key=settings.trial_rapidapi_key, source=TRIAL_SOURCE
+                    )
                 return Credential(key="", source="store:oauth_no_key")
 
         if connect is not None:
@@ -1579,6 +1653,167 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             },
         }
 
+    # ── the keyless allowance ────────────────────────────────────────────
+    #
+    # Four tool paths reach the upstream (flights fan-out, one-shot hotels,
+    # hotel stay fan-out, multi-source hotels) and each resolves its own
+    # credential, so the allowance is three small functions used by all of
+    # them rather than a branch copied four times. See src/trial.py.
+
+    def _trial_identity(headers: dict[str, str]) -> tuple[str, str]:
+        """The signed-in account, from the headers the OAuth gate injects.
+
+        Both are injected only after an access token validated, and the same
+        gate strips any inbound copy of them from every request on every path
+        (tests/test_oauth.py::TestTheInjectedHeaderCannotBeForged). That is
+        what makes it safe to spend our own key on the strength of a header.
+        """
+        return (
+            (headers.get(SUBJECT_HEADER) or "").strip(),
+            (headers.get(EMAIL_HEADER) or "").strip(),
+        )
+
+    async def _trial_state(headers: dict[str, str]) -> TrialState | None:
+        """This caller's standing against the allowance, or None.
+
+        None means "the allowance cannot be served", never "nothing spent
+        yet". A store that will not answer is a counter that cannot stop, and
+        guessing 0 there would hand every caller an uncapped run on our key --
+        so the caller is asked for their own key instead and the reason is
+        logged. Costs them nothing; they have spent nothing.
+        """
+        sub, email = _trial_identity(headers)
+        if not sub:
+            return None
+        try:
+            used = await trial_store.usage(sub, trial_utc_day())
+        except TrialStoreError as exc:
+            logger.warning(
+                "%s: the keyless allowance is refused rather than guessed (%s)",
+                trial_unavailable_reason(),
+                exc,
+            )
+            return None
+        return TrialState(
+            user_sub=sub,
+            email=email,
+            used_today=used,
+            day_cap=settings.trial_day_cap,
+        )
+
+    async def _trial_reserve(
+        state: TrialState, tool: str, planned: int
+    ) -> TrialState | None:
+        """Take `planned` searches off the allowance BEFORE they run.
+
+        None means refused: the reservation would have breached the cap, and
+        nothing was written. The caller turns that into `trial_exhausted`.
+
+        Reserving first is the whole difference between a cap and a report.
+        Counting after the searches meant two tool calls from one account,
+        in flight at the same time, both read the same "nothing spent yet"
+        and the day ended at twice the cap -- on our key, and invisibly,
+        because each call on its own looked correct. `TrialStore.reserve` is
+        one statement with the cap inside it, so at most one of two racers
+        can come back with a number.
+
+        A store that will not answer refuses too. The alternative is spending
+        our key uncounted, which is the thing this function exists to prevent.
+        """
+        if planned <= 0:
+            return state
+        try:
+            total = await trial_store.reserve(
+                state.user_sub,
+                trial_utc_day(),
+                planned,
+                state.day_cap,
+                state.email,
+            )
+        except TrialStoreError as exc:
+            logger.warning("trial reservation failed (%s); refusing", exc)
+            return None
+        if total is None:
+            logger.info("%s", trial_log_line(state, "race_lost", tool, planned))
+            return None
+        after = TrialState(
+            user_sub=state.user_sub,
+            email=state.email,
+            used_today=total,
+            day_cap=state.day_cap,
+        )
+        logger.info("%s", trial_log_line(after, "reserve", tool, planned))
+        return after
+
+    async def _trial_settle(
+        state: TrialState, tool: str, planned: int, used: int
+    ) -> TrialState:
+        """Give back the part of the reservation that was never spent.
+
+        A plan of ten reserves ten; if three combinations never reached the
+        upstream -- the fan-out was truncated, a request raised before it was
+        sent -- those three cost us nothing and are handed straight back, so
+        the caller does not lose them until midnight. The reservation is the
+        conservative direction on purpose (it can only ever under-serve, never
+        overspend our key) and this is what closes the gap.
+
+        A refund that fails is logged and NOT raised: the search already ran
+        and the caller is owed their results. The cost is that the caller is
+        charged for a few searches they did not get, which self-corrects at
+        00:00 UTC.
+        """
+        give_back = max(0, planned - max(0, used))
+        if give_back <= 0:
+            return state
+        try:
+            total = await trial_store.refund(
+                state.user_sub, trial_utc_day(), give_back
+            )
+        except TrialStoreError as exc:
+            logger.warning("trial refund was not recorded (%s)", exc)
+            return state
+        after = TrialState(
+            user_sub=state.user_sub,
+            email=state.email,
+            used_today=total,
+            day_cap=state.day_cap,
+        )
+        logger.info("%s", trial_log_line(after, "refund", tool, give_back))
+        return after
+
+    def _trial_upstream_failure(
+        signup: str, api_name: str, detail: str, quota: bool
+    ) -> dict[str, Any]:
+        """When OUR key is the one that was refused.
+
+        Never phrased as the caller's problem. On the allowance path a 401 or
+        a 429 from RapidAPI is an ops failure on this deployment -- our key
+        unsubscribed, our plan spent -- and the existing keyed replies would
+        tell the user to go subscribe to fix a subscription that is not
+        theirs. They get one true sentence and the way out that always works:
+        connect a key of their own.
+        """
+        logger.error(
+            "the keyless allowance could not run a search: the deployment's "
+            "own RapidAPI key was refused (%s) -- %s",
+            "quota" if quota else "auth",
+            detail,
+        )
+        return {
+            "needs_api_key": True,
+            "results": [],
+            "result_count": 0,
+            "signup_url": signup,
+            "message": (
+                "The free signed-in allowance is temporarily unavailable on "
+                "this server -- this is a problem on our side, not with your "
+                "account, and nothing was billed to you. Connecting your own "
+                f"RapidAPI key at {_connect_url} works right now: a free key "
+                f"for the {api_name} is at {signup}."
+            ),
+            "how_to_get_a_key": _howto(signup, api_name),
+        }
+
     # ── shared execution path ────────────────────────────────────────────
 
     async def _run(
@@ -1654,11 +1889,66 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 ),
             }
 
+        # The allowance: a signed-in caller with no key of their own, served
+        # on ours. Checked before anything is planned, because a refusal has
+        # to cost nothing.
+        trial: TrialState | None = None
+        if credential.source == TRIAL_SOURCE:
+            trial = await _trial_state(headers)
+            if trial is None:
+                # The counter is unreadable. Ask for a key rather than spend
+                # ours uncounted; see _trial_state.
+                await log(
+                    requested=0,
+                    calls=0,
+                    failures=0,
+                    results=0,
+                    truncated=False,
+                    error=trial_unavailable_reason(),
+                )
+                return _reconnect_message(
+                    flights_signup,
+                    upstream_api_name("flights"),
+                    "store:oauth_no_key",
+                    email=(headers.get(EMAIL_HEADER) or "").strip(),
+                )
+            if trial.exhausted:
+                logger.info("%s", trial_log_line(trial, "block", tool_name))
+                await log(
+                    requested=0,
+                    calls=0,
+                    failures=0,
+                    results=0,
+                    truncated=False,
+                    error=TRIAL_EXHAUSTED,
+                )
+                return trial_exhausted_result(
+                    trial,
+                    _connect_url,
+                    flights_signup,
+                    upstream_api_name("flights"),
+                )
+
         cap = settings.max_searches_per_tool_call
         if max_searches is not None:
             if max_searches < 1:
                 raise ToolError("max_searches must be at least 1")
             cap = min(max_searches, cap)
+
+        if trial is not None:
+            # A cap is only a cap if the last call of the day cannot overshoot
+            # it. Without this a caller at 9 of 10 gets a full 30-way fan-out
+            # and ends the day at 39 -- on our key.
+            cap = min(cap, trial.remaining)
+            # Attribution, rule 11. Merged into every request body rather than
+            # sent as a header: this path goes through the RapidAPI Hub, which
+            # strips custom headers and forwards the body untouched. The
+            # Lambda takes both fields out again before validation.
+            _trial_tags = trial_body_tags("flights", tool_name, trial.user_sub)
+            _untagged_payload_builder = payload_builder
+
+            def payload_builder(combo, _build=_untagged_payload_builder, _tags=_trial_tags):
+                return {**_build(combo), **_tags}
 
         try:
             plan = plan_builder(cap)
@@ -1672,6 +1962,32 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 error=str(exc),
             )
             raise ToolError(str(exc)) from exc
+
+        # The allowance is taken BEFORE the searches run, now that the plan
+        # says how many there will be. Counting afterwards made the cap a
+        # report: two calls from one account in flight together both read
+        # "nothing spent" and the day ended at twice the cap.
+        trial_planned = 0
+        if trial is not None:
+            trial_planned = plan.executed_combinations
+            reserved = await _trial_reserve(trial, tool_name, trial_planned)
+            if reserved is None:
+                await log(
+                    requested=plan.requested_combinations,
+                    calls=0,
+                    failures=0,
+                    results=0,
+                    truncated=plan.truncated,
+                    error=TRIAL_EXHAUSTED,
+                )
+                return trial_exhausted_result(
+                    trial,
+                    _connect_url,
+                    flights_signup,
+                    upstream_api_name("flights"),
+                    reason=REASON_UNAVAILABLE,
+                )
+            trial = reserved
 
         # Up front, before anything is searched: a `limit` that cannot cover
         # the fan-out is a defect in the request, not something to discover in
@@ -1721,6 +2037,14 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 max_concurrency=settings.max_concurrent_searches,
             )
 
+        # Settled before any of the branches below, because every one of them
+        # is reached with the reservation already taken: whatever the fan-out
+        # did not actually send goes back to the caller now, not at midnight.
+        if trial is not None:
+            trial = await _trial_settle(
+                trial, tool_name, trial_planned, outcome.backend_calls_made
+            )
+
         # Account-level failures first: these are one fact about the caller,
         # not N independent search failures, and each has a different fix.
         if state.auth_error is not None:
@@ -1732,6 +2056,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 truncated=plan.truncated,
                 error="auth",
             )
+            if trial is not None:
+                return _trial_upstream_failure(
+                    flights_signup,
+                    upstream_api_name("flights"),
+                    state.auth_error,
+                    quota=False,
+                )
             hint = ""
             if key_looks_malformed(credential.key):
                 hint = (
@@ -1764,6 +2095,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 truncated=plan.truncated,
                 error="quota",
             )
+            if trial is not None:
+                return _trial_upstream_failure(
+                    flights_signup,
+                    upstream_api_name("flights"),
+                    state.quota_error,
+                    quota=True,
+                )
             return {
                 "quota_exhausted": True,
                 "results": [],
@@ -1838,6 +2176,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 BILLING_UNIT_NOTES["flights"],
             ),
         }
+        if trial is not None:
+            # On every result, not only near the cap: a caller who first hears
+            # the number when it runs out never had a chance to act on it.
+            response["trial"] = trial_note(trial, _connect_url, flights_signup)
+
         if outcome.backend_failures:
             response["partial"] = (
                 f"{outcome.backend_failures} of {plan.executed_combinations} "
@@ -2259,6 +2602,24 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         product-copy defects in tests/test_product_copy.py were all one copy of
         a sentence drifting from another.
         """
+        if credential.source == TRIAL_SOURCE:
+            # Reached only from the multi-source paths: `_provider_keys` does
+            # not hand the allowance key to a cross-source comparison, because
+            # the sources it reaches are not all on the RapidAPI edge and
+            # would be billed to us through the api front. One sentence saying
+            # so beats a silent skip.
+            return {
+                "needs_api_key": True,
+                "results": [],
+                "result_count": 0,
+                "signup_url": hotels_signup,
+                "message": compare_needs_own_key_message(
+                    _connect_url, hotels_signup
+                ),
+                "how_to_get_a_key": _howto(
+                    hotels_signup, upstream_api_name("hotels")
+                ),
+            }
         if credential.source in STORE_MISS_SOURCES:
             return _reconnect_message(
                 hotels_signup,
@@ -2293,6 +2654,43 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if not credential.present:
             return _hotels_no_key_reply(credential, headers)
 
+        trial: TrialState | None = None
+        if credential.source == TRIAL_SOURCE:
+            trial = await _trial_state(headers)
+            if trial is None:
+                return _reconnect_message(
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                    "store:oauth_no_key",
+                    email=(headers.get(EMAIL_HEADER) or "").strip(),
+                )
+            if trial.exhausted:
+                logger.info("%s", trial_log_line(trial, "block", tool))
+                return trial_exhausted_result(
+                    trial,
+                    _connect_url,
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                )
+            # Attribution, rule 11. The hotels backend reads all three fields
+            # out of the body (X-FP-User -> _fp_user -> x-rapidapi-user, live
+            # on both hotel functions since 2026-09-13), which is what makes
+            # this traffic countable per account in CloudWatch as well as in
+            # `paid_trial_usage`.
+            payload = {**payload, **trial_body_tags("hotels", tool, trial.user_sub)}
+            # One request, so the reservation is one -- taken before it is
+            # sent, never added afterwards.
+            reserved = await _trial_reserve(trial, tool, 1)
+            if reserved is None:
+                return trial_exhausted_result(
+                    trial,
+                    _connect_url,
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                    reason=REASON_UNAVAILABLE,
+                )
+            trial = reserved
+
         quota: dict[str, int] = {}
         async with HotelsClient(
             timeout_seconds=settings.request_timeout_seconds,
@@ -2303,6 +2701,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     endpoint, payload, api_key=credential.key, quota_sink=quota
                 )
             except AuthError as exc:
+                if trial is not None:
+                    # Our key, not theirs. Never phrased as their problem.
+                    return _trial_upstream_failure(
+                        hotels_signup, upstream_api_name("hotels"), str(exc),
+                        quota=False,
+                    )
                 # Same shape as the flights `needs_api_key` reply, not a
                 # raised ToolError: the model has to relay the fix to a
                 # human, and a structured result survives that trip more
@@ -2324,6 +2728,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     ),
                 }
             except QuotaError as exc:
+                if trial is not None:
+                    return _trial_upstream_failure(
+                        hotels_signup, upstream_api_name("hotels"), str(exc),
+                        quota=True,
+                    )
                 raise ToolError(str(exc)) from exc
             except RapidAPIError as exc:
                 raise ToolError(str(exc)) from exc
@@ -2343,6 +2752,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "result_count": len(rows),
             "api_usage": _usage_block(1, quota, BILLING_UNIT_NOTES["hotels"]),
         }
+        if trial is not None:
+            # Nothing to give back: the one request the reservation covered is
+            # the one that was sent. `_trial_settle` is still the call, so the
+            # two paths cannot drift apart.
+            trial = await _trial_settle(trial, tool, 1, 1)
+            result["trial"] = trial_note(trial, _connect_url, hotels_signup)
         if isinstance(body, dict) and body.get("applied_filters"):
             result["applied_filters"] = body["applied_filters"]
         return result
@@ -2369,16 +2784,62 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if not credential.present:
             return _hotels_no_key_reply(credential, headers)
 
+        trial: TrialState | None = None
+        if credential.source == TRIAL_SOURCE:
+            trial = await _trial_state(headers)
+            if trial is None:
+                return _reconnect_message(
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                    "store:oauth_no_key",
+                    email=(headers.get(EMAIL_HEADER) or "").strip(),
+                )
+            if trial.exhausted:
+                logger.info("%s", trial_log_line(trial, "block", tool))
+                return trial_exhausted_result(
+                    trial,
+                    _connect_url,
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                )
+
         cap = settings.max_searches_per_tool_call
         if max_searches is not None:
             if max_searches < 1:
                 raise ToolError("max_searches must be at least 1")
             cap = min(max_searches, cap)
 
+        if trial is not None:
+            # Same two reasons as the flights fan-out: the last stay of the
+            # day must not overshoot the cap, and every request body carries
+            # the attribution rule 11 asks for.
+            cap = min(cap, trial.remaining)
+            _trial_tags = trial_body_tags("hotels", tool, trial.user_sub)
+            _untagged_payload_builder = payload_builder
+
+            def payload_builder(combo, _build=_untagged_payload_builder, _tags=_trial_tags):
+                return {**_build(combo), **_tags}
+
         try:
             plan = plan_builder(cap)
         except PlanError as exc:
             raise ToolError(str(exc)) from exc
+
+        # Same order as the flights fan-out: hold the allowance before any
+        # stay is priced, give back what was never sent afterwards.
+        trial_planned = 0
+        if trial is not None:
+            trial_planned = plan.executed_combinations
+            reserved = await _trial_reserve(trial, tool, trial_planned)
+            if reserved is None:
+                return trial_exhausted_result(
+                    trial,
+                    _connect_url,
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                    reason=REASON_UNAVAILABLE,
+                )
+            trial = reserved
 
         quota: dict[str, int] = {}
         state = _UpstreamState()
@@ -2435,10 +2896,22 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 )
             )
 
+        if trial is not None:
+            trial = await _trial_settle(
+                trial, tool, trial_planned, outcome.backend_calls_made
+            )
+
         # Account-level failures first: one fact about the caller, not N
         # independent search failures, and each has a different fix.
         if state.auth_error is not None:
             await log(results=0, error="auth")
+            if trial is not None:
+                return _trial_upstream_failure(
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                    state.auth_error,
+                    quota=False,
+                )
             return {
                 "needs_api_key": True,
                 "results": [],
@@ -2455,6 +2928,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             }
         if state.quota_error is not None:
             await log(results=0, error="quota")
+            if trial is not None:
+                return _trial_upstream_failure(
+                    hotels_signup,
+                    upstream_api_name("hotels"),
+                    state.quota_error,
+                    quota=True,
+                )
             raise ToolError(
                 f"{state.quota_error} A check-in range costs one request per "
                 "stay, so a narrower range or a lower max_searches makes a "
@@ -2467,6 +2947,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
 
         response = build_stay_response(plan, outcome, quota)
+        if trial is not None:
+            response["trial"] = trial_note(trial, _connect_url, hotels_signup)
         if applied_filters:
             response["applied_filters"] = applied_filters[0]
         await log(results=response["result_count"], error=None)
@@ -2505,6 +2987,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         exactly like a source that had nothing, and those are opposite
         answers.
         """
+        if shared.source == TRIAL_SOURCE:
+            # The keyless allowance is not a shared key here. It runs on OUR
+            # subscription, and these paths reach sources that are not all on
+            # the RapidAPI edge -- Airbnb goes through the api front -- so a
+            # cross-source comparison served from it would bill us for a
+            # product we sell. A caller who names a per-source key of their
+            # own still gets it; only the fallback is withdrawn, and the empty
+            # result turns into one sentence in `_hotels_no_key_reply`.
+            shared = NO_CREDENTIAL
         creds: dict[str, Credential] = {}
         skips: list[ProviderOutcome] = []
         for name in names:
@@ -3303,6 +3794,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "oauth_mcp_endpoint": (
                     f"{site}{MCP_OAUTH_PATH}" if oauth is not None else None
                 ),
+                # The keyless allowance. Three separate things have to be true
+                # for it (a cap and a key, OAuth, a database), so ops needs to
+                # see the ANSWER rather than infer it: a reviewer who cannot
+                # search after signing in is otherwise indistinguishable from
+                # a reviewer who never signed in.
+                "trial_enabled": trial_on,
+                "trial_day_cap": settings.trial_day_cap if trial_on else 0,
             }
         )
 
@@ -3320,6 +3818,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 site,
                 settings.signup_url,
                 f"{site}{MCP_OAUTH_PATH}" if oauth is not None else None,
+                settings.trial_day_cap if trial_on else 0,
             )
         )
 
@@ -3453,6 +3952,40 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 logger.warning("counting OAuth grants failed: %s", exc)
             return False
 
+        async def _trial_line(sub: str, connected: bool) -> str:
+            """One sentence on the /connect page about the allowance.
+
+            The page is where a signed-in person goes to ask "does this work
+            for me yet?", and until now the only answer it had was "paste a
+            key". Empty string when there is no allowance on this deployment,
+            so the page is byte-identical there.
+            """
+            if not trial_on or not sub:
+                return ""
+            cap = settings.trial_day_cap
+            if connected:
+                return (
+                    f"Your own key is connected, so the {cap}-a-day free "
+                    "allowance no longer applies -- searches are billed to "
+                    "your own RapidAPI plan."
+                )
+            try:
+                used = await trial_store.usage(sub, trial_utc_day())
+            except TrialStoreError as exc:
+                logger.warning("connect page could not read the allowance: %s", exc)
+                return ""
+            left = max(0, cap - used)
+            if left:
+                return (
+                    f"Free allowance: {used} of {cap} searches used today, "
+                    f"{left} left. It renews at 00:00 UTC. Paste a key below "
+                    "to remove the cap."
+                )
+            return (
+                f"Free allowance: all {cap} searches for today are used. It "
+                "renews at 00:00 UTC. Paste a key below to remove the cap."
+            )
+
         async def _flow_for(identity, request: Request | None = None) -> str:
             if request is not None and _asked_for_token_url(request):
                 return FLOW_TOKEN
@@ -3499,6 +4032,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     ),
                     csrf=connect.csrf(identity.sub),
                     flow=flow,
+                    trial_line=await _trial_line(
+                        identity.sub, summary is not None
+                    ),
                 )
             )
 
@@ -3632,6 +4168,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     notice=notice,
                     error=error,
                     flow=flow,
+                    trial_line=await _trial_line(
+                        identity.sub, summary is not None
+                    ),
                 ),
                 status_code=status,
                 headers=headers or {},

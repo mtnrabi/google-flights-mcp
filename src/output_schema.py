@@ -66,7 +66,13 @@ from typing import Any
 # its api_usage, and a client validating that payload against this schema
 # must find the status value it actually contains. See the comment on
 # `is_degraded` in server.py for why the error flag is the part that matters.
-SEARCH_STATUS_VALUES = ("ok", "empty", "partial", "degraded")
+# `trial_exhausted` is the keyless allowance's refusal (src/trial.py). Like
+# `rate_limited` on the free server it is NOT a backend status: no search ran
+# and the empty list says nothing about availability. It is in this enum
+# because a client validating a result against this schema has to find the
+# value the result actually carries -- and because the alternative, raising,
+# would have a model retry a call that cannot succeed until tomorrow.
+SEARCH_STATUS_VALUES = ("ok", "empty", "partial", "degraded", "trial_exhausted")
 
 SEARCH_STATUS_DESCRIPTION = (
     "Whether the underlying search actually completed, read from the "
@@ -76,7 +82,10 @@ SEARCH_STATUS_DESCRIPTION = (
     "some combinations returned results and some failed, so the list is "
     "incomplete. 'degraded': every combination failed, so the search did not "
     "happen and an empty list means nothing; this case is also flagged with "
-    "isError: true and is safe to retry."
+    "isError: true and is safe to retry. 'trial_exhausted': the free "
+    "signed-in allowance on this server is spent for today, so nothing was "
+    "searched and nothing was billed; it renews at 00:00 UTC and connecting "
+    "your own RapidAPI key removes the cap. Retrying does not help."
 )
 
 _RESULT_ROWS: dict[str, Any] = {
@@ -599,13 +608,25 @@ HOTELS_OUTPUT_SCHEMA: dict[str, Any] = {
         "cheapest_overall": _CHEAPEST_OVERALL,
         "search_status": {
             "type": "string",
-            "enum": ["ok", "empty", "partial", "degraded"],
+            # The same vocabulary the flights tools publish, from the same
+            # tuple. It has to be: the hotel tools return `trial_exhausted`
+            # too (the keyless allowance refuses every tool on this server,
+            # not only the flights ones), and a client validating
+            # structuredContent against a schema that omits it rejects the
+            # refusal as malformed -- which is exactly the payload a refused
+            # caller most needs to read.
+            "enum": list(SEARCH_STATUS_VALUES),
             "description": (
-                "Date-range searches only. 'ok': every stay searched was "
-                "priced. 'empty': they all answered and none had priced "
-                "availability -- a real answer. 'partial': some stays were "
-                "priced and some errored. 'degraded': every stay errored, so "
-                "nothing is known; safe to retry."
+                "Date-range searches only, except 'trial_exhausted'. 'ok': "
+                "every stay searched was priced. 'empty': they all answered "
+                "and none had priced availability -- a real answer. "
+                "'partial': some stays were priced and some errored. "
+                "'degraded': every stay errored, so nothing is known; safe to "
+                "retry. 'trial_exhausted': the free signed-in allowance on "
+                "this server is spent for today, so nothing was searched and "
+                "nothing was billed; it renews at 00:00 UTC and connecting "
+                "your own RapidAPI key removes the cap. Retrying does not "
+                "help."
             ),
         },
         "search_coverage": _STAY_COVERAGE,
