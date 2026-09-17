@@ -88,6 +88,28 @@ SUGGESTED_DAY_CAP = 10
 #: and "paid-trial" is the only surface that spends OUR key on the paid server.
 FP_SOURCE = "paid-trial"
 
+#: ...and what the same lines call a call on the CALLER'S OWN key. Until
+#: 2026-09-17 a keyed request from this server carried no attribution at all,
+#: so it reached the backend as an untagged Hub request and was logged as
+#: `source=rapidapi` -- the bucket rule 11 reserves for direct Hub calls. Two
+#: consequences, and the second one is why this is a bug rather than a gap:
+#:
+#: 1. the paid MCP server was uncountable. Every keyed search it has ever sent
+#:    is sitting in the same bucket as a customer curling the Hub, so "how much
+#:    traffic does the MCP server carry" had no answer;
+#: 2. the only paid-server traffic that named itself was the allowance's. Its
+#:    calls spend OUR key, so the Hub stamps them `x-rapidapi-user: mtnrabi` --
+#:    the owner of `PAID_TRIAL_RAPIDAPI_KEY`, not the caller (the flights
+#:    backend takes no `_fp_user`, see below). A `[lane]` line reading
+#:    `source=paid-trial user=mtnrabi` is therefore exactly what a *correct*
+#:    allowance call looks like, and with keyed calls invisible there was
+#:    nothing on the line to tell it apart from a keyed one that had been
+#:    mis-tagged.
+#:
+#: The tags never decide anything -- they are stripped before validation and
+#: read only by the log -- so this cannot change what a caller is served.
+KEYED_SOURCE = "paid-mcp"
+
 #: The two attribution fields the FLIGHTS Lambda takes out of the request body
 #: before validation (`backend/src/api_lambda.py`: SOURCE_FIELD / TOOL_FIELD).
 #: Headers do not survive the RapidAPI Hub and this path goes through it, so
@@ -114,20 +136,41 @@ def utc_day(now: datetime | None = None) -> date:
     return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
 
 
-def body_tags(product: str, tool: str, user: str = "") -> dict[str, str]:
-    """Attribution to merge into a backend request body on the trial path.
+def body_tags(product: str, tool: str, user: str = "",
+              source: str = FP_SOURCE) -> dict[str, str]:
+    """Attribution to merge into a backend request body.
+
+    `source` is the surface: FP_SOURCE on the allowance path, KEYED_SOURCE on
+    a call billed to the caller's own key. It is a parameter rather than two
+    copies of this function because the *fields* are the delicate part -- which
+    product may be sent a `_fp_user`, what an empty value does to the rollup --
+    and those are identical on both paths.
 
     `user` is only emitted for a product whose backend can take it; see
     USER_FIELD. Empty strings are dropped rather than sent, because a blank
     `_fp_source` would be logged as a source named "" and count as its own
     surface in the rollup.
     """
-    tags = {SOURCE_FIELD: FP_SOURCE}
+    tags = {SOURCE_FIELD: source or FP_SOURCE}
     if tool:
         tags[TOOL_FIELD] = tool
     if user and product in _USER_FIELD_PRODUCTS:
         tags[USER_FIELD] = user
     return tags
+
+
+def keyed_body_tags(product: str, tool: str) -> dict[str, str]:
+    """Attribution for a search billed to the caller's own RapidAPI key.
+
+    Never a `_fp_user`, on any product. On the allowance path `_fp_user` is the
+    only way to say who spent our key; here the Hub has already named the caller
+    truthfully -- `x-rapidapi-user` is the owner of the key that is being billed
+    -- and `_fp_user` *outranks* it in the backend's resolution order
+    (X-FP-User -> _fp_user -> x-rapidapi-user). Sending one would replace a
+    paying customer's RapidAPI username with an opaque Google subject id in
+    every log line they appear in, which is the identity rule 11 exists to keep.
+    """
+    return body_tags(product, tool, source=KEYED_SOURCE)
 
 
 @dataclass(frozen=True)

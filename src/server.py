@@ -177,6 +177,7 @@ from .trial import (
     TrialState,
     body_tags as trial_body_tags,
     compare_needs_own_key_message,
+    keyed_body_tags,
     log_line as trial_log_line,
     trial_exhausted_result,
     trial_note,
@@ -1940,15 +1941,26 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             # it. Without this a caller at 9 of 10 gets a full 30-way fan-out
             # and ends the day at 39 -- on our key.
             cap = min(cap, trial.remaining)
-            # Attribution, rule 11. Merged into every request body rather than
-            # sent as a header: this path goes through the RapidAPI Hub, which
-            # strips custom headers and forwards the body untouched. The
-            # Lambda takes both fields out again before validation.
-            _trial_tags = trial_body_tags("flights", tool_name, trial.user_sub)
-            _untagged_payload_builder = payload_builder
 
-            def payload_builder(combo, _build=_untagged_payload_builder, _tags=_trial_tags):
-                return {**_build(combo), **_tags}
+        # Attribution, rule 11, on BOTH paths. Merged into every request body
+        # rather than sent as a header: this path goes through the RapidAPI
+        # Hub, which strips custom headers and forwards the body untouched. The
+        # Lambda takes both fields out again before validation.
+        #
+        # A keyed search used to send nothing here, which made it
+        # indistinguishable in CloudWatch from a customer curling the Hub
+        # (`source=rapidapi`) -- so the paid MCP server's own keyed traffic was
+        # uncountable, and `paid-trial` was the only value the server ever put
+        # on a line. See trial.KEYED_SOURCE.
+        _tags = (
+            trial_body_tags("flights", tool_name, trial.user_sub)
+            if trial is not None
+            else keyed_body_tags("flights", tool_name)
+        )
+        _untagged_payload_builder = payload_builder
+
+        def payload_builder(combo, _build=_untagged_payload_builder, _tags=_tags):
+            return {**_build(combo), **_tags}
 
         try:
             plan = plan_builder(cap)
@@ -2672,12 +2684,6 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     hotels_signup,
                     upstream_api_name("hotels"),
                 )
-            # Attribution, rule 11. The hotels backend reads all three fields
-            # out of the body (X-FP-User -> _fp_user -> x-rapidapi-user, live
-            # on both hotel functions since 2026-09-13), which is what makes
-            # this traffic countable per account in CloudWatch as well as in
-            # `paid_trial_usage`.
-            payload = {**payload, **trial_body_tags("hotels", tool, trial.user_sub)}
             # One request, so the reservation is one -- taken before it is
             # sent, never added afterwards.
             reserved = await _trial_reserve(trial, tool, 1)
@@ -2690,6 +2696,22 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     reason=REASON_UNAVAILABLE,
                 )
             trial = reserved
+
+        # Attribution, rule 11, on BOTH paths. The hotels backend reads all
+        # three fields out of the body (X-FP-User -> _fp_user ->
+        # x-rapidapi-user, live on both hotel functions since 2026-09-13),
+        # which is what makes this traffic countable per account in CloudWatch
+        # as well as in `paid_trial_usage`. A keyed search sends no `_fp_user`:
+        # the Hub has already named the key's owner, and `_fp_user` outranks it
+        # -- see trial.keyed_body_tags.
+        payload = {
+            **payload,
+            **(
+                trial_body_tags("hotels", tool, trial.user_sub)
+                if trial is not None
+                else keyed_body_tags("hotels", tool)
+            ),
+        }
 
         quota: dict[str, int] = {}
         async with HotelsClient(
@@ -2810,15 +2832,20 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             cap = min(max_searches, cap)
 
         if trial is not None:
-            # Same two reasons as the flights fan-out: the last stay of the
-            # day must not overshoot the cap, and every request body carries
-            # the attribution rule 11 asks for.
+            # Same reason as the flights fan-out: the last stay of the day must
+            # not overshoot the cap.
             cap = min(cap, trial.remaining)
-            _trial_tags = trial_body_tags("hotels", tool, trial.user_sub)
-            _untagged_payload_builder = payload_builder
 
-            def payload_builder(combo, _build=_untagged_payload_builder, _tags=_trial_tags):
-                return {**_build(combo), **_tags}
+        # ...and the same attribution on both paths, for the same reason.
+        _tags = (
+            trial_body_tags("hotels", tool, trial.user_sub)
+            if trial is not None
+            else keyed_body_tags("hotels", tool)
+        )
+        _untagged_payload_builder = payload_builder
+
+        def payload_builder(combo, _build=_untagged_payload_builder, _tags=_tags):
+            return {**_build(combo), **_tags}
 
         try:
             plan = plan_builder(cap)
