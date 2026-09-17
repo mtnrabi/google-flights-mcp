@@ -35,11 +35,13 @@ from src.keystore import MemoryKeyStore
 from src.oauthstore import MemoryOAuthStore
 from src.settings import load_settings
 from src.trial import (
+    KEYED_SOURCE,
     REASON_SPENT,
     REASON_UNAVAILABLE,
     TRIAL_EXHAUSTED,
     TrialState,
     body_tags,
+    keyed_body_tags,
     trial_exhausted_result,
     trial_note,
     utc_day,
@@ -71,6 +73,13 @@ SEARCH_ARGS = {
     "departure_date": "2026-09-20",
     "from_airport": "TLV",
     "to_airport": "ATH",
+}
+
+#: One stay, on the product whose backend accepts `_fp_user`.
+HOTEL_ARGS = {
+    "destination": "Rome",
+    "checkin_date": "2026-10-10",
+    "checkout_date": "2026-10-12",
 }
 
 
@@ -425,10 +434,16 @@ class TestAttribution:
             assert body["_fp_source"] == "paid-trial"
             assert body["_fp_tool"] == "search_oneway_flights"
 
-    async def test_a_keyed_request_is_not_tagged(self, trial):
-        """The tags exist to separate OUR spend from the caller's. Putting
-        them on a keyed call would attribute a paying customer's search to the
-        trial surface in the rollup."""
+    async def test_a_keyed_request_is_never_tagged_as_the_allowance(self, trial):
+        """The tags exist to separate OUR spend from the caller's, and that is
+        the half that must never blur: a paying customer's search attributed to
+        the trial surface is a number we would then plan on.
+
+        It is still tagged -- as `paid-mcp`, its own surface. Sending nothing
+        left every keyed search this server makes indistinguishable from a
+        customer curling the Hub (`source=rapidapi`), so the one value the
+        server ever put on a `[lane]` line was `paid-trial`, and the paid MCP
+        server's own traffic could not be counted at all."""
         async with Session(trial) as session:
             token = await _bearer(session.http)
             await call_tool(
@@ -443,8 +458,48 @@ class TestAttribution:
         searches = [b for b in trial.upstream.bodies if "from_airport" in b]
         assert searches
         for body in searches:
-            assert "_fp_source" not in body
-            assert "_fp_tool" not in body
+            assert body["_fp_source"] == KEYED_SOURCE
+            assert body["_fp_source"] != "paid-trial"
+            assert body["_fp_tool"] == "search_oneway_flights"
+            # Never on a keyed call, on any product: the Hub has already named
+            # the owner of the key being billed, and `_fp_user` outranks it.
+            assert "_fp_user" not in body
+
+    async def test_a_keyed_hotels_request_is_tagged_without_a_user(self, trial_hotels):
+        """The product that *does* take `_fp_user` is the one where getting
+        this wrong would be invisible: a paying subscriber's `user=` would
+        quietly become a Google subject id."""
+        async with Session(trial_hotels) as session:
+            token = await _bearer(session.http)
+            await call_tool(
+                session.http,
+                "/mcp",
+                HOTEL_ARGS,
+                {
+                    "authorization": f"Bearer {token}",
+                    "x-rapidapi-key": HEADER_KEY,
+                },
+                tool="search_hotels",
+            )
+        stays = [b for b in trial_hotels.upstream.bodies if "destination" in b]
+        assert stays
+        for body in stays:
+            assert body["_fp_source"] == KEYED_SOURCE
+            assert body["_fp_tool"] == "search_hotels"
+            assert "_fp_user" not in body
+
+    def test_the_keyed_tags_are_the_same_fields_the_allowance_uses(self):
+        """One vocabulary. A second spelling of `_fp_source` would be a second
+        thing for the rollup to know about, and the day it did not know the
+        traffic would vanish rather than be mislabelled."""
+        assert keyed_body_tags("flights", "search_oneway_flights") == {
+            "_fp_source": "paid-mcp",
+            "_fp_tool": "search_oneway_flights",
+        }
+        assert keyed_body_tags("hotels", "search_hotels") == {
+            "_fp_source": "paid-mcp",
+            "_fp_tool": "search_hotels",
+        }
 
     def test_the_flights_body_never_carries_fp_user(self):
         """`backend/src/api_lambda.py` strips `_fp_source` and `_fp_tool` and

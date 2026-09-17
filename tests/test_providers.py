@@ -34,6 +34,7 @@ from src import providers as ota
 from src.credentials import Credential, resolve_provider_credential
 from src.providers import AIRBNB, BOOKING
 from src.server import SERVER_VERSION
+from src.trial import KEYED_SOURCE, SOURCE_FIELD, TOOL_FIELD, USER_FIELD
 from tests.test_server import KEY, build_with_upstream
 
 AIRBNB_KEY = "airbnbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -219,6 +220,18 @@ class TestKeyResolutionPerProvider:
 # ── 3. the default did not move ─────────────────────────────────────────
 
 
+#: The request body minus the attribution fields -- the search itself, which is
+#: what "byte identical" was ever a claim about. The tags are asserted
+#: separately; folding them into the comparison would make every one of these
+#: tests restate the attribution contract instead of the search contract.
+_ATTRIBUTION_FIELDS = (SOURCE_FIELD, TOOL_FIELD, USER_FIELD)
+
+
+def _searched(request) -> dict:
+    body = json.loads(request.content)
+    return {k: v for k, v in body.items() if k not in _ATTRIBUTION_FIELDS}
+
+
 class TestTheDefaultDidNotMove:
     """The promise to every existing subscriber of `search_hotels`."""
 
@@ -246,8 +259,12 @@ class TestTheDefaultDidNotMove:
         assert len(recorder.requests) == 1
         sent = recorder.requests[0]
         assert sent.url.host == "booking-live-api.p.rapidapi.com"
-        assert json.loads(sent.content) == STAY
+        assert _searched(sent) == STAY
         assert "provider" not in json.loads(sent.content)
+        # The one thing that is deliberately not the search the caller asked
+        # for: the attribution rule 11 asks of every backend caller, stripped
+        # by the Lambda before validation and read only by the log.
+        assert json.loads(sent.content)[SOURCE_FIELD] == KEYED_SOURCE
 
     @pytest.mark.asyncio
     async def test_naming_booking_explicitly_is_the_same_path(self):
@@ -256,7 +273,9 @@ class TestTheDefaultDidNotMove:
         default = await call(mcp, "search_hotels", **STAY)
         explicit = await call(mcp, "search_hotels", providers=["booking"], **STAY)
         assert explicit == default
-        assert [json.loads(r.content) for r in recorder.requests] == [STAY, STAY]
+        assert [_searched(r) for r in recorder.requests] == [STAY, STAY]
+        assert [json.loads(r.content)[SOURCE_FIELD] for r in recorder.requests] \
+            == [KEYED_SOURCE, KEYED_SOURCE]
 
     @pytest.mark.asyncio
     async def test_find_hotel_by_name_gained_no_providers_argument(self):
