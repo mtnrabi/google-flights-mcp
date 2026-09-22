@@ -9,6 +9,33 @@ tools: a compact fare table, Google's own price band drawn as a
 three-segment bar with the verdict and the cheapest fare marked on it,
 and a Book button per row.
 
+It shows the ten cheapest rows and keeps the rest one scroll away inside
+the table (with a "Show all N" button for a host that swallows the inner
+scroll), because a thirty-fare answer rendered as a thirty-row card is a
+wall in a chat window. The height ceiling applies whatever the row count
+is, and gives way to a floor of five rows: on a 380px frame a row is a
+184px block, and a card that answers a 36-fare search with two fares is
+not an answer. Below 520px the band collapses to one line so the height
+it costs goes to fares instead.
+
+Destinations: both tools take a LIST of destination airports and answer
+with one flat `results` array, so "TLV to Rome, Athens or Budapest"
+arrives as thirty rows with the Athens fares wherever they happen to sit.
+Rows are grouped on the RAW `to_airport` value -- two different strings
+are two destinations, and guessing they are the same would merge two
+routes' fares -- and only the LABEL is shortened to the code. A row with
+no `to_airport` goes in an "Other" bucket with its own pill rather than
+being filtered out of every view of the card: it is still a fare the
+caller paid for. One bucket means no pills; a filter row with a single
+button is a control that cannot do anything. When the call asked for several destinations --
+both tools take a LIST -- the destinations become filter pills above the
+table, "All" selected by default; picking one filters the rows in the
+frame and recomputes the band and the cheapest marker for that
+destination alone. While several routes are in the table each row also
+carries its destination code, and the band says which route it belongs
+to -- Google tracks each route separately, so the band drawn is the one
+belonging to the route that holds the cheapest fare.
+
 What this is NOT
 ----------------
 The free (Lulu) server's widget, which comes out of the `lulu_ads` SDK
@@ -256,18 +283,55 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     font-family: var(--fp-mono);
   }
 
+  /* ── destination pills ──
+     A call that asked for four cities comes back as one table. The pills
+     are how you get to one city's fares without reading the other three. */
+  .fp-pills { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
+  .fp-pill {
+    font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--fp-line); background: transparent; color: var(--fp-soft);
+  }
+  .fp-pill:hover { border-color: var(--fp-accent); color: var(--fp-ink); }
+  .fp-pill:focus-visible { outline: 2px solid var(--fp-ink); outline-offset: 2px; }
+  .fp-pill[aria-pressed="true"] {
+    background: var(--fp-accent); border-color: var(--fp-accent);
+    color: var(--fp-accent-ink);
+  }
+  .fp-pill-n { opacity: .72; font-weight: 500; margin-left: 5px; }
+  /* Only rendered while the table shows more than one route. */
+  .fp-t td.fp-dest { font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+
   /* ── the table ── */
   .fp-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* Set only once the rows are capped, so a short table is never a
+     scroll container that swallows the page's own wheel events. */
+  .fp-scroll[data-capped="1"] { overflow-y: auto; }
   table.fp-t { width: 100%; border-collapse: collapse; font-size: 13px; }
   .fp-t th {
     text-align: left; font-size: 10px; font-weight: 700; letter-spacing: .09em;
     text-transform: uppercase; color: var(--fp-faint);
     padding: 6px 10px; border-top: 1px solid var(--fp-line);
     border-bottom: 1px solid var(--fp-line); white-space: nowrap;
+    /* Sticky, so scrolling row 11 into view does not lose the column
+       names. `border-collapse: collapse` drops the borders off a sticky
+       cell in Chromium, so they are redrawn as inset shadows. */
+    position: sticky; top: 0; z-index: 1; background: var(--fp-bg);
+    box-shadow: inset 0 1px 0 var(--fp-line), inset 0 -1px 0 var(--fp-line);
   }
   .fp-t td {
-    padding: 9px 10px; border-bottom: 1px solid var(--fp-line-soft);
+    padding: 7px 10px; border-bottom: 1px solid var(--fp-line-soft);
     vertical-align: top;
+  }
+  /* Where there is room the time cells do not wrap: wrapped, a row is
+     90px instead of 51, and ten of those is the wall this version exists
+     to remove. Measured at 700, not 640, because the multi-destination
+     table has a SEVENTH column and at 640 it pushed the row 17px
+     sideways. Below it they wrap (taller rows, fewer visible, and the
+     footer says so) rather than scrolling sideways. */
+  @media (min-width: 700px) {
+    .fp-t td.fp-when, .fp-t td.fp-when .fp-leg2,
+    .fp-t td.fp-dur { white-space: nowrap; }
   }
   .fp-t tr:last-child td { border-bottom: 0; }
   .fp-t tr[data-best="1"] td { background: color-mix(in srgb, var(--fp-accent) 7%, transparent); }
@@ -289,6 +353,25 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
   .fp-book:focus-visible { outline: 2px solid var(--fp-ink); outline-offset: 2px; }
   .fp-nolink { color: var(--fp-faint); font-size: 12px; }
 
+  /* The whole band, in one line, for a frame too narrow to spend 70px of
+     a 780px budget on a bar. Same three numbers, same verdict colour. */
+  .fp-bandline {
+    padding: 0 16px 10px; font-size: 12px; color: var(--fp-soft);
+  }
+  .fp-bandline .fp-range { font-family: var(--fp-mono); color: var(--fp-ink); }
+
+  /* ── "showing 10 of 34" ── */
+  .fp-more {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 10px; padding: 8px 16px 2px; font-size: 11px; color: var(--fp-faint);
+  }
+  .fp-morebtn {
+    font: inherit; font-size: 11px; font-weight: 650; cursor: pointer;
+    background: none; border: 0; padding: 2px 0; color: var(--fp-accent);
+    text-decoration: underline; white-space: nowrap;
+  }
+  .fp-morebtn:focus-visible { outline: 2px solid var(--fp-ink); outline-offset: 2px; }
+
   /* ── notices ── */
   .fp-note {
     margin: 0 16px 12px; padding: 9px 11px; border-radius: 10px;
@@ -301,9 +384,9 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
   }
   .fp-skel { padding: 16px; color: var(--fp-faint); font-size: 13px; }
 
-  /* Under ~440px a six-column table stops being a table and starts being a
+  /* Under ~520px a six-column table stops being a table and starts being a
      horizontal scroll nobody scrolls, so each row becomes a block. */
-  @media (max-width: 440px) {
+  @media (max-width: 519px) {
     .fp-t thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
     .fp-t, .fp-t tbody, .fp-t tr, .fp-t td { display: block; width: 100%; }
     .fp-t tr { padding: 4px 0; border-bottom: 1px solid var(--fp-line-soft); }
@@ -471,16 +554,61 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
      price_range_in_relation_to_other_periods is its verdict on the fare.
      Drawn only when both numbers are there -- an invented band would be a
      made-up metric, and a bar with nothing behind it is worse than no bar. */
-  function bandOf(rows, cheapest) {
-    for (var i = 0; i < rows.length; i++) {
-      var lo = num(rows[i].price_insights_low), hi = num(rows[i].price_insights_high);
+  function bandOf(rows, cheapest, cheapestRow, routes) {
+    /* Google tracks each route separately, so the band is the CHEAPEST
+       route's own -- the route the marker's fare is on -- and RESTRICTED
+       to it: no insights there means no band, never another route's
+       numbers under this marker. */
+    var pool = rows, dest = cheapestRow ? destOf(cheapestRow) : "";
+    if (dest) {
+      pool = rows.filter(function (r) { return destOf(r) === dest; });
+      pool.unshift(cheapestRow);
+    } else if (routes > 1) {
+      /* Unnamed cheapest fare with other routes present: every band on
+         offer belongs to one of THEM (measured: a $90 no-destination row
+         marked against another route's 250-420 band). Only when there is
+         something to mix with -- a table where NO row names a route is
+         one route as far as anyone can tell, and keeps its band. */
+      return null;
+    }
+    for (var i = 0; i < pool.length; i++) {
+      var lo = num(pool[i].price_insights_low), hi = num(pool[i].price_insights_high);
       if (lo !== null && hi !== null && hi > lo) {
-        return { low: lo, high: hi, verdict: txt(rows[i].price_range_in_relation_to_other_periods).toLowerCase(), fare: cheapest };
+        return {
+          low: lo,
+          high: hi,
+          verdict: txt(pool[i].price_range_in_relation_to_other_periods).toLowerCase(),
+          fare: cheapest,
+          dest: destLabel(dest)
+        };
       }
     }
     return null;
   }
-  function renderBand(b, sym) {
+  /* The CSS breakpoint, asked in JavaScript: below it the rows are
+     blocks and the band is one line. Both have to agree. */
+  function isNarrow() {
+    try { return window.matchMedia("(max-width: 519px)").matches; }
+    catch (e) { return false; }
+  }
+  function renderBandLine(b, sym, routes) {
+    var wrap = el("div", "fp-bandline");
+    wrap.appendChild(document.createTextNode("Google: "));
+    if (b.verdict === "low" || b.verdict === "typical" || b.verdict === "high") {
+      var v = el("span", "fp-verdict", b.verdict);
+      v.setAttribute("data-v", b.verdict);
+      wrap.appendChild(v);
+      wrap.appendChild(document.createTextNode(" "));
+    }
+    wrap.appendChild(el("span", "fp-range",
+      money(b.low, sym) + "–" + money(b.high, sym)));
+    if (routes > 1 && b.dest) {
+      wrap.appendChild(el("span", null, " · cheapest of " + routes + " routes (" + b.dest + ")"));
+    }
+    return wrap;
+  }
+  function renderBand(b, sym, routes) {
+    if (isNarrow()) return renderBandLine(b, sym, routes);
     var wrap = el("div", "fp-band");
     var span = b.high - b.low;
     var start = Math.min(b.low - span * 0.35, b.fare === null ? Infinity : b.fare - span * 0.12);
@@ -489,8 +617,17 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     var total = end - start;
     var pct = function (v) { return Math.max(0, Math.min(100, ((v - start) / total) * 100)); };
 
+    /* One route: "for this route", as before. Several: say out loud that
+       this is one of them -- the cheapest one -- rather than letting a
+       band that covers a third of the table read as if it covered all of
+       it. */
+    var many = routes > 1;
+    var label = many
+      ? "Google price tracking · cheapest of " + routes + " routes"
+        + (b.dest ? " (" + b.dest + ")" : "")
+      : "Google price tracking for this route";
     var top = el("div", "fp-band-top");
-    top.appendChild(el("span", null, "Google price tracking for this route"));
+    top.appendChild(el("span", null, label));
     if (b.verdict === "low" || b.verdict === "typical" || b.verdict === "high") {
       var v = el("span", "fp-verdict", b.verdict);
       v.setAttribute("data-v", b.verdict);
@@ -513,7 +650,11 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     }
     bar.setAttribute("role", "img");
     bar.setAttribute("aria-label",
-      "Google tracks this route between " + money(b.low, sym) + " and " + money(b.high, sym) +
+      (many
+        ? "Google tracks " + (b.dest || "the cheapest of these " + routes + " routes")
+          + ", the route with the cheapest fare of these " + routes + ", between "
+        : "Google tracks this route between ")
+      + money(b.low, sym) + " and " + money(b.high, sym) +
       (b.fare !== null ? "; the cheapest fare here is " + money(b.fare, sym) : "") +
       (b.verdict ? ", which Google marks " + b.verdict : "") + ".");
     wrap.appendChild(bar);
@@ -522,6 +663,69 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     scale.appendChild(el("span", null, money(b.low, sym) + " low"));
     scale.appendChild(el("span", null, money(b.high, sym) + " high"));
     wrap.appendChild(scale);
+    return wrap;
+  }
+
+  /* ── destinations (the why is in the module docstring) ──
+     Grouped on the RAW `to_airport`; only the LABEL is shortened. An
+     upstream string gets an upstream string's treatment: a 400-character
+     one in a nowrap cell was a 3,370px sideways scroll, so the label is
+     capped and the full value lives on the cell's title. */
+  function destOf(r) { return txt(r.to_airport); }
+  //: An upstream string, so it gets an upstream string's treatment: a
+  //: 400-character `to_airport` in a nowrap cell was a 3,370px sideways
+  //: scroll. The full value stays available as the cell's title.
+  var LABEL_MAX = 16;
+  function destLabel(v) {
+    var m = /\(([A-Za-z0-9]{3})\)\s*$/.exec(v);
+    var out = m ? m[1].toUpperCase() : v;
+    return out.length > LABEL_MAX
+      ? out.slice(0, LABEL_MAX - 1).replace(/\s+$/, "") + "…"
+      : out;
+  }
+  /* Every row lands in exactly one bucket, first-seen order, unlabelled
+     rows last: `dest: ""` IS the Other bucket, so nothing downstream has
+     to remember the special case. */
+  function bucketsOf(rows) {
+    /* Null-prototype map: a destination called "constructor" is a
+       destination like any other, not a hit on Object.prototype. */
+    var byDest = Object.create(null), order = [], other = [];
+    rows.forEach(function (r) {
+      var d = destOf(r);
+      if (!d) { other.push(r); return; }
+      if (!byDest[d]) { byDest[d] = []; order.push(d); }
+      byDest[d].push(r);
+    });
+    var out = order.map(function (d) { return { dest: d, rows: byDest[d] }; });
+    if (other.length) out.push({ dest: "", rows: other });
+    return out;
+  }
+  function renderPills(buckets, allRows, onPick) {
+    var wrap = el("div", "fp-pills");
+    wrap.setAttribute("role", "group");
+    wrap.setAttribute("aria-label", "Filter fares by destination");
+    var buttons = [];
+    function add(label, rows, title) {
+      var b = el("button", "fp-pill", label);
+      b.type = "button";
+      b.setAttribute("aria-pressed", "false");
+      if (title && title !== label) b.setAttribute("title", title);
+      b.appendChild(el("span", "fp-pill-n", rows.length));
+      b.addEventListener("click", function () {
+        buttons.forEach(function (o) { o.setAttribute("aria-pressed", "false"); });
+        b.setAttribute("aria-pressed", "true");
+        onPick(rows);
+      });
+      buttons.push(b);
+      wrap.appendChild(b);
+      return b;
+    }
+    /* All is the default and it is selected: the card opens showing the
+       whole answer, exactly as it did before there were pills. */
+    add("All", allRows).setAttribute("aria-pressed", "true");
+    buckets.forEach(function (g) {
+      add(g.dest ? destLabel(g.dest) : "Other", g.rows, g.dest);
+    });
     return wrap;
   }
 
@@ -545,14 +749,27 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     if (sub) td.appendChild(el("span", "fp-leg2", sub));
     return td;
   }
-  function renderTable(rows, rt, cheapest) {
+  /* The label is capped, so the cell carries the full upstream value as
+     its title rather than losing it. A row with no destination shows the
+     same em dash every other empty cell shows. */
+  function destCell(r) {
+    var raw = destOf(r);
+    var td = cell("To", raw ? destLabel(raw) : "", "", "fp-dest");
+    if (raw) td.setAttribute("title", raw);
+    return td;
+  }
+  function renderTable(rows, rt, cheapest, showDest) {
     /* Only the FIRST row at the cheapest price is badged. A date-range
        search routinely returns two identical fares (same carrier, two
        departure times) and badging both says "cheapest" twice. */
     var badged = false;
+    /* Only while the table holds more than one destination: filtered to
+       one, the column is the same three letters all the way down and one
+       more column squeezing the six that carry the fare. */
     var headers = rt
       ? ["Outbound", "Return", "Airline", "Stops", "Total", "Book"]
       : ["Depart", "Airline", "Stops", "Duration", "Price", "Book"];
+    if (showDest) headers.splice(rt ? 2 : 1, 0, "To");
     var table = el("table", "fp-t");
     table.setAttribute("aria-label", rt ? "Round-trip fares" : "One-way fares");
     var thead = el("thead"), htr = el("tr");
@@ -565,25 +782,30 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     table.appendChild(thead);
 
     var tbody = el("tbody");
+    var rowEls = [];
     rows.forEach(function (r) {
       var tr = el("tr");
+      rowEls.push(tr);
       var mine = priceNumber(r);
       var best = cheapest !== null && mine !== null && mine === cheapest && !badged;
       if (best) { badged = true; tr.setAttribute("data-best", "1"); }
       if (rt) {
         tr.appendChild(cell("Outbound", txt(r.departure_flight_departure_description) || txt(r.departure_date),
-                            txt(r.departure_flight_duration)));
+                            txt(r.departure_flight_duration), "fp-when"));
         tr.appendChild(cell("Return", txt(r.return_flight_departure_description) || txt(r.return_date),
-                            txt(r.return_flight_duration)));
+                            txt(r.return_flight_duration), "fp-when"));
+        if (showDest) tr.appendChild(destCell(r));
         var back = txt(r.return_flight_airline), out = txt(r.departure_flight_airline);
         tr.appendChild(cell("Airline", out, (back && back !== out) ? "back: " + back : ""));
         tr.appendChild(cell("Stops", stopsText(r.total_stops)));
       } else {
         tr.appendChild(cell("Depart", txt(r.departure_description) || txt(r.departure_date),
-                            txt(r.arrival_description) ? "arrives " + txt(r.arrival_description) : ""));
+                            txt(r.arrival_description) ? "arrives " + txt(r.arrival_description) : "",
+                            "fp-when"));
+        if (showDest) tr.appendChild(destCell(r));
         tr.appendChild(cell("Airline", txt(r.airline)));
         tr.appendChild(cell("Stops", stopsText(r.stops)));
-        tr.appendChild(cell("Duration", txt(r.duration)));
+        tr.appendChild(cell("Duration", txt(r.duration), "", "fp-dur"));
       }
       var pc = cell(rt ? "Total" : "Price", priceString(r), "", "fp-num");
       if (best) pc.appendChild(el("span", "fp-bestpill", "cheapest"));
@@ -594,7 +816,106 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     table.appendChild(tbody);
     var scroll = el("div", "fp-scroll");
     scroll.appendChild(table);
-    return scroll;
+    return { scroll: scroll, rowEls: rowEls };
+  }
+
+  /* ── how tall the card is allowed to be ──
+     Ten rows by default, the rest one scroll away. Measured, not guessed:
+     the cap is the distance from the top of the scroll box to the top of
+     row eleven, then trimmed again while the whole card is over
+     MAX_CARD_PX. Returns how many rows ended up FULLY visible, because
+     the footer says that number out loud and "10" over eight rows would
+     be a made-up figure. */
+  var MAX_ROWS_SHOWN = 10;
+  /* The floor: on a 380px frame a row is a 184px block and the ceiling
+     alone left TWO fares on screen. The ceiling gives way to this, not
+     the other way round. */
+  var MIN_ROWS_SHOWN = 5;
+  /* Ten unwrapped rows are ~510px of table on their own, so a card that
+     shows ten of them lands near 780 with the header, band, pills and
+     footer on top. That is the ceiling, not the target: it exists for the
+     layouts where a row is 90px (a narrow frame, the block layout), where
+     ten rows would be 1,100px of chat window and the card shows as many
+     as fit instead -- and says how many. */
+  var MAX_CARD_PX = 780;
+  var MIN_ROWS_PX = 120;
+  function capRows(scroll, px) {
+    scroll.setAttribute("data-capped", "1");
+    scroll.style.maxHeight = px + "px";
+  }
+  function fitRows(scroll, rowEls) {
+    /* Re-runnable, and it undoes its own last answer first: paint() runs
+       it again once the "showing N of M" line is in the DOM, because that
+       line is part of the card being fitted. */
+    uncapRows(scroll);
+    var n = rowEls.length;
+    if (!n) return 0;
+    var box = scroll.getBoundingClientRect();
+    var top = box.top, natural = box.height;
+    /* Height of the first `i` rows, measured from the top of the scroll
+       box (so it includes the sticky header). `i === n` means "all of
+       them", which has no row to measure against. */
+    function span(i) {
+      return i < n
+        ? Math.ceil(rowEls[i].getBoundingClientRect().top - top)
+        : Math.ceil(natural);
+    }
+    var cap = span(Math.min(MAX_ROWS_SHOWN, n));
+    /* No layout at all (a host that renders the frame with zero height,
+       a measurement taken while hidden): leave the table uncapped rather
+       than collapse it to nothing. */
+    if (!(cap > 0)) return n;
+    var floor = Math.max(MIN_ROWS_PX, span(Math.min(MIN_ROWS_SHOWN, n)));
+    capRows(scroll, cap);
+    /* Not once: capping can bring a scrollbar or a reflowed footer with
+       it. Bounded, because a loop that fights its own layout spins.
+       Applied whatever the row count -- ten 184px block rows are a
+       2,029px card, and "ten rows" never meant "short". */
+    for (var pass = 0; pass < 3; pass++) {
+      var over = document.body.scrollHeight - MAX_CARD_PX;
+      if (over <= 0) break;
+      var next = Math.max(floor, cap - over);
+      if (next >= cap) break;
+      cap = next;
+      capRows(scroll, cap);
+    }
+    if (cap >= natural - 0.5) {
+      /* Everything fits: no cap, no scrollbar, no footer line. */
+      uncapRows(scroll);
+      return n;
+    }
+    var bottom = scroll.getBoundingClientRect().bottom;
+    var visible = 0;
+    for (var i = 0; i < n; i++) {
+      if (rowEls[i].getBoundingClientRect().bottom > bottom + 0.5) break;
+      visible++;
+    }
+    return visible || 1;
+  }
+  function uncapRows(scroll) {
+    scroll.removeAttribute("data-capped");
+    scroll.style.maxHeight = "";
+  }
+  /* The footer line under a capped table. The button is not decoration:
+     a host that swallows the inner scroll would otherwise leave the
+     hidden rows unreachable. Built empty and filled in afterwards: it is
+     part of the card `fitRows` measures, and the number it prints is not
+     known until the fit has happened. */
+  function moreLine(total, expanded, onToggle) {
+    var wrap = el("div", "fp-more");
+    wrap.appendChild(el("span", "fp-more-t", ""));
+    var b = el("button", "fp-morebtn", expanded
+      ? "Show top " + MAX_ROWS_SHOWN
+      : "Show all " + total);
+    b.type = "button";
+    b.addEventListener("click", onToggle);
+    wrap.appendChild(b);
+    return wrap;
+  }
+  function setMoreText(wrap, shown, total, expanded) {
+    wrap.firstChild.textContent = expanded
+      ? "Showing all " + total + " fares"
+      : "Showing " + shown + " of " + total + " · scroll for more";
   }
 
   /* ── header + footer ── */
@@ -659,17 +980,71 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
       return;
     }
 
-    var sym = symbolOf(rows);
-    var cheapest = null;
-    rows.forEach(function (r) {
-      var n = priceNumber(r);
-      if (n !== null && (cheapest === null || n < cheapest)) cheapest = n;
-    });
-    var band = bandOf(rows, cheapest);
-    if (band) root.appendChild(renderBand(band, sym));
-    root.appendChild(renderTable(rows, isRoundTrip(rows), cheapest));
+    /* `selected` is whichever destination's rows the pills are showing --
+       all of them until someone clicks. The band, the cheapest marker and
+       the counts are all recomputed from it: Google's price band is per
+       route, so drawing Rome's band over Athens' fares would be a number
+       we invented. */
+    var body = el("div", "fp-body");
+    var selected = rows;
+    var expanded = false;
+
+    function paint() {
+      while (body.firstChild) body.removeChild(body.firstChild);
+      var sym = symbolOf(selected);
+      var cheapest = null, cheapestRow = null;
+      selected.forEach(function (r) {
+        var n = priceNumber(r);
+        if (n !== null && (cheapest === null || n < cheapest)) { cheapest = n; cheapestRow = r; }
+      });
+      /* How many routes are in the table RIGHT NOW: three under All, one
+         under a pill. It decides both the destination column and what the
+         band is allowed to claim. */
+      var routes = bucketsOf(selected).length;
+      var band = bandOf(selected, cheapest, cheapestRow, routes);
+      if (band) body.appendChild(renderBand(band, sym, routes));
+      var built = renderTable(selected, isRoundTrip(selected), cheapest, routes > 1);
+      body.appendChild(built.scroll);
+
+      var total = selected.length;
+      function toggle() { expanded = !expanded; paint(); }
+      var shown = total, more = null;
+      if (expanded) {
+        uncapRows(built.scroll);
+        more = moreLine(total, true, toggle);
+        body.appendChild(more);
+        setMoreText(more, total, total, true);
+      } else {
+        /* The fit decides whether anything is hidden -- not "more than
+           ten", because on a narrow frame the ceiling hides rows out of
+           eight -- and then runs again, because the line it produced is
+           part of the card. */
+        shown = fitRows(built.scroll, built.rowEls);
+        if (shown < total) {
+          more = moreLine(total, false, toggle);
+          body.appendChild(more);
+          shown = fitRows(built.scroll, built.rowEls);
+          setMoreText(more, shown, total, false);
+        }
+      }
+      sizeChanged();
+    }
+
+    var buckets = bucketsOf(rows);
+    if (buckets.length > 1) {
+      root.appendChild(renderPills(buckets, rows, function (picked) {
+        selected = picked;
+        expanded = false;
+        paint();
+      }));
+    }
+    root.appendChild(body);
+    /* Before the first paint, not after: the height trim measures the
+       whole document, and a footer appended later would push the card
+       past the budget it was just fitted to. */
     var ft = footerOf(sc);
     if (ft) root.appendChild(ft);
+    paint();
   }
 
   function renderOnce(sc) {

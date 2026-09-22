@@ -191,6 +191,136 @@ class TestTheResource:
         # dead button appears on a row whose link is refused.
         assert html.count("allowedLink(") >= 3
 
+    def test_the_table_shows_ten_rows_and_scrolls_for_the_rest(self):
+        """Matan, 2026-09-22, on the live card: "widget should not be that
+        long: showcase the top 10, scrollable for more". A 36-fare answer
+        used to render as a 36-row card.
+
+        The behaviour is executed in tests/test_widget_render.py; this
+        pins the shape for a machine with no browser."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "var MAX_ROWS_SHOWN = 10;" in html
+        assert 'scroll.setAttribute("data-capped", "1");' in html
+        assert '.fp-scroll[data-capped="1"] { overflow-y: auto; }' in html
+        # The column names survive the scroll, or row 20 is six unlabelled
+        # cells.
+        assert "position: sticky; top: 0; z-index: 1;" in html
+        # The rest are reachable even on a host that swallows the inner
+        # scroll and sizes the frame to its content.
+        assert '"Show all " + total' in html
+        assert '"Show top " + MAX_ROWS_SHOWN' in html
+
+    def test_the_number_in_the_footer_is_measured_not_assumed(self):
+        """"Showing 10 of 36" over eight visible rows would be a number we
+        made up. The cap is measured off the layout (row 11's own position)
+        and trimmed again if the card is still over its ceiling, so the
+        count has to be counted afterwards rather than assumed to be 10."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "rowEls[i].getBoundingClientRect().top - top" in html
+        assert "var cap = span(Math.min(MAX_ROWS_SHOWN, n));" in html
+        assert "if (rowEls[i].getBoundingClientRect().bottom > bottom + 0.5) break;" in html
+        assert '"Showing " + shown + " of " + total' in html
+
+    def test_destinations_become_pills_and_only_when_there_are_several(self):
+        """Both tools take a LIST of destinations and answer with one flat
+        `results` array. One destination gets no pills: a filter row with a
+        single button is a control that cannot do anything."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "function destOf(r) { return txt(r.to_airport); }" in html
+        assert "if (buckets.length > 1) {" in html
+        assert 'el("div", "fp-pills")' in html
+        assert 'add("All", allRows).setAttribute("aria-pressed", "true")' in html
+        assert 'wrap.setAttribute("aria-label", "Filter fares by destination")' in html
+        # A destination called "constructor" is a destination like any
+        # other, not a hit on Object.prototype.
+        assert "var byDest = Object.create(null)" in html
+
+    def test_picking_a_destination_recomputes_the_band_and_the_cheapest(self):
+        """Google's price band is per route. Leaving Rome's band drawn over
+        Athens' fares would be a made-up number on the one element of this
+        card that claims to be Google's own tracking."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "var band = bandOf(selected, cheapest, cheapestRow, routes);" in html
+        assert (
+            "renderTable(selected, isRoundTrip(selected), cheapest, routes > 1)"
+            in html
+        )
+        assert "selected = picked;" in html
+
+    def test_a_row_names_its_destination_only_while_several_are_shown(self):
+        """Under All the rows are three routes interleaved by price, so
+        each one says which. Under a pill, and on a single-destination
+        answer, the column would be the same three letters all the way
+        down and one more column squeezing the six that carry the fare."""
+        html = FLIGHTS_WIDGET_HTML
+        assert 'if (showDest) headers.splice(rt ? 2 : 1, 0, "To");' in html
+        assert 'cell("To", raw ? destLabel(raw) : "", "", "fp-dest")' in html
+        assert 'if (showDest) tr.appendChild(destCell(r));' in html
+        assert "var routes = bucketsOf(selected).length;" in html
+
+    def test_the_band_belongs_to_one_route_and_says_which(self):
+        """Google tracks each route separately. A band averaged over
+        three of them is a number nobody published, and a band taken from
+        route A under a marker sitting on route B's fare is worse. So the
+        band is the CHEAPEST route's own band, restricted to it -- no
+        fallthrough to another route's numbers -- and the label stops
+        saying "this route" while more than one is in the table."""
+        html = FLIGHTS_WIDGET_HTML
+        assert 'pool = rows.filter(function (r) { return destOf(r) === dest; });' in html
+        assert '"Google price tracking · cheapest of " + routes + " routes"' in html
+        assert '"Google price tracking for this route"' in html
+        assert '", the route with the cheapest fare of these " + routes' in html
+
+    def test_an_upstream_destination_string_cannot_widen_the_card(self):
+        """`to_airport` is upstream data in a nowrap cell. A 400-character
+        one measured a 3,370px sideways scroll at 760px, so the LABEL is
+        capped -- and the full value is kept as the cell's title rather
+        than lost."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "var LABEL_MAX = 16;" in html
+        assert 'out.slice(0, LABEL_MAX - 1).replace(/\\s+$/, "") + "…"' in html
+        assert 'td.setAttribute("title", raw)' in html
+
+    def test_a_fare_with_no_destination_is_still_reachable(self):
+        """A row with no `to_airport` used to vanish under every pill.
+        It is a fare the caller paid for, so it gets a bucket of its
+        own."""
+        html = FLIGHTS_WIDGET_HTML
+        assert 'if (!d) { other.push(r); return; }' in html
+        assert 'if (other.length) out.push({ dest: "", rows: other });' in html
+        assert 'g.dest ? destLabel(g.dest) : "Other"' in html
+
+    def test_an_unnamed_cheapest_fare_gets_no_band_rather_than_one_of_anothers(self):
+        """Measured by the reviewer: a $90 row with no `to_airport`
+        marked against another route's 250-420 band. With other routes in
+        the table there is no band that belongs to this fare, so none is
+        drawn. A table where NO row names a route keeps its band -- there
+        is nothing to mix it with."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "} else if (routes > 1) {\n      /*" in html
+        assert html.count("      return null;\n    }") >= 1
+
+    def test_a_narrow_frame_spends_its_height_on_fares(self):
+        """At 380px the header, pills, band and footer ate 580 of the 780
+        budget and the card answered a 36-fare search with two fares. The
+        band collapses to one line below 520px, and five rows is a floor
+        the ceiling gives way to."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "var MIN_ROWS_SHOWN = 5;" in html
+        assert 'window.matchMedia("(max-width: 519px)")' in html
+        assert "if (isNarrow()) return renderBandLine(b, sym, routes);" in html
+        assert 'el("div", "fp-bandline")' in html
+        assert "var floor = Math.max(MIN_ROWS_PX, span(Math.min(MIN_ROWS_SHOWN, n)));" in html
+
+    def test_ten_rows_are_fitted_too(self):
+        """The old early return meant a 10-row answer was never capped at
+        all: ten 184px block rows are a 2,029px card with no scroll and no
+        Show all. The ceiling applies whatever the row count, and whether
+        anything is hidden is decided by the fit, not by the count."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "if (rowEls.length <= MAX_ROWS_SHOWN) return rowEls.length;" not in html
+        assert "shown = fitRows(built.scroll, built.rowEls);\n        if (shown < total) {" in html
+
     def test_a_message_with_no_source_is_refused(self):
         """The tool result decides what this frame renders and what its
         buttons open. Executed in tests/test_widget_render.py."""
