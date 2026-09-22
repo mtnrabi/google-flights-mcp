@@ -18,6 +18,7 @@ from fastmcp import Client
 from src.rapidapi_client import AuthError, QuotaError
 from src.server import _dedupe, _row_sort_key, _usage_block, build_server
 from src.settings import HARD_MAX_SEARCHES, Settings
+from src.widget import WIDGET_URI
 
 KEY = "test-key-that-is-long-enough-to-pass"
 
@@ -137,11 +138,29 @@ class TestToolRegistration:
     @pytest.mark.asyncio
     async def test_no_ad_machinery_is_registered(self):
         """The whole listing strategy rests on this server carrying no ads.
-        The free server registers ad widgets as resources; a resource showing
-        up here would mean one crept back in."""
+
+        This used to assert that NO resource is registered at all, which was
+        a proxy for the real rule and stopped being one when the flights
+        result card landed (src/widget.py): a hand-rolled UI resource that
+        draws the caller's own fares, loads no third-party origin and fires
+        no beacon. So the assertion is now the rule itself -- the only
+        resource is ours, it is not the free server's Lulu widget, and
+        nothing in the served bytes reaches an ad network.
+        """
         mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
         async with Client(mcp) as client:
-            assert await client.list_resources() == []
+            uris = [str(r.uri) for r in await client.list_resources()]
+            assert uris == [WIDGET_URI]
+            html = (await client.read_resource(WIDGET_URI))[0].text
+
+        lowered = html.lower()
+        for banned in ("lulu", "getlulu", "sponsored", "beacon", "adsystem"):
+            assert banned not in lowered, f"{banned!r} in the served widget"
+        # No external origin of any kind: no fetch, no script src, no font,
+        # no image. A widget that loaded one could be pointed at an ad
+        # network later without anything here noticing.
+        for banned in ("http://", "https://", "//cdn", "fetch(", "xmlhttprequest"):
+            assert banned not in lowered, f"{banned!r} in the served widget"
 
     @pytest.mark.asyncio
     async def test_sort_type_is_not_exposed(self):

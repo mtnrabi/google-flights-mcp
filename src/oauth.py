@@ -108,6 +108,7 @@ from .oauthstore import (
 )
 from .ratelimit import UNKNOWN_IP
 from .webauth import WebAuthError, sign_payload, verify_payload
+from .widget import ORIGINAL_PATH_SCOPE_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -1578,7 +1579,16 @@ class OAuthResourceGate:
         # Authenticated. Rewrite to the real MCP route and hand the identity
         # to the tool layer through headers it can read from the live
         # request, exactly as it reads a RapidAPI key today.
+        #
+        # The path the CLIENT asked for is stashed first. Anything downstream
+        # that has to reproduce the URL the user connected to -- today that
+        # is the widget's `_meta.ui.domain`, which claude.ai validates
+        # against a hash of exactly that string -- cannot read it off the
+        # request after this line. A connector added on `/mcp/oauth` that
+        # got the `/mcp` hash would render nothing, with no error anywhere
+        # (src/widget_domain.py, and the 2026-09-15 incident it cites).
         scope = dict(scope)
+        scope[ORIGINAL_PATH_SCOPE_KEY] = scope.get("path") or MCP_OAUTH_PATH
         scope["path"] = MCP_PATH
         scope["raw_path"] = MCP_PATH.encode("ascii")
         scope["headers"] = list(scope.get("headers") or []) + [

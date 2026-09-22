@@ -31,6 +31,7 @@ from src.keystore import MemoryKeyStore
 from src.oauth import MCP_OAUTH_PATH
 from src.oauthstore import MemoryOAuthStore
 from src.servercard import SERVER_CARD_PATH
+from src.widget import WIDGET_URI
 
 FLIGHTS_HOST = "google-flights-mcp.flightpowers.com"
 FLIGHTS_ALIAS = "flights.flightpowers.com"
@@ -217,6 +218,19 @@ class TestTheShapeSmitheryDocuments:
         # while listing them would contradict itself.
         assert card["prompts"]
         assert card["capabilities"]["prompts"] == {"listChanged": False}
+        # The flights hostname serves exactly one resource -- the result
+        # card widget (src/widget.py) -- so the capability is declared and
+        # the list names it. This used to assert "no resources at all",
+        # which was true only because there was no UI yet.
+        assert card["capabilities"]["resources"] == {"listChanged": False}
+        assert [r["uri"] for r in card["resources"]] == [WIDGET_URI]
+
+    async def test_the_hotels_card_still_lists_no_resource(self, combined):
+        """The widget is a FLIGHTS surface. A hotels listing advertising a
+        resource its tools never reference would be a reviewer's question
+        with no good answer."""
+        card = (await get_card(combined, HOTELS_HOST)).json()
+        assert card["resources"] == []
         assert "resources" not in card["capabilities"]
 
 

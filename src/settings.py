@@ -89,6 +89,25 @@ def _env_int(name: str, default: int) -> int:
         raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """A yes/no environment switch, tolerant of how ops actually type one.
+
+    "off"/"0"/"false"/"no" are false; "on"/"1"/"true"/"yes" are true;
+    anything else -- including a value set to the empty string, which is
+    how Vercel represents a variable someone cleared -- falls back to the
+    default rather than being guessed at.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = _strip_quotes(raw).strip().lower()
+    if value in ("0", "off", "false", "no"):
+        return False
+    if value in ("1", "on", "true", "yes"):
+        return True
+    return default
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -219,6 +238,16 @@ class Settings:
     #: public allowance. Two switches, two decisions, neither implying the
     #: other.
     trial_rapidapi_key: str = ""
+
+    # ── the flights result card (src/widget.py) ──────────────────────────
+    # Whether the two flights tools advertise an MCP Apps UI resource. ON by
+    # default: a host that cannot render UI ignores the `_meta` key entirely
+    # and gets exactly the JSON it got before, so there is nothing for the
+    # default to protect against. It is a switch rather than a constant
+    # because the failure mode on a host that renders it BADLY is visible to
+    # a paying customer, and `MCP_FLIGHTS_WIDGET=off` plus a redeploy is a
+    # faster rollback than a revert. Never touches the hotels tools.
+    flights_widget_enabled: bool = True
 
     @property
     def trial_enabled(self) -> bool:
@@ -427,4 +456,5 @@ def load_settings(products: str | None = None) -> Settings:
         # must never be able to turn itself on from a variable that was set
         # for a different reason.
         trial_rapidapi_key=_env_str("PAID_TRIAL_RAPIDAPI_KEY", ""),
+        flights_widget_enabled=_env_flag("MCP_FLIGHTS_WIDGET", True),
     )

@@ -27,6 +27,13 @@
       "_meta": {
         "fastmcp": {
           "tags": []
+        },
+        "openai/outputTemplate": "ui://flightpowers/flights-card.html",
+        "ui": {
+          "resourceUri": "ui://flightpowers/flights-card.html",
+          "visibility": [
+            "model"
+          ]
         }
       },
       "annotations": {
@@ -474,6 +481,13 @@
       "_meta": {
         "fastmcp": {
           "tags": []
+        },
+        "openai/outputTemplate": "ui://flightpowers/flights-card.html",
+        "ui": {
+          "resourceUri": "ui://flightpowers/flights-card.html",
+          "visibility": [
+            "model"
+          ]
         }
       },
       "annotations": {

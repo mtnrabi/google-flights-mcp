@@ -8,6 +8,10 @@ Same search engine as the free server; three deliberate differences.
   Anthropic's connector directory policy and OpenAI's app guidelines prohibit
   advertising and sponsored content in tool results, so the free server can
   never be listed there and this one can. Do not add an ad to this package.
+  The flights result card (src/widget.py) is the one UI surface here and it
+  is hand-rolled for exactly that reason: it draws the caller's own fares and
+  nothing else, it loads no third-party origin, and it is not the free
+  server's Lulu widget with the strip taken off.
 
 * **The caller pays.** Every upstream request is billed to the caller's own
   RapidAPI subscription, so the key arrives per request (credentials.py) and
@@ -124,6 +128,14 @@ from .output_schema import (
     FLIGHTS_OUTPUT_SCHEMA,
     HOTELS_OUTPUT_SCHEMA,
 )
+from .widget import (
+    FLIGHTS_WIDGET_HTML,
+    WIDGET_MIME_TYPE,
+    WIDGET_URI,
+    canonical_connector_url,
+    claude_apps_domain,
+)
+from .widget_domain import HostWidgetDomainMiddleware
 from . import providers as ota
 from .providers import (
     BOOKING,
@@ -2300,10 +2312,89 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             is_error=is_degraded,
         )
 
+    # ── the flights result card (MCP Apps UI) ────────────────────────────
+    # A host that renders MCP UI (claude.ai, ChatGPT) draws the fares as a
+    # card: the table, Google's price band with the verdict and the cheapest
+    # fare marked on it, a Book button per row. See src/widget.py -- it is
+    # hand-rolled, carries NO ad and makes no network request, because both
+    # paid listings are directory-listed and an ad-carrying server can never
+    # be (Anthropic Directory Policy 4.C, the MCP registry ToS).
+    #
+    # Everything here is additive metadata. The tool RESULTS are untouched:
+    # no field is added to the payload and no schema moves, so Cursor, Claude
+    # Code, curl, Smithery and every script see exactly the JSON and the text
+    # block they saw before, and a host that does not know `_meta.ui` ignores
+    # it. Hotels tools get none of it.
+    #
+    # Registered only where the flights tools survive the product pruning
+    # below: a UI resource on the hotels hostname would be an orphan pointing
+    # at tools that deployment does not have.
+    flights_ui: dict[str, Any] = {}
+    if settings.flights_widget_enabled and settings.products in ("flights", "both"):
+        try:
+            from fastmcp.apps.config import AppConfig, ResourceCSP
+
+            # The widget talks to nobody. Declaring empty CSP lists says so
+            # explicitly on both hosts (MCP Apps reads it off `app=`,
+            # ChatGPT off the resource's `openai/widgetCSP` meta key)
+            # instead of leaning on a host default that could widen.
+            _widget_csp: dict[str, Any] = {"resource_domains": [], "connect_domains": []}
+
+            # The domain baked in here is right for the canonical URL only.
+            # This deployment answers on several hostnames, and claude.ai
+            # validates the domain against a hash of the URL the user
+            # connected to -- so HostWidgetDomainMiddleware rewrites it per
+            # request. See src/widget_domain.py for the 2026-09-15 incident
+            # that rule comes from.
+            @mcp.resource(
+                WIDGET_URI,
+                name="flights_result_card",
+                mime_type=WIDGET_MIME_TYPE,
+                app=AppConfig(
+                    domain=claude_apps_domain(
+                        canonical_connector_url(settings.public_url)
+                    ),
+                    csp=ResourceCSP(**_widget_csp),
+                ),
+                meta={"openai/widgetCSP": _widget_csp},
+            )
+            def _flights_widget_resource() -> str:
+                return FLIGHTS_WIDGET_HTML
+
+            flights_ui = {
+                "app": AppConfig(resource_uri=WIDGET_URI, visibility=["model"]),
+                "meta": {"openai/outputTemplate": WIDGET_URI},
+            }
+            # Last, so it is only in the chain when there is a resource for
+            # it to rewrite. It is the half that makes the domain right per
+            # hostname; the resource without it is a card that renders for
+            # one hostname's users and silently not for the other's.
+            mcp.add_middleware(HostWidgetDomainMiddleware(settings.public_url))
+        except Exception as exc:  # noqa: BLE001 - a card must never break search
+            flights_ui = {}
+            # Take the resource back out. If the failure happened AFTER the
+            # registration -- building the tool AppConfig, adding the
+            # middleware -- leaving it behind would publish a UI resource
+            # that no tool points at and whose domain nothing rewrites: a
+            # stale hash on one of the two hostnames, which is the exact
+            # silent failure this feature is built to avoid, plus a
+            # resource on a directory-reviewed listing with no reason to
+            # be there. The removal itself must not raise either.
+            try:
+                mcp.local_provider.remove_resource(WIDGET_URI)
+            except Exception:  # noqa: BLE001 - nothing was registered, fine
+                pass
+            logger.error(
+                "the flights result card did not register (%s); searches are "
+                "unaffected and answer as plain JSON",
+                exc,
+            )
+
     # ── tools ────────────────────────────────────────────────────────────
 
     @mcp.tool(
         name="search_oneway_flights",
+        **flights_ui,
         # Declared, not inferred: see src/output_schema.py.
         output_schema=FLIGHTS_OUTPUT_SCHEMA,
         title="FlightPowers: search one-way flights",
@@ -2455,6 +2546,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(
         name="search_roundtrip_flights",
+        **flights_ui,
         # Declared, not inferred: see src/output_schema.py.
         output_schema=FLIGHTS_OUTPUT_SCHEMA,
         title="FlightPowers: search round-trip flights",
