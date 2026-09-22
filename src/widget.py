@@ -40,6 +40,29 @@ carries its destination code, and the band says which route it belongs
 to -- Google tracks each route separately, so the band drawn is the one
 belonging to the route that holds the cheapest fare.
 
+The rows it is fed
+------------------
+Since 2026-09-22 the tool result carries COMPACT rows (src/compact.py):
+the fields this card draws, and no others. That is not a cosmetic change
+to the API -- claude.ai refused to inject a 279-combination result at all,
+wrote it to a file, and this card, which is fed from the injected result,
+sat on "Loading fares…" for ever while the text answer came out fine.
+
+So the field list below is a contract in both directions: a field this
+module reads has to be in `ONEWAY_FIELDS` or `ROUNDTRIP_FIELDS` over
+there, and a field dropped there must not be read here without a
+fallback. What is read: `to_airport`, `departure_date`, `return_date`,
+`price` / `total_price` and their `_as_number` twins, `airline` or the
+two `*_flight_airline`s, `stops` / `total_stops`, `duration` or the two
+`*_flight_duration`s, `departure_description` and the two
+`*_flight_departure_description`s, the three `price_insights_*` /
+`price_range_in_relation_to_other_periods` band fields, and `buy_link`.
+`arrival_description` is read with a fallback and is no longer sent --
+the Duration column answers the same question in a tenth of the bytes.
+`tests/test_widget_render.py::TestTheCardReadsTheCompactRows` renders the
+card from the real compaction of the real fixture, so a keep-list edit
+that empties a column fails there rather than in a chat.
+
 The look: ours, not Google's
 ----------------------------
 Matan, 2026-09-22, on the version before this one: *"widget UI is WAYYYY
@@ -635,10 +658,17 @@ _FRAME_SOURCE = r"""<!doctype html>
     if (n === 0) return "nonstop";
     return n === 1 ? "1 stop" : n + " stops";
   }
+  /* `nights` and `return_date` are in the list because a compact row can
+     arrive without either leg description -- the server drops the fields
+     nothing here draws (src/compact.py), and a round trip whose two legs
+     both lost their description would otherwise render as a one-way table
+     with an empty Depart column. */
   function isRoundTrip(rows) {
     for (var i = 0; i < rows.length; i++) {
       var r = rows[i];
-      if (r && (r.total_price != null || r.departure_flight_departure_description != null
+      if (r && (r.total_price != null || r.total_price_as_number != null
+                || r.nights != null || r.return_date != null
+                || r.departure_flight_departure_description != null
                 || r.return_flight_departure_description != null)) return true;
     }
     return false;
@@ -874,6 +904,10 @@ _FRAME_SOURCE = r"""<!doctype html>
         tr.appendChild(cell("Airline", out, (back && back !== out) ? "back: " + back : ""));
         tr.appendChild(cell("Stops", stopsText(r.total_stops)));
       } else {
+        /* The "arrives ..." sub-line is drawn when the row carries an
+           arrival description. Compact rows do not (the Duration column
+           already answers the question it answered, in fewer bytes), so on
+           those this is one line, which is what the layout fixtures pin. */
         tr.appendChild(cell("Depart", txt(r.departure_description) || txt(r.departure_date),
                             txt(r.arrival_description) ? "arrives " + txt(r.arrival_description) : "",
                             "fp-when"));

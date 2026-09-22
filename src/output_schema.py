@@ -109,6 +109,29 @@ _RESULT_ROWS: dict[str, Any] = {
     "items": {"type": "object", "additionalProperties": True},
 }
 
+#: The flights version. Kept separate from `_RESULT_ROWS` because the hotels
+#: tools share that object and a compaction note in their schema would
+#: describe something their rows do not do.
+_FLIGHT_RESULT_ROWS: dict[str, Any] = {
+    **_RESULT_ROWS,
+    "description": (
+        "The fares found, already sorted and deduplicated. An empty array is "
+        "only meaningful when search_status is 'empty'.\n\n"
+        "This is the TOP results_returned of results_total rows by the sort "
+        "you asked for -- cheapest first by default, shortest first on "
+        "sort_by 'duration' -- with every destination that has fares still "
+        "represented. Each row is in "
+        "a compact shape: destination, the date or dates, trip length in "
+        "nights on a round trip, airline (both legs on a round trip), stops, "
+        "duration, the price as a string and a number, Google's price band "
+        "with its verdict, and the booking link. The origin is on the "
+        "response as from_airport rather than repeated on every row. Arrival "
+        "descriptions, per-leg stop counts, raw stop details and the duration "
+        "in seconds are dropped; `verbose: true` returns them, and every row "
+        "that was selected, on that call."
+    ),
+}
+
 # Every response that reached the upstream carries this, because the money is
 # the caller's. Declared field by field so a client can bill against it
 # rather than parse the sentence in `note`.
@@ -236,15 +259,31 @@ _BY_DESTINATION: dict[str, Any] = {
         "the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\n"
         "Read this rather than inferring coverage from `results`: a "
         "destination missing from `results` looks identical to one that has "
-        "no flights, and they are not the same answer. `rows` are the same "
-        "row objects that are in `results`, in the same order -- nothing here "
-        "is data the answer does not already contain."
+        "no flights, and they are not the same answer. `row_count` is how "
+        "many of this destination's fares were selected; the fares "
+        "themselves are in `results` and are not repeated here. `verbose: "
+        "true` restores the `rows` array for callers that read it."
     ),
     "additionalProperties": {
         "type": "object",
         "properties": {
+            "row_count": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "How many of this destination's fares were selected. "
+                        "Not all of them are necessarily in `results`: a wide "
+                    "search returns the top results_returned of "
+                    "results_total overall, and `cheapest` below is this "
+                    "destination's own best fare either way."
+                ),
+            },
             "rows": {
                 "type": "array",
+                "description": (
+                    "Only on `verbose: true`: this destination's selected "
+                    "rows, the same objects that are in `results`."
+                ),
                 "items": {"type": "object", "additionalProperties": True},
             },
             # `anyOf` with one type per branch, not `"type": ["object",
@@ -298,7 +337,12 @@ _BY_DESTINATION: dict[str, Any] = {
                 },
             },
         },
-        "required": ["rows", "searched", "reason"],
+        # `row_count`, not `rows`: the rows themselves are in `results` and a
+        # compact response does not repeat them here. Both keys are declared
+        # above and either may be present -- `rows` only on `verbose: true` --
+        # so requiring `rows` would make the shipped default violate the
+        # schema the server declares.
+        "required": ["row_count", "searched", "reason"],
         "additionalProperties": True,
     },
 }
@@ -312,8 +356,42 @@ FLIGHTS_OUTPUT_SCHEMA: dict[str, Any] = {
         "an empty array means 'no flights' only when search_status is 'empty'."
     ),
     "properties": {
-        "results": _RESULT_ROWS,
-        "result_count": {"type": "integer", "minimum": 0},
+        "results": _FLIGHT_RESULT_ROWS,
+        "result_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many rows are in `results`; same as results_returned.",
+        },
+        "results_total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "How many fares the search selected across every searched "
+                "combination, before any row bound. Equal to results_returned "
+                "unless the server bounded a response it had widened itself."
+            ),
+        },
+        "results_returned": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "How many of them are in `results` -- the best ones by the "
+                "sort_by asked for, cheapest first by default, and never all "
+                "of one destination at the expense of another. "
+                "Lower than results_total only when `limit` was raised by the "
+                "server to cover the fan-out rather than asked for; "
+                "search_coverage.note says so when it happens, and `verbose: "
+                "true` returns them all."
+            ),
+        },
+        "from_airport": {
+            "type": "string",
+            "description": (
+                "The origin, as the upstream renders it ('Tel Aviv (TLV)'). "
+                "One origin per search, so it is on the response rather than "
+                "repeated on every row."
+            ),
+        },
         "by_destination": _BY_DESTINATION,
         "search_status": {
             "type": "string",

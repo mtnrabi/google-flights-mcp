@@ -602,12 +602,38 @@ class TestNothingChangesForANonUIClient:
         """The free server injects `book_label` and `widget_eyebrow` into
         the payload for its mapping-driven widget. This one computes both
         in JavaScript instead, precisely so the API surface does not
-        move."""
+        move.
+
+        A compact row is a SUBSET of the upstream row and never a superset:
+        the fields the card does not draw are dropped (src/compact.py) and
+        nothing is added. `verbose: true` gets the upstream row back
+        untouched, which is the assertion below that pins the "no injected
+        field" promise against the full shape.
+        """
         result = await self._search()
         row = result.structured_content["results"][0]
-        assert set(row) == set(ONEWAY_ROW), "the widget changed a result row"
+        assert set(row) <= set(ONEWAY_ROW), "the widget added a result field"
+        assert set(row) == set(ONEWAY_ROW) - {"duration_seconds", "arrival_description"}
         for banned in ("book_label", "widget_eyebrow", "sponsored", "_meta"):
             assert banned not in result.structured_content
+
+    async def test_verbose_returns_the_upstream_row_untouched(self):
+        result = await self._search_verbose()
+        row = result.structured_content["results"][0]
+        assert row == ONEWAY_ROW
+
+    async def _search_verbose(self):
+        mcp = build_with_upstream(self._upstream)
+        async with Client(mcp) as client:
+            return await client.call_tool(
+                "search_oneway_flights",
+                {
+                    "from_airport": "TLV",
+                    "to_airport": "BUD",
+                    "departure_date": "2026-09-20",
+                    "verbose": True,
+                },
+            )
 
     async def test_the_result_carries_no_ui_meta(self):
         result = await self._search()

@@ -57,6 +57,46 @@ from .trial import DEFAULT_DAY_CAP as DEFAULT_TRIAL_DAY_CAP
 # `resolve_cap` -- because raising the spend is only ours to decide when the
 # money is the caller's.
 DEFAULT_MAX_SEARCHES = 30
+
+#: How many rows a flights response carries when the server raised `limit`
+#: itself to cover the fan-out (`_auto_limit`). A 279-combination search
+#: raises `limit` to 279 so that no searched combination is silently dropped
+#: -- and 279 full rows are ~1.2MB of JSON, which claude.ai refuses to inject
+#: into the conversation at all (it writes the result to a file and the
+#: MCP-UI card never gets its data; see src/compact.py). 60 is four times the
+#: dozen rows a person reads and ~47KB of compact JSON, sixteen times under
+#: the smallest result measured to still render. It bounds only the rows the
+#: caller did NOT ask for: an explicit `limit: 200` is answered with 200, and
+#: `verbose: true` turns the bound off for that call.
+#:
+#: 0 disables the BOUND AND the row compaction together -- the rollback
+#: switch: one env var and a redeploy and a response is byte-for-byte the
+#: shape it had before 2026-09-22. They share a switch because a rollback
+#: that put the row count back but not the fields would be half a rollback.
+DEFAULT_RESULT_ROWS_MAX = 60
+
+#: The serialized-JSON text block that mirrors `structuredContent` is a
+#: backwards-compatibility duplicate the MCP spec asks for ("a tool that
+#: returns structured content SHOULD also return the serialized JSON in a
+#: TextContent block"), and for a small result it is worth its bytes. For a
+#: large one it doubles the size of the thing that was already too large, so
+#: past this many bytes it is replaced by a one-paragraph summary that names
+#: the cheapest fares and points at `structuredContent`. Every result under
+#: the bound is byte-for-byte what it was before.
+#:
+#: 48,000 is a SIZE, and nothing else: which branch produced the response
+#: has no bearing on it. A bounded response usually crosses it (60 compact
+#: round-trip rows are ~47KB of JSON before the coverage blocks) and an
+#: unbounded one usually does not, but both go either way -- 60 rows of a
+#: one-way search with short booking links measured 31KB and kept the
+#: mirror, and an explicit `limit: 200`, which is never bounded, crosses it
+#: easily. The number is chosen so the worst case on each side is about the
+#: same size of tool result: measured, a 30-combination search is 26.5KB
+#: mirrored to 53KB and a 93-combination one is 52.2KB with a 460-byte
+#: summary.
+#:
+#: 0 disables the summary and always mirrors, whatever the size.
+DEFAULT_TEXT_MIRROR_MAX_BYTES = 48_000
 AUTO_MAX_SEARCHES = 300
 HARD_MAX_SEARCHES = 300
 
@@ -352,6 +392,16 @@ class Settings:
     # faster rollback than a revert. Never touches the hotels tools.
     flights_widget_enabled: bool = True
 
+    #: How many rows a response may carry when `limit` was raised by the
+    #: server rather than asked for. See DEFAULT_RESULT_ROWS_MAX; 0 is off.
+    #: Defaulted so a Settings built by hand (tests, scripts) gets the
+    #: shipped behaviour rather than an unbounded response.
+    result_rows_max: int = DEFAULT_RESULT_ROWS_MAX
+    #: Above this many bytes of serialized payload the JSON text mirror is
+    #: replaced by a one-paragraph summary. See
+    #: DEFAULT_TEXT_MIRROR_MAX_BYTES; 0 always mirrors.
+    text_mirror_max_bytes: int = DEFAULT_TEXT_MIRROR_MAX_BYTES
+
     @property
     def trial_enabled(self) -> bool:
         """Whether the allowance can serve anyone on this deployment.
@@ -580,6 +630,10 @@ def load_settings(products: str | None = None) -> Settings:
         log_path=_env_str("LOG_PATH", ""),
         # Matches TOP_N_RESULTS_PER_COMBINATION in backend/src/constants.py:25.
         default_result_limit=_env_int("DEFAULT_RESULT_LIMIT", 10),
+        result_rows_max=max(_env_int("RESULT_ROWS_MAX", DEFAULT_RESULT_ROWS_MAX), 0),
+        text_mirror_max_bytes=max(
+            _env_int("TEXT_MIRROR_MAX_BYTES", DEFAULT_TEXT_MIRROR_MAX_BYTES), 0
+        ),
         signup_url=_scoped_env_str(
             "SIGNUP_URL", products, DEFAULT_SIGNUP_URLS[products]
         ),

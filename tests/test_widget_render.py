@@ -48,6 +48,7 @@ import tempfile
 
 import pytest
 
+from src.compact import compact_rows
 from src.widget import FLIGHTS_WIDGET_HTML
 
 CHROME_CANDIDATES = (
@@ -1460,3 +1461,71 @@ class TestARefusalThatStillHasFares:
         assert refusal_with_fares["pills"] == 0
         assert refusal_with_fares["cardHeight"] <= 780
         assert refusal_with_fares["hscroll"] == 0
+
+
+#: The shape the server actually sends since src/compact.py: the same live
+#: strings as LIVE_SHAPE, with the fields the card does not draw removed, the
+#: origin hoisted off the rows, `nights` added and the row count bounded.
+#: Built by running the real compaction over the real fixture rather than by
+#: hand -- a hand-written "compact" fixture would pass for ever after the
+#: keep-list changed underneath it.
+COMPACT_SHAPE = {
+    **{k: v for k, v in LIVE_SHAPE.items() if k != "results"},
+    "results": compact_rows(LIVE_SHAPE["results"][:60], True),
+    "results_total": len(LIVE_SHAPE["results"]),
+    "results_returned": min(60, len(LIVE_SHAPE["results"])),
+    "result_count": min(60, len(LIVE_SHAPE["results"])),
+    "from_airport": "Tel Aviv (TLV)",
+}
+
+
+@pytest.fixture(scope="module")
+def compact_760():
+    return _run_page(
+        _chrome_or_skip(),
+        LAYOUT_PROBE.replace("__PAYLOAD__", _inline(COMPACT_SHAPE)),
+        width=760,
+    )
+
+
+@pytest.fixture(scope="module")
+def compact_560():
+    return _run_page(
+        _chrome_or_skip(),
+        LAYOUT_PROBE.replace("__PAYLOAD__", _inline(COMPACT_SHAPE)),
+        width=560,
+    )
+
+
+class TestTheCardReadsTheCompactRows:
+    """The card is fed by the tool result, so the tool result getting
+    smaller is a change to its input. Everything the card draws has to
+    survive the trim -- this is the test that would have caught a keep-list
+    that dropped, say, `return_flight_airline`."""
+
+    def test_it_still_draws_five_rows_and_a_show_more(self, compact_760):
+        assert compact_760["s0"]["rows"] == 5
+        assert compact_760["s0"]["moreBtn"] is not None
+
+    def test_the_round_trip_columns_are_still_the_round_trip_columns(
+        self, compact_760
+    ):
+        assert compact_760["headers"] == [
+            "Outbound", "Return", "To", "Airline", "Stops", "Total", "Book",
+        ]
+
+    def test_the_price_band_still_draws(self, compact_760):
+        assert compact_760["band"] is not None
+
+    def test_the_destination_pills_still_group(self, compact_760):
+        assert [p["text"] for p in compact_760["pills"]][0].startswith("All")
+        assert compact_760["dests"][:1] != [""]
+
+    def test_it_never_scrolls_sideways_at_either_width(
+        self, compact_760, compact_560
+    ):
+        assert compact_760["s0"]["hscroll"] == 0
+        assert compact_760["s0"]["vscroll"] == 0
+        assert compact_560["s0"]["hscroll"] == 0
+        assert compact_560["s0"]["vscroll"] == 0
+        assert compact_560["s0"]["rows"] == 5

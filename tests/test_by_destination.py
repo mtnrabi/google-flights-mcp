@@ -93,8 +93,26 @@ class TestTheFixedShape:
         assert lisbon["cheapest"]["price_as_number"] == BASE_PRICE["LIS"]
 
     @pytest.mark.asyncio
-    async def test_entry_rows_are_the_rows_in_results(self):
+    async def test_entry_counts_add_up_to_the_rows_in_results(self):
+        """`rows` is gone from the compact shape; `row_count` replaced it.
+
+        The rows themselves are in `results` and were never a second set of
+        data -- repeating them per destination was a byte-for-byte duplicate
+        of the whole answer (and, on a `nights` fan-out, three of them). What
+        has to stay true is the arithmetic: the counts still partition
+        `results`.
+        """
         data = await call(build(), "search_oneway_flights", **ONEWAY_ARGS, limit=4)
+
+        counts = [entry["row_count"] for entry in data["by_destination"].values()]
+        assert sum(counts) == data["result_count"] == data["results_returned"]
+        assert "rows" not in data["by_destination"]["LIS"]
+
+    @pytest.mark.asyncio
+    async def test_verbose_puts_the_rows_back(self):
+        data = await call(
+            build(), "search_oneway_flights", **ONEWAY_ARGS, limit=4, verbose=True
+        )
 
         regrouped = [
             row for entry in data["by_destination"].values() for row in entry["rows"]
@@ -106,11 +124,27 @@ class TestTheFixedShape:
 
     @pytest.mark.asyncio
     async def test_cheapest_is_the_cheapest_of_that_destination(self):
-        data = await call(build(), "search_oneway_flights", **ONEWAY_ARGS, limit=60)
+        data = await call(
+            build(), "search_oneway_flights", **ONEWAY_ARGS, limit=60, verbose=True
+        )
 
         for dest, entry in data["by_destination"].items():
             prices = [row["price_as_number"] for row in entry["rows"]]
             assert entry["cheapest"]["price_as_number"] == min(prices) == BASE_PRICE[dest]
+
+    @pytest.mark.asyncio
+    async def test_a_destinations_cheapest_survives_the_row_bound(self):
+        """The bound trims `results`, never `by_destination`.
+
+        Lisbon is ten times the price of everything else here, so a bound on
+        `results` is exactly what would drop it -- and "which destination is
+        cheapest" is the question this block exists to answer honestly.
+        """
+        data = await call(build(), "search_oneway_flights", **ONEWAY_ARGS, limit=4)
+
+        lisbon = data["by_destination"]["LIS"]
+        assert lisbon["cheapest"]["price_as_number"] == BASE_PRICE["LIS"]
+        assert lisbon["row_count"] >= 1
 
     @pytest.mark.asyncio
     async def test_roundtrip_answers_in_the_same_shape(self):
@@ -137,7 +171,7 @@ class TestTheHoles:
         )
 
         lisbon = data["by_destination"]["LIS"]
-        assert lisbon["rows"] == []
+        assert lisbon["row_count"] == 0
         assert lisbon["cheapest"] is None
         assert lisbon["searched"] is True
         assert lisbon["reason"] == "no_flights"
@@ -149,7 +183,7 @@ class TestTheHoles:
         )
 
         athens = data["by_destination"]["ATH"]
-        assert athens["rows"] == []
+        assert athens["row_count"] == 0
         assert athens["searched"] is True
         assert athens["reason"] == "search_failed"
 
@@ -179,7 +213,7 @@ class TestTheHoles:
         assert never, "the cap dropped whole destinations and the shape shows it"
         for dest in never:
             assert by_dest[dest]["searched"] is False
-            assert by_dest[dest]["rows"] == []
+            assert by_dest[dest]["row_count"] == 0
         assert data["search_coverage"]["truncated"] is True
 
 

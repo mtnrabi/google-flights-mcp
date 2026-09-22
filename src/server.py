@@ -146,6 +146,14 @@ from .providers import (
 )
 from .prompts import register_prompts
 from .schema_docs import document_params
+from .compact import (
+    bound_rows,
+    compact_row,
+    compact_rows,
+    ensure_counts,
+    hoisted,
+    summary_text,
+)
 from .pacing import bucket_for
 from .quota_gate import (
     QUOTA_EXCEEDED,
@@ -309,6 +317,18 @@ _FLIGHTS_BODY = (
     "number, and a `buy_link` to book it. `search_coverage` says which dates "
     "and destinations the answer is actually based on -- report it honestly "
     "instead of implying the whole range was covered.\n\n"
+    "A wide search answers with the TOP `results_returned` of "
+    "`results_total` fares found -- by the `sort_by` you asked for, "
+    "cheapest first by default, and never all of one destination at the "
+    "expense of another -- each row carrying the dates, the "
+    "destination, trip length in nights, airline, stops, duration, price and "
+    "the booking link. Say which of the two numbers you are summarising. "
+    "`by_destination` names every requested destination's own cheapest fare "
+    "whether or not it fits in `results`, so use it for 'which destination "
+    "is cheapest' rather than scanning the rows. `verbose: true` returns "
+    "every selected row and every upstream field, which on a month-wide "
+    "search is a megabyte of JSON some hosts will not accept -- ask for it "
+    "only when a dropped field is what the question needs.\n\n"
     "Fan-out is capped at {cap} date/destination combinations per call, and "
     "the cap RISES BY ITSELF, up to {auto_max}, when the question is bigger "
     "than that -- a whole month of departures at three trip lengths is 93 "
@@ -1034,6 +1054,20 @@ def _effective_limit(limit: int, combinations: int) -> tuple[int, str | None]:
     return raised, note
 
 
+def _sort_phrase(sort_by: str) -> str:
+    """How to say `sort_by` in a sentence a model relays to a person.
+
+    Written out rather than saying "cheapest" everywhere: on
+    `sort_by: "duration"` the rows that survive the bound are the SHORTEST,
+    and a note that calls them the cheapest is telling the caller something
+    untrue about the answer in front of them.
+    """
+    return {
+        "price": "price (cheapest first)",
+        "duration": "duration (shortest first)",
+    }.get((sort_by or "").strip().lower(), "your sort_by, best first")
+
+
 def _row_price(row: dict[str, Any]) -> float | None:
     """The fare on a row, one-way or round-trip, or None."""
     for field_name in ("price_as_number", "total_price_as_number"):
@@ -1148,7 +1182,14 @@ def _by_destination(
 
     out: dict[str, dict[str, Any]] = {}
     for destination in plan.requested_destinations:
-        keys = [key for key in requested_keys if key[0] == destination]
+        # De-duplicated, and that is a bug fix, not tidying. `_combo_key` is
+        # (destination, departure_date), so a `nights` fan-out produces one
+        # requested combination per trip LENGTH under the same key: three
+        # nights values put the same key in this list three times, and the
+        # comprehension below walks `selected[key]` once per copy. A measured
+        # 93-row answer came back with 279 rows in `by_destination` -- every
+        # row three times, ~300KB of duplicate JSON on one call.
+        keys = list(dict.fromkeys(key for key in requested_keys if key[0] == destination))
         dest_rows = [
             row
             for _position, row in sorted(
@@ -1157,6 +1198,11 @@ def _by_destination(
         ]
         searched, reason = reason_for(keys, len(dest_rows))
         entry: dict[str, Any] = {
+            # Always, `verbose` or not: `rows` is dropped from a compact
+            # response (it is a second copy of `results`, split by
+            # destination) and a count that only exists on one of the two
+            # shapes is a key a client has to branch on.
+            "row_count": len(dest_rows),
             "rows": dest_rows,
             "cheapest": _cheapest_row(dest_rows),
             "searched": searched,
@@ -1185,6 +1231,82 @@ def _by_destination(
             entry["dates"] = per_date
         out[destination] = entry
     return out
+
+
+def _compact_flights(
+    response: dict[str, Any],
+    *,
+    verbose: bool,
+    enabled: bool,
+    rows_max: int,
+    roundtrip: bool,
+    sort_by: str,
+) -> None:
+    """Shrink a built flights response in place so a host can inject it.
+
+    Three edits, in this order:
+
+    1. `results_total` / `results_returned` go on every response, capped or
+       not, because "60 rows" and "60 of 279 rows" are different answers and
+       a model should never have to infer which one it is holding.
+    2. When `rows_max` is positive and there are more rows than that, the
+       top `rows_max` BY THE CALLER'S OWN `sort_by` survive -- cheapest on
+       the default, shortest on `sort_by: "duration"` -- with every
+       destination still represented (see `bound_rows`, and why a head slice
+       off the sorted list is not good enough). `results` is already in that
+       order (`_select_rows_by_combo`), so nothing is re-sorted here.
+       `by_destination` is built BEFORE this runs
+       and is left alone: its `cheapest` and its per-date coverage still
+       describe every combination that was searched and billed, which is the
+       whole point of that block -- a destination trimmed out of `results`
+       still has its own cheapest fare named.
+    3. Every surviving row loses the fields nothing reads (src/compact.py),
+       the row constants are hoisted onto the response, and
+       `by_destination[*].rows` -- which was a second, duplicate copy of
+       `results` split by destination -- becomes `row_count`. The rows
+       themselves are in `results`; they were never a second set of data.
+
+    `verbose: true` skips all of 2 and 3 and leaves the response exactly as
+    it was before this function existed, `results_total` aside. So does
+    `enabled=False`, which is `RESULT_ROWS_MAX=0` -- one env var and a
+    redeploy puts the whole row shape back, which is why the bound and the
+    compaction share a switch rather than having one each. `rows_max=0` with
+    `enabled=True` is the different case: the caller asked for their own
+    `limit`, so the rows are all theirs and only the fat comes off.
+    """
+    rows = response.get("results")
+    if not isinstance(rows, list):
+        return
+    response["results_total"] = len(rows)
+    if verbose or not enabled:
+        response["results_returned"] = len(rows)
+        return
+
+    kept = bound_rows(rows, rows_max)
+    if len(kept) < len(rows):
+        _append_coverage_note(
+            response.setdefault("search_coverage", {}),
+            f"{len(rows)} fares were found and the top {len(kept)} by "
+            f"{_sort_phrase(sort_by)} are in `results` (results_total says "
+            "how many there were), with every destination still represented. "
+            "Every destination's own cheapest fare is in `by_destination` "
+            "whether or not it fit. Pass `verbose: true` for the full list "
+            "and the full row shape.",
+        )
+    response.update(hoisted(rows))
+    response["results"] = compact_rows(kept, roundtrip)
+    response["results_returned"] = len(kept)
+    response["result_count"] = len(kept)
+
+    by_destination = response.get("by_destination")
+    if isinstance(by_destination, dict):
+        for entry in by_destination.values():
+            if not isinstance(entry, dict):
+                continue
+            entry.pop("rows", None)
+            cheapest = entry.get("cheapest")
+            if isinstance(cheapest, dict):
+                entry["cheapest"] = compact_row(cheapest, roundtrip)
 
 
 # ── hotel stays ──────────────────────────────────────────────────────────
@@ -1544,6 +1666,19 @@ def _usage_block(
 # both wrong values cost something real. `false` opts the caller out of the
 # backend's last-resort retry; `true` runs the fallback client inline on every
 # attempt, which is the path that hangs until the gateway cuts it off.
+VERBOSE_DESCRIPTION = (
+    "Return every field the upstream sends on each fare, and every fare that "
+    "was selected, with no row bound. Off by default: a result carries the "
+    "best rows by your sort_by in a compact shape (dates, destination, "
+    "airline, stops, "
+    "duration, price, trip length and the booking link), because a wide "
+    "search over a month and several destinations otherwise produces a "
+    "megabyte of JSON that some hosts refuse to put in the conversation at "
+    "all. Turn it on when you need the arrival times, the per-leg stop "
+    "counts, the raw stop details or more rows than results_returned; "
+    "results_total always says how many there were."
+)
+
 USE_FALLBACK_DESCRIPTION = (
     "Leave unset. Switches the search to a second, independent flight data "
     "source instead of the usual Google Flights page read. Unset already "
@@ -2007,6 +2142,41 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         sort_by: str,
         limit: int,
         max_searches: int | None,
+        verbose: bool = False,
+    ) -> dict[str, Any] | ToolResult:
+        """`_run_search`, with the two counters guaranteed on every exit.
+
+        `_run_search` has a dozen early returns that are not searches at all
+        -- no key, a disconnected key, a plan out of requests, the quota gate
+        refusing a fan-out it cannot cover -- and each of them answers with a
+        `results` array, which the gate's refusal can even fill with the
+        fares from the one probe request it spent. `results_total` and
+        `results_returned` are declared on the tool's output schema, so a
+        client that reads them has to find them on those replies too, and
+        their rows get the same compact shape as a search's. See
+        `ensure_counts`: it fills gaps only, so the completed-search path
+        keeps the pre-bound `results_total` it set itself.
+        """
+        outcome = await _run_search(
+            tool_name, plan_builder, payload_builder, sort_by, limit,
+            max_searches, verbose,
+        )
+        if isinstance(outcome, dict):
+            ensure_counts(
+                outcome,
+                roundtrip=tool_name == "search_roundtrip_flights",
+                compact=settings.result_rows_max > 0 and not verbose,
+            )
+        return outcome
+
+    async def _run_search(
+        tool_name: str,
+        plan_builder,
+        payload_builder,
+        sort_by: str,
+        limit: int,
+        max_searches: int | None,
+        verbose: bool = False,
     ) -> dict[str, Any] | ToolResult:
         started = time.perf_counter()
         headers, params = _request_context()
@@ -2613,7 +2783,46 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 ),
             )
 
-        if first_line is None:
+        # ── the size of the thing ────────────────────────────────────
+        #
+        # Last, because it needs the finished response: `by_destination` is
+        # built from every selected row and the coverage note is appended to
+        # a block that already exists. See _compact_flights, and
+        # src/compact.py for the measurements that put the bound at 60.
+        _compact_flights(
+            response,
+            verbose=verbose,
+            # Only rows the caller never asked for. `_effective_limit`
+            # returns a note exactly when it raised `limit` itself to cover
+            # the fan-out; an explicit `limit: 200` produces no note and is
+            # answered with 200 rows, as it always was.
+            enabled=settings.result_rows_max > 0,
+            rows_max=settings.result_rows_max if raised_limit_note else 0,
+            sort_by=sort_by,
+            # The tool knows; nothing has to sniff the row for it.
+            roundtrip=tool_name == "search_roundtrip_flights",
+        )
+
+        # The serialized-JSON text block is a duplicate of `structuredContent`
+        # that the spec asks for on backwards-compatibility grounds, and on a
+        # large result it is the difference between a payload a host injects
+        # and one it writes to a file. Under the bound nothing changes, byte
+        # for byte. Over it the duplicate becomes a paragraph that names the
+        # cheapest fares and says where the rest are.
+        payload_json = serialize_payload(response)
+        # Bytes, not characters: the cap is about what a host has to carry,
+        # and one destination name outside ASCII makes those two numbers
+        # different.
+        payload_bytes = len(payload_json.encode())
+        mirror_cap = settings.text_mirror_max_bytes
+        mirrored = mirror_cap <= 0 or payload_bytes <= mirror_cap
+        body_text = (
+            payload_json
+            if mirrored
+            else summary_text(response, omitted_bytes=payload_bytes)
+        )
+
+        if first_line is None and mirrored:
             # `ok` and a genuine `empty` are untouched: one auto-generated
             # text block, byte for byte what they always were. A clean result
             # must not be made to look alarming.
@@ -2622,11 +2831,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # Two blocks, not one string, so the prose can never be mistaken for
         # part of the JSON and the backwards-compatibility duplicate stays a
         # standalone parseable object for callers that read it.
+        blocks = [TextContent(type="text", text=body_text)]
+        if first_line is not None:
+            blocks.insert(0, TextContent(type="text", text=first_line))
         return ToolResult(
-            content=[
-                TextContent(type="text", text=first_line),
-                TextContent(type="text", text=serialize_payload(response)),
-            ],
+            content=blocks,
             structured_content=response,
             is_error=is_degraded,
         )
@@ -2779,6 +2988,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         use_fallback: Annotated[
             bool | None, Field(description=USE_FALLBACK_DESCRIPTION)
         ] = None,
+        verbose: Annotated[bool, Field(description=VERBOSE_DESCRIPTION)] = False,
     ) -> dict[str, Any] | ToolResult:
         """
         Args:
@@ -2813,6 +3023,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 short. Set it lower to spend less of the
                 plan's quota on a wide search, or higher -- to a hard maximum
                 of 300 -- for a grid wider than that.
+            verbose: Full upstream row fields and no row bound. See
+                VERBOSE_DESCRIPTION.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
                 line, is what the model actually sees -- see the note there.
         """
@@ -2867,6 +3079,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             sort_by,
             limit,
             max_searches,
+            verbose,
         )
 
     @mcp.tool(
@@ -2946,6 +3159,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         use_fallback: Annotated[
             bool | None, Field(description=USE_FALLBACK_DESCRIPTION)
         ] = None,
+        verbose: Annotated[bool, Field(description=VERBOSE_DESCRIPTION)] = False,
     ) -> dict[str, Any] | ToolResult:
         """
         Args:
@@ -2980,6 +3194,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 short. Set it lower to spend less of the
                 plan's quota on a wide search, or higher -- to a hard maximum
                 of 300 -- for a grid wider than that.
+            verbose: Full upstream row fields and no row bound. See
+                VERBOSE_DESCRIPTION.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
                 line, is what the model actually sees -- see the note there.
         """
@@ -3034,6 +3250,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             sort_by,
             limit,
             max_searches,
+            verbose,
         )
 
     # ── hotels ───────────────────────────────────────────────────────────
