@@ -201,7 +201,9 @@ def _inline(payload: dict) -> str:
     return json.dumps(payload).replace("</", "<\\/")
 
 
-def _run_page(chrome: str, probe: str, width: int = 800) -> dict:
+def _run_page(
+    chrome: str, probe: str, width: int = 800, light: bool = False
+) -> dict:
     """The real frame plus `probe`, executed, its findings decoded.
 
     `width` is pinned per call: the card has three layouts (block rows
@@ -221,6 +223,11 @@ def _run_page(chrome: str, probe: str, width: int = 800) -> dict:
                 "--disable-gpu",
                 "--no-sandbox",
                 "--virtual-time-budget=6000",
+                *(
+                    ["--force-prefers-color-scheme=light"]
+                    if light
+                    else []
+                ),
                 f"--user-data-dir={tmp}/profile",
                 f"--window-size={width},1400",
                 "--dump-dom",
@@ -297,17 +304,25 @@ class TestTheWidgetUnderAHostilePayload:
         ]
 
 
-# ── the top ten, and the destination pills ──────────────────────────────
+# ── the top five, the Show-more button, and the destination pills ───────
 #
-# Matan, 2026-09-22, looking at the live card: "widget should not be that
-# long: showcase the top 10, scrollable for more" and "the widget should
-# have a button for selecting each destination if multiple were selected,
-# default is all of them".
+# Matan, 2026-09-22, watching a demo clip scroll through a 93-row list:
+# "wtf is that long scroll. limit the presented items to the top 10, and
+# allow the user to tap on a button to view more. also - what about
+# multiple destinations support?" Then, on the ten-row card: "make it top
+# 5, still seems too long."
 #
-# Both are layout behaviour, which is exactly the kind of claim a bytes
-# assertion cannot make: "the code sets maxHeight" is not "ten rows are
-# visible and the eleventh is not". So they are measured here, in a real
-# engine, at a stated width.
+# v2 had answered "showcase the top 10, scrollable for more" by capping the
+# table's HEIGHT and letting the reader scroll inside it. At 93 and 279 rows
+# that is a scroll trap inside a chat message, which is what he was looking
+# at. v3 draws five ROWS, appends five per tap, and has no scroll container
+# and no height ceiling at all -- the card is as tall as what it draws and
+# the HOST scrolls the page.
+#
+# All of that is layout behaviour, which is exactly the kind of claim a
+# bytes assertion cannot make: "the code slices the array" is not "five rows
+# are in the DOM, the sixth is not, and nothing scrolls inside the box".
+# So it is measured here, in a real engine, at a stated width.
 
 _TIMES = [
     "6:05 AM", "7:40 AM", "9:15 AM", "10:50 AM", "12:25 PM", "1:35 PM",
@@ -385,15 +400,26 @@ LAYOUT_PROBE = r"""
   }
   function box() { return document.querySelector(".fp-scroll"); }
   function rows() { return document.querySelectorAll("table.fp-t tbody tr"); }
-  /* Visible means visible: inside the scroll box's own painted area. A
-     row below its bottom edge is one the reader has to scroll to. */
-  function visible() {
-    var b = box().getBoundingClientRect(), rs = rows(), n = 0;
-    for (var i = 0; i < rs.length; i++) {
-      if (rs[i].getBoundingClientRect().bottom > b.bottom + 0.5) break;
-      n++;
-    }
-    return n;
+  function moreBtn() { return document.querySelector(".fp-morebtn"); }
+  function fewBtn() { return document.querySelector(".fp-fewbtn"); }
+  /* Everything that can change when a button is tapped, in one object.
+     `vscroll` is the assertion that matters most in v3: the card must
+     have NO inner vertical scroll at all -- the host scrolls the page. */
+  function snap() {
+    var b = box(), card = document.querySelector(".fp-card");
+    var m = document.querySelector(".fp-more");
+    return {
+      rows: rows().length,
+      more: m ? m.textContent.replace(/\s+/g, " ").trim() : null,
+      moreText: m ? m.querySelector(".fp-more-t").textContent.trim() : null,
+      moreBtn: moreBtn() ? moreBtn().textContent.trim() : null,
+      fewBtn: fewBtn() ? fewBtn().textContent.trim() : null,
+      vscroll: b ? b.scrollHeight - b.clientHeight : 0,
+      hscroll: b ? b.scrollWidth - b.clientWidth : 0,
+      pageScroll: document.documentElement.scrollWidth
+                  - document.documentElement.clientWidth,
+      cardHeight: Math.round(card.getBoundingClientRect().height)
+    };
   }
   function prices() {
     var rs = rows(), o = [];
@@ -439,67 +465,123 @@ LAYOUT_PROBE = r"""
     var t = document.querySelector("tr[data-best='1'] td.fp-num");
     return t ? t.textContent.trim() : null;
   }
-  function more() {
-    var m = document.querySelector(".fp-more");
-    return m ? m.textContent.replace(/\s+/g, " ").trim() : null;
-  }
+  function pill(i) { return document.querySelectorAll("button.fp-pill")[i]; }
+
   window.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
                        params: { structuredContent: __PAYLOAD__ } }, "*");
-  setTimeout(function () {
-    out.width = window.innerWidth;
-    out.pills = pills();
-    out.rows = rows().length;
-    out.visible = visible();
-    out.capped = box().getAttribute("data-capped");
-    out.scrollable = box().scrollHeight > box().clientHeight + 1;
-    out.hscroll = box().scrollWidth - box().clientWidth;
-    out.cardHeight = Math.round(document.querySelector(".fp-card").getBoundingClientRect().height);
-    out.more = more();
-    out.band = band();
-    out.bandLabel = bandLabel();
-    out.bandLine = bandLine();
-    out.bandBar = !!document.querySelector(".fp-bar");
-    out.destTitles = destTitles();
-    out.headers = headers();
-    out.dests = dests();
-    out.badged = badged();
-    out.stickyHead = getComputedStyle(document.querySelector("table.fp-t th")).position;
-    if (out.pills.length > 2) {
-      /* Pill 2 is the second destination -- pill 0 is All. */
-      document.querySelectorAll("button.fp-pill")[2].click();
-      setTimeout(function () {
-        out.f_pressed = pills().map(function (p) { return p.pressed; });
-        out.f_rows = rows().length;
-        out.f_visible = visible();
-        out.f_prices = prices();
-        out.f_band = band();
-        out.f_bandLabel = bandLabel();
-        out.f_bandLine = bandLine();
-        out.f_headers = headers();
-        out.f_dests = dests();
-        out.f_badged = badged();
-        out.f_more = more();
-        out.f_cardHeight = Math.round(document.querySelector(".fp-card").getBoundingClientRect().height);
-        var btn = document.querySelector(".fp-morebtn");
-        if (btn) btn.click();
-        setTimeout(function () {
-          out.e_visible = visible();
-          out.e_capped = box().getAttribute("data-capped");
-          out.e_more = more();
-          /* ...and back to All, which must restore the whole answer. */
-          document.querySelectorAll("button.fp-pill")[0].click();
-          setTimeout(function () {
-            out.back_rows = rows().length;
-            out.back_visible = visible();
-            done();
-          }, 40);
-        }, 40);
-      }, 40);
-    } else { done(); }
-  }, 60);
+
+  /* A queue rather than nested callbacks: v3 is a sequence of taps and
+     each one needs a turn of the event loop to repaint. */
+  var steps = [
+    function () {
+      out.width = window.innerWidth;
+      out.pills = pills();
+      out.s0 = snap();
+      out.prices = prices();
+      out.band = band();
+      out.bandLabel = bandLabel();
+      out.bandLine = bandLine();
+      out.bandBar = !!document.querySelector(".fp-bar");
+      out.destTitles = destTitles();
+      out.headers = headers();
+      out.dests = dests();
+      out.badged = badged();
+      /* The look, read off the COMPUTED styles: "the CSS says #0c0e11" is
+         not the same claim as "the card is painted #0c0e11 on this host". */
+      var card = document.querySelector(".fp-card");
+      var cs = getComputedStyle(card);
+      out.cardBg = cs.backgroundColor;
+      out.bodyColor = getComputedStyle(document.body).color;
+      out.colorScheme = getComputedStyle(document.documentElement).colorScheme;
+      var logo = document.querySelector(".fp-logo");
+      out.logoBg = logo ? getComputedStyle(logo).backgroundImage.slice(0, 40) : null;
+      out.logoSize = logo
+        ? Math.round(logo.getBoundingClientRect().width) + "x"
+          + Math.round(logo.getBoundingClientRect().height)
+        : null;
+      out.wordmark = document.querySelector(".fp-word")
+        ? document.querySelector(".fp-word").textContent.trim() : null;
+      var best = document.querySelector("tr[data-best='1'] td.fp-num");
+      out.bestPriceColor = best ? getComputedStyle(best).color : null;
+      out.bestPriceSize = best ? getComputedStyle(best).fontSize : null;
+      out.bestPriceFont = best ? getComputedStyle(best).fontFamily.slice(0, 13) : null;
+      var plain = document.querySelectorAll("tr:not([data-best]) td.fp-num")[0];
+      out.plainPriceColor = plain ? getComputedStyle(plain).color : null;
+      var sel = document.querySelector("button.fp-pill[aria-pressed='true']");
+      out.selectedPillBg = sel ? getComputedStyle(sel).backgroundColor : null;
+      var gauge = document.querySelector(".fp-bar .fp-mark");
+      out.gaugeMarker = gauge ? getComputedStyle(gauge).backgroundColor : null;
+      out.gaugeGlow = gauge ? getComputedStyle(gauge).boxShadow.indexOf("rgb(255, 176, 32)") : -2;
+      var track = document.querySelector(".fp-bar");
+      out.gaugeHeight = track ? Math.round(track.getBoundingClientRect().height) : null;
+      var mb = document.querySelector(".fp-morebtn");
+      out.moreBtnWidth = mb
+        ? Math.round(mb.getBoundingClientRect().width / card.getBoundingClientRect().width * 100)
+        : null;
+      out.moreBtnColor = mb ? getComputedStyle(mb).color : null;
+      var tag = document.querySelector(".fp-bestpill");
+      out.tags = tag ? tag.textContent.trim() : null;
+      out.tagBelow = tag
+        ? getComputedStyle(tag).display === "block"
+          && tag.getBoundingClientRect().top
+             > best.getBoundingClientRect().top + 8
+        : null;
+    },
+    /* Tap once: the next ten are appended, nothing is replaced. */
+    function () { if (moreBtn()) moreBtn().click(); },
+    function () { out.s1 = snap(); out.s1_dests = dests(); },
+    /* Twice. */
+    function () { if (moreBtn()) moreBtn().click(); },
+    function () { out.s2 = snap(); },
+    /* And back to one page. */
+    function () { if (fewBtn()) fewBtn().click(); },
+    function () { out.s3 = snap(); },
+    /* A pill: a new selection, and the count resets to one page. */
+    function () { if (pills().length > 2) pill(2).click(); },
+    function () {
+      if (pills().length <= 2) return;
+      out.f_pressed = pills().map(function (p) { return p.pressed; });
+      out.f_prices = prices();
+      out.f_band = band();
+      out.f_bandLabel = bandLabel();
+      out.f_bandLine = bandLine();
+      out.f_headers = headers();
+      out.f_dests = dests();
+      out.f_badged = badged();
+      out.fs = snap();
+    },
+    function () { if (pills().length > 2 && moreBtn()) moreBtn().click(); },
+    function () { if (pills().length > 2) out.fs1 = snap(); },
+    /* All puts the whole answer back -- at one page, not at whatever the
+       count had reached under the pill. */
+    function () { if (pills().length > 2) pill(0).click(); },
+    function () { if (pills().length > 2) out.back = snap(); }
+  ];
+  function tick() {
+    if (!steps.length) { done(); return; }
+    try { steps.shift()(); } catch (e) { document.title = "RESULTERROR:" + String(e); return; }
+    setTimeout(tick, 30);
+  }
+  setTimeout(tick, 60);
 })();
 </script>
 """
+
+
+def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+    def channel(v: int) -> float:
+        c = v / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(v) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(fg: tuple[int, int, int], bg: tuple[int, int, int]) -> float:
+    """WCAG 2.1 contrast ratio. AA body text is 4.5:1."""
+    a, b = _relative_luminance(fg), _relative_luminance(bg)
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
 
 
 @pytest.fixture(scope="module")
@@ -512,6 +594,25 @@ def multi():
     )
 
 
+#: A LIGHT host: the page around the frame is white and the OS prefers
+#: light. The card must look identical -- that is what "commits to one
+#: look" means, and it is the failure mode a `prefers-color-scheme` branch
+#: would reintroduce without anyone noticing.
+LIGHT_HOST = """
+<style>html, body { background: #ffffff !important; }</style>
+"""
+
+
+@pytest.fixture(scope="module")
+def multi_light():
+    return _run_page(
+        _chrome_or_skip(),
+        LIGHT_HOST + LAYOUT_PROBE.replace("__PAYLOAD__", _inline(MULTI)),
+        width=760,
+        light=True,
+    )
+
+
 @pytest.fixture(scope="module")
 def single():
     return _run_page(
@@ -521,38 +622,114 @@ def single():
     )
 
 
-class TestTheTopTen:
-    def test_ten_rows_are_visible_and_the_other_twenty_six_are_a_scroll_away(
+class TestTheTopFiveAndTheButton:
+    def test_exactly_five_rows_are_drawn_and_the_rest_are_not_in_the_dom(
         self, multi
     ):
-        assert multi["rows"] == 36, "every fare is still in the table"
-        assert multi["visible"] == 10
-        assert multi["scrollable"] is True
-        assert multi["hscroll"] == 0, "a fare table must not scroll sideways"
+        """Not five VISIBLE of thirty-six present: five rows exist. A row
+        the reader cannot reach is a row that should not have been built."""
+        assert multi["s0"]["rows"] == 5
+        assert multi["s0"]["hscroll"] == 0, "a fare table must not scroll sideways"
 
-    def test_the_card_stays_inside_its_height_budget(self, multi):
-        assert multi["cardHeight"] <= 780, (
-            "the card is back to being a wall: " + str(multi["cardHeight"]) + "px"
-        )
+    def test_nothing_scrolls_inside_the_card(self, multi):
+        """The whole point of v3. An inner scrollbar in a chat message is
+        the thing Matan was looking at when he said "wtf is that long
+        scroll"."""
+        assert multi["s0"]["vscroll"] == 0
+        assert multi["s1"]["vscroll"] == 0
+        assert multi["s2"]["vscroll"] == 0
 
-    def test_the_footer_says_how_many_of_how_many(self, multi):
-        assert multi["more"] == "Showing 10 of 36 · scroll for moreShow all 36"
+    def test_the_button_names_the_step_and_what_is_left(self, multi):
+        assert multi["s0"]["moreText"] == "Showing 5 of 36"
+        assert multi["s0"]["moreBtn"] == "Show 5 more · 31 left"
+        assert multi["s0"]["fewBtn"] is None, "nothing to collapse on page one"
 
-    def test_the_column_names_survive_the_scroll(self, multi):
-        assert multi["stickyHead"] == "sticky"
+    def test_one_tap_appends_five_and_a_second_tap_another_five(self, multi):
+        assert multi["s1"]["rows"] == 10
+        assert multi["s1"]["moreText"] == "Showing 10 of 36"
+        assert multi["s1"]["moreBtn"] == "Show 5 more · 26 left"
+        assert multi["s1"]["fewBtn"] == "Show fewer"
+        assert multi["s2"]["rows"] == 15
+        assert multi["s2"]["moreBtn"] == "Show 5 more · 21 left"
 
-    def test_show_all_uncaps_the_table(self, multi):
-        """For a host that sizes the frame to its content and swallows the
-        inner scroll, this button is the only way to rows 11 and up."""
-        assert multi["e_capped"] is None
-        assert multi["e_visible"] == 12, "the filtered destination's 12 fares"
-        assert multi["e_more"] == "Showing all 12 faresShow top 10"
+    def test_the_card_grows_with_what_it_draws(self, multi):
+        """No ceiling, so a longer list is a taller card -- that is the
+        host's scroll to do, not ours."""
+        assert multi["s1"]["cardHeight"] > multi["s0"]["cardHeight"]
+        assert multi["s2"]["cardHeight"] > multi["s1"]["cardHeight"]
 
-    def test_a_short_answer_is_not_capped_at_all(self, single):
-        assert single["rows"] == 3
-        assert single["visible"] == 3
-        assert single["scrollable"] is False
-        assert single["more"] is None, "nothing to say about 3 of 3"
+    def test_show_fewer_goes_back_to_five(self, multi):
+        assert multi["s3"]["rows"] == 5
+        assert multi["s3"]["moreBtn"] == "Show 5 more · 31 left"
+        assert multi["s3"]["fewBtn"] is None
+        assert multi["s3"]["cardHeight"] == multi["s0"]["cardHeight"]
+
+    def test_a_short_answer_gets_no_line_at_all(self, single):
+        assert single["s0"]["rows"] == 3
+        assert single["s0"]["vscroll"] == 0
+        assert single["s0"]["more"] is None, "nothing to say about 3 of 3"
+
+
+class TestTheFlightPowersLook:
+    """Matan, 2026-09-22: "widget UI is WAYYYY too similar to google
+    flights. do dark mode something cooler with flightpowers logo."
+
+    Read off COMPUTED styles in a real engine, because "the stylesheet says
+    ink-900" is a different claim from "the card is painted ink-900 here".
+    """
+
+    def test_the_card_is_painted_ink_900_not_white(self, multi):
+        assert multi["cardBg"] == "rgb(12, 14, 17)", multi["cardBg"]
+        assert multi["colorScheme"] == "dark"
+
+    def test_the_text_clears_aa_on_that_ground(self, multi):
+        """ink-200 #c9d1da on ink-900 #0c0e11 is 12.2:1; the muted ink-400
+        #7d8794 used for second lines is 5.4:1. AA body text needs 4.5."""
+        assert multi["bodyColor"] == "rgb(201, 209, 218)"
+        assert _contrast((0xC9, 0xD1, 0xDA), (0x0C, 0x0E, 0x11)) > 4.5
+        assert _contrast((0x7D, 0x87, 0x94), (0x0C, 0x0E, 0x11)) > 4.5
+        assert _contrast((0xFF, 0xB0, 0x20), (0x0C, 0x0E, 0x11)) > 4.5
+        # ...and the amber buttons invert: ink-900 text on signal-500.
+        assert _contrast((0x0C, 0x0E, 0x11), (0xFF, 0xB0, 0x20)) > 4.5
+
+    def test_the_robot_mark_and_the_wordmark_are_in_the_header(self, multi):
+        assert multi["wordmark"] == "FlightPowers"
+        assert multi["logoSize"] == "28x28"
+        assert multi["logoBg"].startswith('url("data:image/png;base64,')
+
+    def test_amber_is_the_only_accent_and_it_marks_the_cheapest(self, multi):
+        """One accent, spent where the answer is: the cheapest fare, the
+        selected pill, the gauge marker and the Show-more button. Google's
+        blue is nowhere."""
+        amber = "rgb(255, 176, 32)"
+        assert multi["bestPriceColor"] == amber
+        assert multi["selectedPillBg"] == amber
+        assert multi["gaugeMarker"] == amber
+        assert multi["moreBtnColor"] == amber
+        assert multi["tags"] == "cheapest"
+        # An ordinary fare is NOT amber -- if every row is lit, none is.
+        assert multi["plainPriceColor"] == "rgb(232, 237, 242)"
+
+    def test_prices_are_big_monospace_and_tabular(self, multi):
+        assert multi["bestPriceSize"] == "16px"
+        assert "ui-monospace" in multi["bestPriceFont"]
+
+    def test_the_band_is_a_slim_glowing_gauge(self, multi):
+        assert multi["gaugeHeight"] == 5, "a 5px track, not an 8px bar"
+        assert multi["gaugeGlow"] >= 0, "the marker glows amber"
+
+    def test_show_more_spans_the_card(self, multi):
+        """A full-width ghost button: the one control under the list."""
+        assert multi["moreBtnWidth"] >= 80, multi["moreBtnWidth"]
+
+    def test_the_look_does_not_change_on_a_light_host(self, multi_light):
+        """The frame is embedded in a WHITE page emulating a light host.
+        Every one of these numbers is the dark card's."""
+        assert multi_light["cardBg"] == "rgb(12, 14, 17)"
+        assert multi_light["bodyColor"] == "rgb(201, 209, 218)"
+        assert multi_light["bestPriceColor"] == "rgb(255, 176, 32)"
+        assert multi_light["selectedPillBg"] == "rgb(255, 176, 32)"
+        assert multi_light["s0"]["rows"] == 5
 
 
 class TestTheDestinationPills:
@@ -575,10 +752,19 @@ class TestTheDestinationPills:
 
     def test_picking_one_filters_the_rows_in_the_frame(self, multi):
         assert multi["f_pressed"] == ["false", "false", "true", "false"]
-        assert multi["f_rows"] == 12
+        assert multi["fs"]["rows"] == 5, "one page of Athens' twelve"
         # Athens' fares are the $2xx decade, and nothing else is.
         assert all(p.startswith("$2") for p in multi["f_prices"]), multi["f_prices"]
-        assert multi["f_more"] == "Showing 10 of 12 · scroll for moreShow all 12"
+        assert multi["fs"]["moreText"] == "Showing 5 of 12"
+        assert multi["fs"]["moreBtn"] == "Show 5 more · 7 left"
+
+    def test_a_pill_resets_the_count_to_one_page(self, multi):
+        """The tap history before it was 15 rows deep. A pill is a new
+        question; landing on row 15 of a route just picked is not an answer
+        to it."""
+        assert multi["s2"]["rows"] == 15
+        assert multi["fs"]["rows"] == 5
+        assert multi["fs"]["fewBtn"] is None
 
     def test_the_band_and_the_cheapest_marker_are_recomputed(self, multi):
         """Google's band is per route. Rome's band left drawn over Athens'
@@ -590,15 +776,16 @@ class TestTheDestinationPills:
         assert "$118" not in multi["f_band"]
         assert multi["f_badged"] == "$200cheapest"
 
-    def test_all_puts_every_destination_back(self, multi):
-        assert multi["back_rows"] == 36
-        assert multi["back_visible"] == 10
+    def test_all_puts_every_destination_back_at_one_page(self, multi):
+        assert multi["fs1"]["rows"] == 10, "one more page of Athens' twelve"
+        assert multi["back"]["rows"] == 5
+        assert multi["back"]["moreText"] == "Showing 5 of 36"
 
 
 class TestWhichRouteARowIs:
     def test_under_all_every_row_names_its_destination(self, multi):
         """Sorted by price, the three routes interleave: without this
-        column the All view is 36 rows you cannot tell apart."""
+        column the All view is rows you cannot tell apart."""
         assert multi["headers"] == [
             "Depart",
             "To",
@@ -608,8 +795,15 @@ class TestWhichRouteARowIs:
             "Price",
             "Book",
         ]
-        assert len(multi["dests"]) == 36
-        assert set(multi["dests"]) == {"FCO", "ATH", "BUD"}
+        assert len(multi["dests"]) == 5
+        assert set(multi["dests"]) <= {"FCO", "ATH", "BUD"}
+
+    def test_the_column_survives_a_tap_on_show_more(self, multi):
+        """The column is decided by how many routes the SELECTION holds,
+        not by what is on screen -- otherwise page two of a three-route
+        answer could lose it because its five rows happen to share a
+        route."""
+        assert len(multi["s1_dests"]) == 10
 
     def test_a_pill_takes_the_column_away_again(self, multi):
         assert "To" not in multi["f_headers"]
@@ -627,8 +821,14 @@ class TestWhichRouteARowIs:
         assert single["dests"] == []
 
     def test_a_round_trip_names_it_after_the_two_legs(self, roundtrip):
+        """Here the five cheapest happen to be one route (Rome is the $4xx
+        decade, Athens the $7xx). The column is still drawn, because it is
+        decided by how many routes the SELECTION holds -- a column that
+        came and went as the reader tapped Show more would be worse than
+        one that is sometimes uniform."""
         assert roundtrip["headers"][:4] == ["Outbound", "Return", "To", "Airline"]
-        assert set(roundtrip["dests"]) == {"FCO", "ATH"}
+        assert set(roundtrip["dests"]) == {"FCO"}
+        assert len(roundtrip["dests"]) == 5
         assert "To" not in roundtrip["f_headers"]
 
 
@@ -713,9 +913,10 @@ def roundtrip():
 class TestAPairedLegRoundTrip:
     def test_the_pills_filter_paired_legs_too(self, roundtrip):
         assert [p["text"] for p in roundtrip["pills"]] == ["All24", "FCO12", "ATH12"]
-        assert roundtrip["rows"] == 24
-        assert roundtrip["visible"] == 10
-        assert roundtrip["f_rows"] == 12
+        assert roundtrip["s0"]["rows"] == 5
+        assert roundtrip["s0"]["moreText"] == "Showing 5 of 24"
+        assert roundtrip["fs"]["rows"] == 5
+        assert roundtrip["fs"]["moreText"] == "Showing 5 of 12"
         # Athens' round trips are the $7xx decade.
         assert all(p.startswith("$7") for p in roundtrip["f_prices"]), roundtrip[
             "f_prices"
@@ -725,6 +926,103 @@ class TestAPairedLegRoundTrip:
         assert "$430" in roundtrip["band"] and "$610" in roundtrip["band"]
         assert "$720" in roundtrip["f_band"] and "$980" in roundtrip["f_band"]
         assert roundtrip["f_badged"] == "$700cheapest"
+
+
+#: The LIVE shape, not a tidy one: the strings a real TLV -> Rome/Athens/
+#: Budapest month actually returns. The fixtures above use "Aegean" and
+#: three-letter codes; the answer returns "Israir Airlines" over "back:
+#: Wizz Air" and "11:30 PM on Mon, Oct 26", and it was those that pushed
+#: the dark card 16px sideways at 760 while every fixture here said 0.
+LIVE_SHAPE = {
+    "search_status": "ok",
+    "result_count": 30,
+    "search_coverage": {
+        "destinations_searched": ["ATH", "BUD", "FCO"],
+        "departure_dates_searched": [f"2026-10-{d:02d}" for d in range(1, 32)],
+    },
+    "api_usage": {
+        "requests_used_by_this_call": 279,
+        "hub_requests_billed": 279,
+        "plan_requests_remaining": 44192,
+    },
+    "results": sorted(
+        (
+            {
+                "total_price": f"${base + i * 3}",
+                "total_price_as_number": base + i * 3,
+                "total_stops": 0,
+                "from_airport": "Tel Aviv (TLV)",
+                "to_airport": dest,
+                "departure_date": "2026-10-26",
+                "return_date": "2026-10-30",
+                "departure_flight_departure_description": "11:30 PM on Mon, Oct 26",
+                "departure_flight_airline": out,
+                "departure_flight_duration": "2 hr 15 min",
+                "return_flight_departure_description": "12:55 AM on Thu, Oct 29",
+                "return_flight_airline": back,
+                "return_flight_duration": "2 hr 5 min",
+                "price_insights_low": 115,
+                "price_insights_high": 175,
+                "price_range_in_relation_to_other_periods": "typical",
+                "buy_link": f"https://www.google.com/travel/flights?tfs={dest}{i}",
+            }
+            for dest, base, out, back in (
+                ("Athens (ATH)", 119, "Israir Airlines", "Wizz Air"),
+                ("Rome (FCO)", 129, "ITA Airways", "Wizz Air"),
+                ("Budapest (BUD)", 138, "Wizz Air", "Wizz Air"),
+            )
+            for i in range(10)
+        ),
+        key=lambda r: r["total_price_as_number"],
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def live_shape_760():
+    return _run_page(
+        _chrome_or_skip(),
+        LAYOUT_PROBE.replace("__PAYLOAD__", _inline(LIVE_SHAPE)),
+        width=760,
+    )
+
+
+@pytest.fixture(scope="module")
+def live_shape_560():
+    return _run_page(
+        _chrome_or_skip(),
+        LAYOUT_PROBE.replace("__PAYLOAD__", _inline(LIVE_SHAPE)),
+        width=560,
+    )
+
+
+class TestTheRealAnswersOwnStrings:
+    """The regression the tidy fixtures missed.
+
+    Every other fixture here uses short airline names and bare IATA codes.
+    The dark card's 16px prices and the CHEAPEST tag beside them pushed a
+    seven-column row 16px past 760 on the strings the API actually returns,
+    and nothing in this file noticed. Now something does.
+    """
+
+    def test_it_never_scrolls_sideways_at_a_message_width(self, live_shape_760):
+        assert live_shape_760["s0"]["hscroll"] == 0
+        assert live_shape_760["s0"]["vscroll"] == 0
+        assert live_shape_760["s0"]["rows"] == 5
+
+    def test_it_never_scrolls_sideways_on_a_narrow_frame_either(
+        self, live_shape_560
+    ):
+        assert live_shape_560["s0"]["hscroll"] == 0
+        assert live_shape_560["s0"]["rows"] == 5
+
+    def test_the_cheapest_tag_sits_under_the_price_not_beside_it(
+        self, live_shape_760
+    ):
+        """Inline, the tag made the price column 60px wider than its widest
+        fare -- which was the 60px that decided whether the times wrapped."""
+        assert live_shape_760["tagBelow"] is True
+        assert live_shape_760["badged"] == "$119cheapest"
 
 
 @pytest.fixture(scope="module")
@@ -745,15 +1043,17 @@ def multi_640():
 
 class TestTheNarrowerFrame:
     def test_seven_columns_never_scroll_sideways(self, multi_640):
-        assert multi_640["hscroll"] == 0
+        assert multi_640["s0"]["hscroll"] == 0
         assert multi_640["headers"][1] == "To"
 
-    def test_it_shows_fewer_rows_and_says_the_real_number(self, multi_640):
-        """Wrapped rows are 86px, so ten of them do not fit the ceiling.
-        The footer prints what is on screen, not the ten it aimed for."""
-        assert multi_640["visible"] == 5
-        assert multi_640["more"] == "Showing 5 of 36 · scroll for moreShow all 36"
-        assert multi_640["cardHeight"] <= 780
+    def test_it_still_shows_five_rows_just_taller_ones(self, multi_640):
+        """v2's row count moved with the WIDTH, because a 780px ceiling
+        decided it and a wrapped row is 86px. There is no ceiling any more:
+        five rows are five rows at every width, and the card is whatever
+        height that needs."""
+        assert multi_640["s0"]["rows"] == 5
+        assert multi_640["s0"]["moreText"] == "Showing 5 of 36"
+        assert multi_640["s0"]["vscroll"] == 0
 
 
 # ── the five findings of the zero-context review of #504 ────────────────
@@ -858,22 +1158,26 @@ class TestANarrowFrame:
             "Google: typical $118–$240 · cheapest of 3 routes (FCO)"
         )
 
-    def test_at_least_five_fares_are_on_screen(self, multi_narrow):
-        """Two of thirty-six was the measurement that opened this. The
-        floor wins over the ceiling; the footer still says the truth."""
-        assert multi_narrow["visible"] >= 5
-        assert multi_narrow["more"].startswith("Showing 5 of 36")
-        assert multi_narrow["hscroll"] == 0
+    def test_five_fares_are_on_screen_here_too(self, multi_narrow):
+        """v2 measured TWO of thirty-six at this width, then five once a
+        floor was added, because the header, pills, band and footer ate
+        most of a 780px budget. Without a budget the question does not
+        arise: five rows, no floor logic, no sideways scroll."""
+        assert multi_narrow["s0"]["rows"] == 5
+        assert multi_narrow["s0"]["moreText"] == "Showing 5 of 36"
+        assert multi_narrow["s0"]["hscroll"] == 0
+        assert multi_narrow["s0"]["vscroll"] == 0
 
-    def test_ten_rows_are_capped_too(self, ten_narrow):
-        """The old early return left a ten-row answer uncapped: a 2,029px
-        card with no scroll and no way to see it was capped at all."""
-        assert ten_narrow["rows"] == 10
-        assert ten_narrow["capped"] == "1"
-        assert ten_narrow["scrollable"] is True
-        assert ten_narrow["visible"] == 5
-        assert ten_narrow["more"] == "Showing 5 of 10 · scroll for moreShow all 10"
-        assert ten_narrow["cardHeight"] < 1400, ten_narrow["cardHeight"]
+    def test_a_ten_row_answer_pages_in_fives(self, ten_narrow):
+        """Two pages exactly. The button drops its "N left" tail on the
+        last one, where "Show 5 more · 5 left" says the same thing twice,
+        and once everything is shown only "Show fewer" is left."""
+        assert ten_narrow["s0"]["rows"] == 5
+        assert ten_narrow["s0"]["moreBtn"] == "Show 5 more"
+        assert ten_narrow["s1"]["rows"] == 10
+        assert ten_narrow["s1"]["moreBtn"] is None
+        assert ten_narrow["s1"]["more"] == "Showing 10 of 10Show fewer"
+        assert ten_narrow["s0"]["vscroll"] == 0
 
 
 class TestRowsTheUpstreamDidNotLabel:
@@ -896,7 +1200,7 @@ class TestRowsTheUpstreamDidNotLabel:
     def test_a_pill_that_does_have_a_band_still_draws_it(self, partial):
         """Pill 2 is ATH: one route, its own numbers, and the label goes
         back to "for this route"."""
-        assert partial["f_rows"] == 7
+        assert partial["fs"]["rows"] == 5
         assert partial["f_bandLabel"] == "Google price tracking for this route"
         assert "$250" in partial["f_band"] and "$420" in partial["f_band"]
 
@@ -913,32 +1217,37 @@ class TestALongDestinationString:
         )
 
     def test_it_cannot_widen_the_table(self, partial):
-        assert partial["hscroll"] == 0, "a 400-character destination scrolled 3,370px"
+        assert partial["s0"]["hscroll"] == 0, (
+            "a 400-character destination scrolled 3,370px"
+        )
 
 
-# ── a whole month of fares, and a refusal (2026-09-22) ──────────────────
+# ── a whole month across three destinations, and a refusal ──────────────
 #
-# The cap that made one call cover a month (AUTO_MAX_SEARCHES) changed what
-# reaches this frame: 93 rows for one destination, 186 for two, where the
-# card was designed and measured against 36. Two things had to be proven
-# rather than assumed -- that the fit still caps the card at 780px and that
-# it does so in the same three passes, not in a loop that grows with the row
-# count -- and one thing had to be added: a search REFUSED for want of quota
+# The cap that made one call cover a month changed what reaches this frame:
+# 93 rows for one destination, 186 for two, and -- since the 300 cap of
+# 2026-09-22 -- 279 combinations for a month x 3 nights x 3 destinations,
+# where the card was designed against 36. That volume is exactly what
+# produced "wtf is that long scroll", so the assertion here is that the DOM
+# holds ten rows however many fares arrived, that nothing scrolls inside the
+# card, and that the work done per paint does not grow with the answer.
+# Plus one thing that must not regress: a search REFUSED for want of quota
 # arrives with no rows at all and must draw a small card, never an empty
 # table (src/quota_gate.py).
 
 MONTH_ROWS = {
     "search_status": "ok",
-    "result_count": 186,
+    "result_count": 279,
     "search_coverage": {
-        "requested_combinations": 186,
-        "searched_combinations": 186,
+        "requested_combinations": 279,
+        "searched_combinations": 279,
         "truncated": False,
-        "max_searches_source": "explicit",
-        "destinations_searched": ["ATH", "FCO"],
+        "max_searches_source": "auto_span",
+        "destinations_searched": ["ATH", "BUD", "FCO"],
     },
     "api_usage": {
-        "requests_used_by_this_call": 186,
+        "requests_used_by_this_call": 279,
+        "hub_requests_billed": 279,
         "plan_requests_remaining": 2314,
     },
     "results": sorted(
@@ -962,6 +1271,7 @@ MONTH_ROWS = {
             for dest, base, airline, low, high in (
                 ("FCO", 300, "ITA Airways", 320, 540),
                 ("ATH", 600, "Aegean", 610, 870),
+                ("BUD", 900, "Wizz Air", 910, 1180),
             )
             for i in range(93)
         ),
@@ -1027,27 +1337,41 @@ def refusal():
     )
 
 
-class TestAWholeMonthOfFares:
-    def test_all_of_them_arrive_and_the_card_is_still_short(self, month):
-        assert month["rows"] == 186
-        assert month["visible"] == 10
-        assert month["capped"] == "1"
-        assert month["cardHeight"] <= 780
-        assert month["hscroll"] == 0
+class TestAWholeMonthAcrossThreeDestinations:
+    """279 combinations: a month x 3 nights x 3 destinations, the exact
+    question the 300 cap was raised for and the volume behind "wtf is that
+    long scroll"."""
 
-    def test_the_footer_counts_the_month_not_the_design_sample(self, month):
-        assert month["more"] == "Showing 10 of 186 · scroll for moreShow all 186"
+    def test_two_hundred_and_seventy_nine_fares_draw_five_rows(self, month):
+        assert month["s0"]["rows"] == 5
+        assert month["s0"]["moreText"] == "Showing 5 of 279"
+        assert month["s0"]["moreBtn"] == "Show 5 more · 274 left"
 
-    def test_the_pills_still_group_the_two_destinations(self, month):
-        assert [p["text"] for p in month["pills"]] == ["All186", "FCO93", "ATH93"]
-        assert month["f_rows"] == 93
-        assert month["f_visible"] == 10
-        assert month["f_cardHeight"] <= 780
+    def test_nothing_scrolls_inside_the_card_at_this_volume(self, month):
+        assert month["s0"]["vscroll"] == 0
+        assert month["s0"]["hscroll"] == 0
+        assert month["s2"]["vscroll"] == 0
 
-    def test_show_all_opens_the_whole_month_and_all_puts_it_back(self, month):
-        assert month["e_visible"] == 93
-        assert month["e_capped"] is None
-        assert month["back_rows"] == 186
+    def test_taps_walk_the_list_five_at_a_time(self, month):
+        assert month["s1"]["rows"] == 10
+        assert month["s2"]["rows"] == 15
+        assert month["s2"]["moreBtn"] == "Show 5 more · 264 left"
+        assert month["s3"]["rows"] == 5
+
+    def test_the_pills_group_the_three_destinations(self, month):
+        assert [p["text"] for p in month["pills"]] == [
+            "All279",
+            "FCO93",
+            "ATH93",
+            "BUD93",
+        ]
+        assert month["fs"]["rows"] == 5
+        assert month["fs"]["moreText"] == "Showing 5 of 93"
+
+    def test_all_puts_the_whole_month_back_at_one_page(self, month):
+        assert month["fs1"]["rows"] == 10
+        assert month["back"]["rows"] == 5
+        assert month["back"]["moreText"] == "Showing 5 of 279"
 
     def test_the_cheapest_of_the_month_is_the_one_badged(self, month):
         assert month["badged"] == "$300cheapest"

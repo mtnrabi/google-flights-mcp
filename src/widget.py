@@ -9,14 +9,18 @@ tools: a compact fare table, Google's own price band drawn as a
 three-segment bar with the verdict and the cheapest fare marked on it,
 and a Book button per row.
 
-It shows the ten cheapest rows and keeps the rest one scroll away inside
-the table (with a "Show all N" button for a host that swallows the inner
-scroll), because a thirty-fare answer rendered as a thirty-row card is a
-wall in a chat window. The height ceiling applies whatever the row count
-is, and gives way to a floor of five rows: on a 380px frame a row is a
-184px block, and a card that answers a 36-fare search with two fares is
-not an answer. Below 520px the band collapses to one line so the height
-it costs goes to fares instead.
+It draws the FIVE cheapest rows and nothing else, with one button that
+appends the next five ("Show 5 more / 274 left") and a "Show fewer" link
+back to five. There is no scroll container and no height ceiling: the card
+is exactly as tall as the rows on screen and the HOST scrolls the page.
+That is the 2026-09-22 correction, in two steps. First, watching a demo
+scroll a 93-row answer inside the message: "wtf is that long scroll. limit
+the presented items to the top 10, and allow the user to tap on a button
+to view more." Then, on the ten-row card: "make it top 5, still seems too
+long." A scrollbar inside a chat message is a trap; a button is not, and
+five fares plus a button is a card you can take in at a glance. Below
+520px the band collapses to one line, because a 70px bar in a phone-width
+frame is height that should be a fare.
 
 Destinations: both tools take a LIST of destination airports and answer
 with one flat `results` array, so "TLV to Rome, Athens or Budapest"
@@ -35,6 +39,73 @@ destination alone. While several routes are in the table each row also
 carries its destination code, and the band says which route it belongs
 to -- Google tracks each route separately, so the band drawn is the one
 belonging to the route that holds the cheapest fare.
+
+The look: ours, not Google's
+----------------------------
+Matan, 2026-09-22, on the version before this one: *"widget UI is WAYYYY
+too similar to google flights. do dark mode something cooler with
+flightpowers logo."* He was right -- a white table of fares with blue pill
+buttons IS Google Flights, and a card that looks like the thing it is
+reading from has no reason to exist.
+
+So this card commits to ONE look on every host. A light claude.ai and a
+dark one get the same dark card: the ground is painted explicitly,
+`color-scheme: dark` stops Chromium sliding a white sheet under it, the
+host's `hostContext.theme` is read and ignored, and there is no
+`prefers-color-scheme` branch to drift.
+
+The palette is the site's own (`flightpowers-developers/src/app/globals.css`,
+copied by value because this frame loads nothing): `ink-900 #0c0e11` ground,
+`ink-800` surfaces, `ink-700` rules, `ink-100/200` text, `ink-400` muted.
+ONE accent, `signal-500 #ffb020`, and it is spent only where the answer is
+-- the cheapest row carries an amber wash, an amber rule down its edge, an
+amber price and a CHEAPEST tag, and the selected destination chip, the
+gauge marker and the Show-more button are the same amber. Everything else
+is quiet, because an accent on every row is not an accent. Verdict green
+and red appear in the price band and nowhere else. Numbers are monospace
+and tabular so a column of fares lines up. The header carries the site's
+own robot mark, inlined as a data URI and drawn at 28px from a 56px asset.
+
+Two deliberate non-decisions: no lone acid-green pop and no purple
+gradient (the two tells of a card a model designed), and no oversized
+hero -- the biggest thing on this card is a fare, which is what was asked
+for.
+
+Comments and the byte budget
+----------------------------
+The host inlines this whole document into a sandboxed iframe and the
+budget is 40 KB, of which the inlined brand mark is 3.6 KB. So the frame
+carries short comments and this docstring carries the reasoning: what is
+served is exactly what is written below, with no build step between them.
+
+The host bridge
+---------------
+Three hosts, one render path.
+
+* MCP Apps (stable 2026-01-26): the frame sends a `ui/initialize` REQUEST,
+  then notifies `ui/notifications/initialized`; the host answers with
+  `ui/notifications/tool-result` carrying `structuredContent`.
+* Draft-era MCP hosts ignore the unknown request, so a grace timeout falls
+  back to the bare `initialized` notification.
+* ChatGPT (OpenAI Apps) does no handshake at all -- `window.openai` is
+  injected and the payload arrives as `toolOutput`, immediately or on an
+  `openai:set_globals` event.
+
+Both paths converge on `renderOnce`, guarded by a flag, and a message
+whose `source` is not `window.parent` is refused: the tool result is the
+one input deciding what this frame draws and what its buttons open.
+
+Links
+-----
+`buy_link` is upstream data and the host's link opener is the one place
+this widget could do harm, so the gate is an ALLOWLIST rather than a
+scheme check: https only (an http: booking link would be a downgrade we
+handed the user), and only the booking domains our own backends emit --
+google.com, booking.com, stay22.com. Subdomains are allowed
+(`www.google.com`); a lookalike like `google.com.evil.test` is not,
+because the match is on the full host or a dot-prefixed suffix. A row
+whose link is anything else renders its price with no button at all,
+never a button that goes somewhere else.
 
 What this is NOT
 ----------------
@@ -174,80 +245,47 @@ def canonical_connector_url(raw: str) -> str:
 # Every runtime value is written with `textContent` (never `innerHTML`), so
 # a hostile upstream string cannot break out of the markup, and only
 # http/https URLs are ever handed to the host's link opener.
-FLIGHTS_WIDGET_HTML = r"""<!doctype html>
+_FRAME_SOURCE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FlightPowers fares</title>
 <style>
-  /* The host paints its own ground behind the frame; `color-scheme` is what
-     stops Chromium putting an opaque white sheet under a dark host. */
-  html, body { background: transparent; color-scheme: light dark; margin: 0; }
+  /* ONE look everywhere. `color-scheme: dark` stops Chromium sliding a
+     white sheet under the card. No theme branch, on purpose. */
+  html { color-scheme: dark; }
+  html, body { background: transparent; margin: 0; }
   * { box-sizing: border-box; }
 
-  /* Light is the base; dark is redefined twice -- once for the host that
-     tells us nothing (prefers-color-scheme) and once for the host that
-     hands us a theme over ui/initialize (data-theme). A colour defined
-     only inside a media query is a colour the toggle cannot reach. */
+  /* The site's own tokens, copied by value: this frame loads nothing. */
   :root {
-    --fp-bg: #ffffff;
-    --fp-ink: #16181d;
-    --fp-soft: #5c6470;
-    --fp-faint: #8b93a1;
-    --fp-line: #e4e7ec;
-    --fp-line-soft: #f0f2f5;
-    --fp-accent: #1f6feb;
-    --fp-accent-ink: #ffffff;
-    --fp-low: #1f9d55;
-    --fp-typical: #d99516;
-    --fp-high: #d1493f;
-    --fp-track: #eceff3;
-    --fp-warn-bg: #fff6e6;
-    --fp-warn-ink: #7a5306;
-    --fp-radius: 14px;
-    --fp-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --fp-bg: #1b1d21;
-      --fp-ink: #f2f4f7;
-      --fp-soft: #a9b1bd;
-      --fp-faint: #7d8694;
-      --fp-line: #31353c;
-      --fp-line-soft: #26292e;
-      --fp-accent: #5ea0ff;
-      --fp-accent-ink: #10131a;
-      --fp-low: #48c98a;
-      --fp-typical: #e5b45c;
-      --fp-high: #f0746a;
-      --fp-track: #2a2e34;
-      --fp-warn-bg: #3a2f14;
-      --fp-warn-ink: #f0d79a;
-    }
-  }
-  :root[data-theme="dark"] {
-    --fp-bg: #1b1d21;
-    --fp-ink: #f2f4f7;
-    --fp-soft: #a9b1bd;
-    --fp-faint: #7d8694;
-    --fp-line: #31353c;
-    --fp-line-soft: #26292e;
-    --fp-accent: #5ea0ff;
-    --fp-accent-ink: #10131a;
-    --fp-low: #48c98a;
-    --fp-typical: #e5b45c;
-    --fp-high: #f0746a;
-    --fp-track: #2a2e34;
-    --fp-warn-bg: #3a2f14;
-    --fp-warn-ink: #f0d79a;
+    --fp-bg: #0c0e11;        /* ink-900, the card ground */
+    --fp-bg-2: #171b21;      /* ink-800, raised surfaces */
+    --fp-line: #222831;      /* ink-700, rules */
+    --fp-line-2: #171b21;    /* ink-800, hairlines between rows */
+    --fp-ink: #e8edf2;       /* ink-100 */
+    --fp-ink-2: #c9d1da;     /* ink-200 */
+    --fp-soft: #a3adba;      /* ink-300 */
+    --fp-faint: #7d8794;     /* ink-400 */
+    --fp-accent: #ffb020;    /* signal-500, the ONE accent */
+    --fp-accent-hi: #ffc352; /* signal-400 */
+    --fp-accent-ink: #0c0e11;
+    --fp-low: #4ade80;
+    --fp-typical: #ffb020;
+    --fp-high: #f87171;
+    --fp-track: #222831;
+    --fp-warn-bg: #1f1708;
+    --fp-warn-ink: #ffc352;
+    --fp-radius: 16px;
+    --fp-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
 
   body {
-    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-          Helvetica, Arial, sans-serif;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
-    color: var(--fp-ink);
+    color: var(--fp-ink-2);
   }
   .fp-card {
     background: var(--fp-bg);
@@ -255,143 +293,216 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     border-radius: var(--fp-radius);
     overflow: hidden;
   }
-  .fp-hd { padding: 14px 16px 10px; }
-  .fp-route { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
-  .fp-sub { font-size: 12px; color: var(--fp-soft); margin-top: 2px; }
+  /* ── brand row: mark, wordmark, then the route ── */
+  .fp-brand {
+    display: flex; align-items: center; gap: 8px;
+    padding: 14px 16px 0;
+  }
+  /* The robot mark, inlined as a CSS background rather than an image
+     element: this frame ships no image tag and no source attribute at
+     all, which two tests assert on the served bytes. 56px drawn at 28. */
+  .fp-logo {
+    width: 28px; height: 28px; display: block; border-radius: 7px;
+    background-image: url(data:image/png;base64,__FP_MARK_B64__);
+    background-size: 28px 28px; background-repeat: no-repeat;
+    flex: 0 0 auto;
+  }
+  .fp-word {
+    font-size: 16px; font-weight: 600; letter-spacing: -.025em;
+    color: var(--fp-ink);
+  }
+  .fp-hd { padding: 8px 16px 12px; }
+  .fp-route {
+    font-size: 15px; font-weight: 600; letter-spacing: -.01em;
+    color: var(--fp-ink);
+  }
+  .fp-sub {
+    font-size: 11px; color: var(--fp-faint); margin-top: 3px;
+    letter-spacing: .04em; text-transform: uppercase;
+  }
 
-  /* ── the price band ── */
-  .fp-band { padding: 2px 16px 12px; }
+  /* ── the price band, as a gauge: 5px, amber glow on the cheapest ── */
+  .fp-band { padding: 2px 16px 14px; }
   .fp-band-top {
     display: flex; align-items: baseline; justify-content: space-between;
-    gap: 8px; font-size: 12px; color: var(--fp-soft); margin-bottom: 6px;
+    gap: 8px; font-size: 11px; color: var(--fp-faint); margin-bottom: 7px;
+    letter-spacing: .02em;
   }
   .fp-verdict {
-    font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
-    font-size: 11px;
+    font-weight: 700; text-transform: uppercase; letter-spacing: .1em;
+    font-size: 10px;
   }
   .fp-verdict[data-v="low"] { color: var(--fp-low); }
   .fp-verdict[data-v="typical"] { color: var(--fp-typical); }
   .fp-verdict[data-v="high"] { color: var(--fp-high); }
   .fp-bar {
-    position: relative; height: 8px; border-radius: 999px;
+    position: relative; height: 5px; border-radius: 999px;
     background: var(--fp-track); display: flex; overflow: visible;
   }
-  .fp-seg { height: 8px; }
+  .fp-seg { height: 5px; opacity: .55; }
   .fp-seg:first-child { border-radius: 999px 0 0 999px; }
   .fp-seg:last-child { border-radius: 0 999px 999px 0; }
   .fp-seg[data-s="low"] { background: var(--fp-low); }
   .fp-seg[data-s="typical"] { background: var(--fp-typical); }
   .fp-seg[data-s="high"] { background: var(--fp-high); }
   .fp-mark {
-    position: absolute; top: -4px; width: 4px; height: 16px; border-radius: 2px;
-    background: var(--fp-ink); box-shadow: 0 0 0 2px var(--fp-bg);
-    transform: translateX(-2px);
+    position: absolute; top: -5px; width: 3px; height: 15px; border-radius: 2px;
+    background: var(--fp-accent); transform: translateX(-1.5px);
+    box-shadow: 0 0 0 2px var(--fp-bg), 0 0 10px 1px var(--fp-accent);
   }
   .fp-scale {
     display: flex; justify-content: space-between;
-    font-size: 11px; color: var(--fp-faint); margin-top: 6px;
-    font-family: var(--fp-mono);
+    font-size: 10px; color: var(--fp-faint); margin-top: 7px;
+    font-family: var(--fp-mono); font-variant-numeric: tabular-nums;
+    letter-spacing: .04em;
   }
 
-  /* ── destination pills ──
-     A call that asked for four cities comes back as one table. The pills
-     are how you get to one city's fares without reading the other three. */
-  .fp-pills { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
+  /* ── destination pills: one table, one city at a time ── */
+  .fp-pills { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 14px; }
   .fp-pill {
     font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
-    padding: 4px 10px; border-radius: 999px;
-    border: 1px solid var(--fp-line); background: transparent; color: var(--fp-soft);
+    padding: 5px 11px; border-radius: 8px;
+    border: 1px solid var(--fp-line); background: var(--fp-bg-2);
+    color: var(--fp-soft);
   }
-  .fp-pill:hover { border-color: var(--fp-accent); color: var(--fp-ink); }
-  .fp-pill:focus-visible { outline: 2px solid var(--fp-ink); outline-offset: 2px; }
+  .fp-pill:hover { border-color: var(--fp-faint); color: var(--fp-ink); }
+  .fp-pill:focus-visible { outline: 2px solid var(--fp-accent); outline-offset: 2px; }
   .fp-pill[aria-pressed="true"] {
     background: var(--fp-accent); border-color: var(--fp-accent);
     color: var(--fp-accent-ink);
   }
-  .fp-pill-n { opacity: .72; font-weight: 500; margin-left: 5px; }
+  .fp-pill-n {
+    opacity: .7; font-weight: 500; margin-left: 6px;
+    font-family: var(--fp-mono); font-variant-numeric: tabular-nums;
+  }
   /* Only rendered while the table shows more than one route. */
-  .fp-t td.fp-dest { font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+  /* Bounded in PIXELS as well as characters: the 16-character cap is a
+     guess about character width, and it was 23px wrong at 760. */
+  .fp-t td.fp-dest {
+    font-weight: 700; letter-spacing: .06em; white-space: nowrap;
+    color: var(--fp-soft); font-size: 12px;
+    max-width: 86px; overflow: hidden; text-overflow: ellipsis;
+  }
+  @media (max-width: 519px) {
+    .fp-t td.fp-dest { max-width: none; }
+  }
 
   /* ── the table ── */
+  /* `overflow-x` only, never a max-height: no inner vertical scrollbar
+     at all. The Show-more button is what replaced it. */
   .fp-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  /* Set only once the rows are capped, so a short table is never a
-     scroll container that swallows the page's own wheel events. */
-  .fp-scroll[data-capped="1"] { overflow-y: auto; }
   table.fp-t { width: 100%; border-collapse: collapse; font-size: 13px; }
   .fp-t th {
-    text-align: left; font-size: 10px; font-weight: 700; letter-spacing: .09em;
+    text-align: left; font-size: 9px; font-weight: 600; letter-spacing: .14em;
     text-transform: uppercase; color: var(--fp-faint);
-    padding: 6px 10px; border-top: 1px solid var(--fp-line);
+    padding: 7px 8px 6px; border-top: 1px solid var(--fp-line);
     border-bottom: 1px solid var(--fp-line); white-space: nowrap;
-    /* Sticky, so scrolling row 11 into view does not lose the column
-       names. `border-collapse: collapse` drops the borders off a sticky
-       cell in Chromium, so they are redrawn as inset shadows. */
-    position: sticky; top: 0; z-index: 1; background: var(--fp-bg);
-    box-shadow: inset 0 1px 0 var(--fp-line), inset 0 -1px 0 var(--fp-line);
+    background: var(--fp-bg);
   }
   .fp-t td {
-    padding: 7px 10px; border-bottom: 1px solid var(--fp-line-soft);
-    vertical-align: top;
+    padding: 9px 8px; border-bottom: 1px solid var(--fp-line-2);
+    vertical-align: top; color: var(--fp-ink-2);
   }
-  /* Where there is room the time cells do not wrap: wrapped, a row is
-     90px instead of 51, and ten of those is the wall this version exists
-     to remove. Measured at 700, not 640, because the multi-destination
-     table has a SEVENTH column and at 640 it pushed the row 17px
-     sideways. Below it they wrap (taller rows, fewer visible, and the
-     footer says so) rather than scrolling sideways. */
-  @media (min-width: 700px) {
+  /* 740 is MEASURED: a seven-column row with real airline names needs
+     774px unwrapped. Below it the times wrap rather than scroll. */
+  @media (min-width: 740px) {
     .fp-t td.fp-when, .fp-t td.fp-when .fp-leg2,
     .fp-t td.fp-dur { white-space: nowrap; }
   }
   .fp-t tr:last-child td { border-bottom: 0; }
-  .fp-t tr[data-best="1"] td { background: color-mix(in srgb, var(--fp-accent) 7%, transparent); }
-  .fp-num { font-family: var(--fp-mono); white-space: nowrap; font-weight: 650; }
+  /* The cheapest row is LIT: a faint amber wash and an amber rule down
+     its left edge. */
+  .fp-t tr[data-best="1"] td {
+    background: rgba(255, 176, 32, .07);
+  }
+  .fp-t tr[data-best="1"] td:first-child { box-shadow: inset 2px 0 0 var(--fp-accent); }
+  .fp-t tr[data-best="1"] td.fp-num { color: var(--fp-accent); }
+  /* Prices are the answer: mono, tabular, biggest thing on the row. */
+  /* `.fp-t td` out-specifies a bare `.fp-num`, so this beats it. */
+  .fp-num, .fp-t td.fp-num {
+    font-family: var(--fp-mono); font-variant-numeric: tabular-nums;
+    white-space: nowrap; font-weight: 600; font-size: 16px;
+    letter-spacing: -.02em; color: var(--fp-ink);
+  }
   .fp-t .fp-right { text-align: right; }
-  .fp-leg2 { display: block; font-size: 11px; color: var(--fp-soft); margin-top: 1px; }
+  .fp-leg2 { display: block; font-size: 11px; color: var(--fp-faint); margin-top: 2px; }
+  /* Under the price, not beside it: inline it made the column 60px wider
+     than its widest fare, which is what wrapped the times at 760. */
   .fp-bestpill {
-    display: inline-block; margin-left: 6px; font-size: 9px; font-weight: 700;
-    letter-spacing: .07em; text-transform: uppercase; color: var(--fp-accent);
-    vertical-align: 1px;
+    display: block; margin: 5px 0 0; font-size: 8px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--fp-accent-ink);
+    background: var(--fp-accent); border-radius: 4px; padding: 2px 5px;
+    width: max-content;
   }
+  /* Ghost, not a filled pill: five amber buttons down a column would be
+     five things shouting, and only one row is the answer. */
   .fp-book {
-    font: inherit; font-size: 12px; font-weight: 650; cursor: pointer;
-    padding: 5px 10px; border-radius: 8px; white-space: nowrap;
-    border: 1px solid var(--fp-accent);
-    background: var(--fp-accent); color: var(--fp-accent-ink);
+    font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+    padding: 5px 11px; border-radius: 8px; white-space: nowrap;
+    border: 1px solid var(--fp-line); background: transparent;
+    color: var(--fp-soft);
   }
-  .fp-book:hover { filter: brightness(1.07); }
-  .fp-book:focus-visible { outline: 2px solid var(--fp-ink); outline-offset: 2px; }
+  .fp-book:hover { border-color: var(--fp-accent); color: var(--fp-accent); }
+  .fp-book:focus-visible { outline: 2px solid var(--fp-accent); outline-offset: 2px; }
+  .fp-t tr[data-best="1"] .fp-book {
+    border-color: var(--fp-accent); background: var(--fp-accent);
+    color: var(--fp-accent-ink);
+  }
+  .fp-t tr[data-best="1"] .fp-book:hover { background: var(--fp-accent-hi); color: var(--fp-accent-ink); }
   .fp-nolink { color: var(--fp-faint); font-size: 12px; }
 
   /* The whole band, in one line, for a frame too narrow to spend 70px of
      a 780px budget on a bar. Same three numbers, same verdict colour. */
   .fp-bandline {
-    padding: 0 16px 10px; font-size: 12px; color: var(--fp-soft);
+    padding: 0 16px 12px; font-size: 12px; color: var(--fp-faint);
   }
-  .fp-bandline .fp-range { font-family: var(--fp-mono); color: var(--fp-ink); }
+  .fp-bandline .fp-range {
+    font-family: var(--fp-mono); font-variant-numeric: tabular-nums;
+    color: var(--fp-ink);
+  }
 
-  /* ── "showing 10 of 34" ── */
-  .fp-more {
-    display: flex; align-items: baseline; justify-content: space-between;
-    gap: 10px; padding: 8px 16px 2px; font-size: 11px; color: var(--fp-faint);
+  /* ── "Showing 10 of 93" + the two controls ── */
+  /* Full width: the one control under the list, unmissable on a phone. */
+  .fp-more { padding: 12px 16px 4px; }
+  .fp-more-t {
+    display: block; font-size: 10px; color: var(--fp-faint);
+    letter-spacing: .1em; text-transform: uppercase; margin-bottom: 8px;
+    font-variant-numeric: tabular-nums;
   }
+  .fp-more-acts { display: flex; align-items: center; gap: 10px; }
   .fp-morebtn {
-    font: inherit; font-size: 11px; font-weight: 650; cursor: pointer;
-    background: none; border: 0; padding: 2px 0; color: var(--fp-accent);
-    text-decoration: underline; white-space: nowrap;
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    flex: 1 1 auto; padding: 9px 12px; border-radius: 10px;
+    border: 1px solid var(--fp-line); background: var(--fp-bg-2);
+    color: var(--fp-accent);
   }
-  .fp-morebtn:focus-visible { outline: 2px solid var(--fp-ink); outline-offset: 2px; }
+  .fp-morebtn:hover { border-color: var(--fp-accent); background: rgba(255, 176, 32, .08); }
+  .fp-morebtn:focus-visible { outline: 2px solid var(--fp-accent); outline-offset: 2px; }
+  .fp-fewbtn {
+    font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+    flex: 0 0 auto; padding: 9px 12px; border-radius: 10px;
+    border: 1px solid transparent; background: none; color: var(--fp-faint);
+    white-space: nowrap;
+  }
+  .fp-fewbtn:hover { color: var(--fp-ink); }
+  .fp-fewbtn:focus-visible { outline: 2px solid var(--fp-accent); outline-offset: 2px; }
 
   /* ── notices ── */
   .fp-note {
-    margin: 0 16px 12px; padding: 9px 11px; border-radius: 10px;
+    margin: 0 16px 14px; padding: 10px 12px; border-radius: 10px;
     background: var(--fp-warn-bg); color: var(--fp-warn-ink); font-size: 12px;
+    border: 1px solid rgba(255, 176, 32, .22);
   }
   .fp-empty { padding: 4px 16px 16px; color: var(--fp-soft); font-size: 13px; }
-  .fp-quota { padding: 0 16px 2px; font-size: 15px; font-weight: 650; }
+  .fp-quota {
+    padding: 0 16px 6px; font-size: 17px; font-weight: 600;
+    color: var(--fp-ink); font-family: var(--fp-mono);
+    font-variant-numeric: tabular-nums; letter-spacing: -.02em;
+  }
   .fp-ft {
-    padding: 9px 16px 12px; font-size: 11px; color: var(--fp-faint);
-    border-top: 1px solid var(--fp-line-soft);
+    padding: 11px 16px 13px; font-size: 11px; color: var(--fp-faint);
+    border-top: 1px solid var(--fp-line-2);
+    font-variant-numeric: tabular-nums;
   }
   .fp-skel { padding: 16px; color: var(--fp-faint); font-size: 13px; }
 
@@ -400,10 +511,11 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
   @media (max-width: 519px) {
     .fp-t thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
     .fp-t, .fp-t tbody, .fp-t tr, .fp-t td { display: block; width: 100%; }
-    .fp-t tr { padding: 4px 0; border-bottom: 1px solid var(--fp-line-soft); }
+    .fp-t tr { padding: 8px 0; border-bottom: 1px solid var(--fp-line-2); }
     .fp-t tr:last-child { border-bottom: 0; }
     .fp-t td { border: 0; padding: 2px 16px; }
-    .fp-t td.fp-right { text-align: left; padding-top: 6px; padding-bottom: 8px; }
+    .fp-t tr[data-best="1"] td:first-child { box-shadow: inset 3px 0 0 var(--fp-accent); }
+    .fp-t td.fp-right { text-align: left; padding-top: 8px; padding-bottom: 6px; }
     .fp-t td[data-label]::before {
       content: attr(data-label) " ";
       font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
@@ -419,17 +531,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
 (function () {
   "use strict";
 
-  /* ── host bridge ────────────────────────────────────────────────────
-     Three hosts, one render path.
-     * MCP Apps (stable 2026-01-26): send a `ui/initialize` REQUEST, apply
-       hostContext.theme, then notify `ui/notifications/initialized`; the
-       host answers with `ui/notifications/tool-result`.
-     * Draft-era MCP hosts: ignore the unknown request, so a grace timeout
-       falls back to the bare `initialized` notification.
-     * ChatGPT (OpenAI Apps): no handshake at all -- `window.openai` is
-       injected and the payload arrives as `toolOutput`, immediately or on
-       an `openai:set_globals` event.
-     Both paths converge on renderOnce, guarded by a flag. */
+  /* ── host bridge (see the docstring) ──
+     Three hosts, one render path, converging on renderOnce. */
   function post(msg) { try { window.parent.postMessage(msg, "*"); } catch (e) {} }
   var nextId = 1, pending = {};
   function request(method, params, cb) {
@@ -448,31 +551,18 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
     sizeChanged();
   }
+  /* The host's theme is deliberately IGNORED: one look everywhere. */
   request("ui/initialize", {
     appInfo: { name: "flightpowers-flights-card", version: "1.0.0" },
     appCapabilities: {},
     protocolVersion: "2026-01-26"
-  }, function (err, result) {
-    if (result && result.hostContext && result.hostContext.theme) {
-      document.documentElement.setAttribute("data-theme", result.hostContext.theme);
-    }
-    sendInitialized();
-  });
+  }, function () { sendInitialized(); });
   if (document.readyState === "complete") setTimeout(sendInitialized, 400);
   else window.addEventListener("load", function () { setTimeout(sendInitialized, 400); });
   setTimeout(sendInitialized, 900);
 
-  /* ── what may be opened ──────────────────────────────────────────────
-     `buy_link` is upstream data, and the host's link opener is the one
-     place this widget could do harm, so the gate is an ALLOWLIST rather
-     than a scheme check. https only (an http: booking link would be a
-     downgrade we handed the user), and only the booking domains our own
-     backends emit: Google Flights buy links, Booking.com room links, and
-     Stay22 redirects. A row whose link is anything else renders its price
-     with no button at all -- never a button that goes somewhere else.
-     Subdomains of each are allowed (`www.google.com`); a lookalike like
-     `google.com.evil.test` is not, because the match is on the full host
-     or on a dot-prefixed suffix. */
+  /* ── what may be opened ──
+     An ALLOWLIST, not a scheme check; see "Links" in the docstring. */
   var LINK_HOSTS = ["google.com", "booking.com", "stay22.com"];
   function allowedLink(url) {
     if (typeof url !== "string" || !url) return false;
@@ -494,11 +584,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     post({ jsonrpc: "2.0", id: "open-link-" + Date.now(), method: "ui/open-link", params: { url: url } });
   }
 
-  /* ── reading the payload ─────────────────────────────────────────────
-     Nothing below assumes a field exists. The server injects no widget
-     fields into the tool result (that is the point -- a non-UI client sees
-     exactly the JSON it saw before), so every value here is read off the
-     response the API has always returned, and a missing one drops its
+  /* ── reading the payload ──
+     Nothing below assumes a field exists; a missing one drops its
      element rather than printing "undefined". */
   function num(v) {
     if (typeof v === "number" && isFinite(v)) return v;
@@ -524,10 +611,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     if (n === null) n = num(priceString(r));
     return n;
   }
-  /* price_insights_* are bare numbers while `price` is "$231"/"€231", so
-     the symbol has to be read off the row's own price string. No price
-     string means the range prints unprefixed rather than labelled with a
-     currency nobody stated. */
+  /* price_insights_* are bare numbers while `price` is "$231", so the
+     symbol is read off the row; no price string -> no prefix. */
   function symbolOf(rows) {
     for (var i = 0; i < rows.length; i++) {
       var s = priceString(rows[i]), out = "";
@@ -559,27 +644,18 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     return false;
   }
 
-  /* ── the price band ──────────────────────────────────────────────────
-     Google's own tracking for this route: price_insights_low /
-     price_insights_high are the edges of what it calls typical, and
-     price_range_in_relation_to_other_periods is its verdict on the fare.
-     Drawn only when both numbers are there -- an invented band would be a
-     made-up metric, and a bar with nothing behind it is worse than no bar. */
+  /* ── the price band ──
+     Google's own tracking, drawn only when both edges are there. */
   function bandOf(rows, cheapest, cheapestRow, routes) {
     /* Google tracks each route separately, so the band is the CHEAPEST
-       route's own -- the route the marker's fare is on -- and RESTRICTED
-       to it: no insights there means no band, never another route's
-       numbers under this marker. */
+       route's own and RESTRICTED to it: no insights there, no band. */
     var pool = rows, dest = cheapestRow ? destOf(cheapestRow) : "";
     if (dest) {
       pool = rows.filter(function (r) { return destOf(r) === dest; });
       pool.unshift(cheapestRow);
     } else if (routes > 1) {
       /* Unnamed cheapest fare with other routes present: every band on
-         offer belongs to one of THEM (measured: a $90 no-destination row
-         marked against another route's 250-420 band). Only when there is
-         something to mix with -- a table where NO row names a route is
-         one route as far as anyone can tell, and keeps its band. */
+         offer belongs to one of THEM, so none is drawn. */
       return null;
     }
     for (var i = 0; i < pool.length; i++) {
@@ -628,10 +704,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     var total = end - start;
     var pct = function (v) { return Math.max(0, Math.min(100, ((v - start) / total) * 100)); };
 
-    /* One route: "for this route", as before. Several: say out loud that
-       this is one of them -- the cheapest one -- rather than letting a
-       band that covers a third of the table read as if it covered all of
-       it. */
+    /* Several routes: say out loud that this band is one of them, the
+       cheapest, rather than letting it read as if it covered all. */
     var many = routes > 1;
     var label = many
       ? "Google price tracking · cheapest of " + routes + " routes"
@@ -678,10 +752,7 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
   }
 
   /* ── destinations (the why is in the module docstring) ──
-     Grouped on the RAW `to_airport`; only the LABEL is shortened. An
-     upstream string gets an upstream string's treatment: a 400-character
-     one in a nowrap cell was a 3,370px sideways scroll, so the label is
-     capped and the full value lives on the cell's title. */
+     Grouped on the RAW `to_airport`; only the LABEL is shortened. */
   function destOf(r) { return txt(r.to_airport); }
   //: An upstream string, so it gets an upstream string's treatment: a
   //: 400-character `to_airport` in a nowrap cell was a 3,370px sideways
@@ -694,9 +765,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
       ? out.slice(0, LABEL_MAX - 1).replace(/\s+$/, "") + "…"
       : out;
   }
-  /* Every row lands in exactly one bucket, first-seen order, unlabelled
-     rows last: `dest: ""` IS the Other bucket, so nothing downstream has
-     to remember the special case. */
+  /* One bucket per row, first-seen order, unlabelled last: `dest: ""`
+     IS the Other bucket, so nothing downstream special-cases it. */
   function bucketsOf(rows) {
     /* Null-prototype map: a destination called "constructor" is a
        destination like any other, not a hit on Object.prototype. */
@@ -760,9 +830,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     if (sub) td.appendChild(el("span", "fp-leg2", sub));
     return td;
   }
-  /* The label is capped, so the cell carries the full upstream value as
-     its title rather than losing it. A row with no destination shows the
-     same em dash every other empty cell shows. */
+  /* The label is capped, so the full upstream value lives on the
+     cell's title rather than being lost. */
   function destCell(r) {
     var raw = destOf(r);
     var td = cell("To", raw ? destLabel(raw) : "", "", "fp-dest");
@@ -770,13 +839,10 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     return td;
   }
   function renderTable(rows, rt, cheapest, showDest) {
-    /* Only the FIRST row at the cheapest price is badged. A date-range
-       search routinely returns two identical fares (same carrier, two
-       departure times) and badging both says "cheapest" twice. */
+    /* Only the FIRST row at the cheapest price is badged: a date range
+       returns identical fares, and badging both says it twice. */
     var badged = false;
-    /* Only while the table holds more than one destination: filtered to
-       one, the column is the same three letters all the way down and one
-       more column squeezing the six that carry the fare. */
+    /* Only while the table holds more than one destination. */
     var headers = rt
       ? ["Outbound", "Return", "Airline", "Stops", "Total", "Book"]
       : ["Depart", "Airline", "Stops", "Duration", "Price", "Book"];
@@ -793,10 +859,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     table.appendChild(thead);
 
     var tbody = el("tbody");
-    var rowEls = [];
     rows.forEach(function (r) {
       var tr = el("tr");
-      rowEls.push(tr);
       var mine = priceNumber(r);
       var best = cheapest !== null && mine !== null && mine === cheapest && !badged;
       if (best) { badged = true; tr.setAttribute("data-best", "1"); }
@@ -827,109 +891,50 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     table.appendChild(tbody);
     var scroll = el("div", "fp-scroll");
     scroll.appendChild(table);
-    return { scroll: scroll, rowEls: rowEls };
+    return scroll;
   }
 
-  /* ── how tall the card is allowed to be ──
-     Ten rows by default, the rest one scroll away. Measured, not guessed:
-     the cap is the distance from the top of the scroll box to the top of
-     row eleven, then trimmed again while the whole card is over
-     MAX_CARD_PX. Returns how many rows ended up FULLY visible, because
-     the footer says that number out loud and "10" over eight rows would
-     be a made-up figure. */
-  var MAX_ROWS_SHOWN = 10;
-  /* The floor: on a 380px frame a row is a 184px block and the ceiling
-     alone left TWO fares on screen. The ceiling gives way to this, not
-     the other way round. */
-  var MIN_ROWS_SHOWN = 5;
-  /* Ten unwrapped rows are ~510px of table on their own, so a card that
-     shows ten of them lands near 780 with the header, band, pills and
-     footer on top. That is the ceiling, not the target: it exists for the
-     layouts where a row is 90px (a narrow frame, the block layout), where
-     ten rows would be 1,100px of chat window and the card shows as many
-     as fit instead -- and says how many. */
-  var MAX_CARD_PX = 780;
-  var MIN_ROWS_PX = 120;
-  function capRows(scroll, px) {
-    scroll.setAttribute("data-capped", "1");
-    scroll.style.maxHeight = px + "px";
-  }
-  function fitRows(scroll, rowEls) {
-    /* Re-runnable, and it undoes its own last answer first: paint() runs
-       it again once the "showing N of M" line is in the DOM, because that
-       line is part of the card being fitted. */
-    uncapRows(scroll);
-    var n = rowEls.length;
-    if (!n) return 0;
-    var box = scroll.getBoundingClientRect();
-    var top = box.top, natural = box.height;
-    /* Height of the first `i` rows, measured from the top of the scroll
-       box (so it includes the sticky header). `i === n` means "all of
-       them", which has no row to measure against. */
-    function span(i) {
-      return i < n
-        ? Math.ceil(rowEls[i].getBoundingClientRect().top - top)
-        : Math.ceil(natural);
-    }
-    var cap = span(Math.min(MAX_ROWS_SHOWN, n));
-    /* No layout at all (a host that renders the frame with zero height,
-       a measurement taken while hidden): leave the table uncapped rather
-       than collapse it to nothing. */
-    if (!(cap > 0)) return n;
-    var floor = Math.max(MIN_ROWS_PX, span(Math.min(MIN_ROWS_SHOWN, n)));
-    capRows(scroll, cap);
-    /* Not once: capping can bring a scrollbar or a reflowed footer with
-       it. Bounded, because a loop that fights its own layout spins.
-       Applied whatever the row count -- ten 184px block rows are a
-       2,029px card, and "ten rows" never meant "short". */
-    for (var pass = 0; pass < 3; pass++) {
-      var over = document.body.scrollHeight - MAX_CARD_PX;
-      if (over <= 0) break;
-      var next = Math.max(floor, cap - over);
-      if (next >= cap) break;
-      cap = next;
-      capRows(scroll, cap);
-    }
-    if (cap >= natural - 0.5) {
-      /* Everything fits: no cap, no scrollbar, no footer line. */
-      uncapRows(scroll);
-      return n;
-    }
-    var bottom = scroll.getBoundingClientRect().bottom;
-    var visible = 0;
-    for (var i = 0; i < n; i++) {
-      if (rowEls[i].getBoundingClientRect().bottom > bottom + 0.5) break;
-      visible++;
-    }
-    return visible || 1;
-  }
-  function uncapRows(scroll) {
-    scroll.removeAttribute("data-capped");
-    scroll.style.maxHeight = "";
-  }
-  /* The footer line under a capped table. The button is not decoration:
-     a host that swallows the inner scroll would otherwise leave the
-     hidden rows unreachable. Built empty and filled in afterwards: it is
-     part of the card `fitRows` measures, and the number it prints is not
-     known until the fit has happened. */
-  function moreLine(total, expanded, onToggle) {
+  /* ── how many rows are on screen ──
+     Five, plus a button for five more. See the docstring for why. */
+  var PAGE_ROWS = 5;
+  /* What is on screen of what was found, the next page with how many
+     are left, and past page one the way back. */
+  function moreLine(shown, total, onMore, onFewer) {
     var wrap = el("div", "fp-more");
-    wrap.appendChild(el("span", "fp-more-t", ""));
-    var b = el("button", "fp-morebtn", expanded
-      ? "Show top " + MAX_ROWS_SHOWN
-      : "Show all " + total);
-    b.type = "button";
-    b.addEventListener("click", onToggle);
-    wrap.appendChild(b);
+    wrap.appendChild(el("span", "fp-more-t", "Showing " + shown + " of " + total));
+    var acts = el("div", "fp-more-acts");
+    var left = total - shown;
+    if (left > 0) {
+      var step = Math.min(PAGE_ROWS, left);
+      /* "Show 5 more · 274 left"; the tail is dropped on the last page,
+         where "Show 3 more · 3 left" says the same thing twice. */
+      var b = el("button", "fp-morebtn",
+        "Show " + step + " more" + (left > step ? " · " + left + " left" : ""));
+      b.type = "button";
+      b.addEventListener("click", onMore);
+      acts.appendChild(b);
+    }
+    if (shown > PAGE_ROWS) {
+      var f = el("button", "fp-fewbtn", "Show fewer");
+      f.type = "button";
+      f.addEventListener("click", onFewer);
+      acts.appendChild(f);
+    }
+    wrap.appendChild(acts);
     return wrap;
-  }
-  function setMoreText(wrap, shown, total, expanded) {
-    wrap.firstChild.textContent = expanded
-      ? "Showing all " + total + " fares"
-      : "Showing " + shown + " of " + total + " · scroll for more";
   }
 
   /* ── header + footer ── */
+  /* Whose answer this is, before what the answer is. The mark is
+     decorative -- the wordmark carries the name -- so it is aria-hidden. */
+  function brandRow() {
+    var wrap = el("div", "fp-brand");
+    var mark = el("span", "fp-logo");
+    mark.setAttribute("aria-hidden", "true");
+    wrap.appendChild(mark);
+    wrap.appendChild(el("span", "fp-word", "FlightPowers"));
+    return wrap;
+  }
   function headerOf(sc, rows) {
     var cov = (sc && typeof sc.search_coverage === "object" && sc.search_coverage) || {};
     var from = rows.length ? txt(rows[0].from_airport) : "";
@@ -971,11 +976,11 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     var rows = Array.isArray(sc.results) ? sc.results.filter(function (r) { return r && typeof r === "object"; }) : [];
     var status = txt(sc.search_status);
 
+    root.appendChild(brandRow());
     root.appendChild(headerOf(sc, rows));
 
-    /* The non-search exits are returned as data on purpose (a model has to
-       relay them to a human), so the card relays them too instead of
-       drawing an empty table. */
+    /* The non-search exits are data a model has to relay, so the card
+       relays them too instead of drawing an empty table. */
     /* A refusal: two numbers, then the message. See the docstring. */
     if (status === "quota_exceeded") {
       var need = num(sc.combos_requested), got = num(sc.combos_allowed_now);
@@ -1001,14 +1006,13 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
       return;
     }
 
-    /* `selected` is whichever destination's rows the pills are showing --
-       all of them until someone clicks. The band, the cheapest marker and
-       the counts are all recomputed from it: Google's price band is per
-       route, so drawing Rome's band over Athens' fares would be a number
-       we invented. */
+    /* `selected` is the pills' current rows; band, marker and counts are
+       recomputed from it because Google's band is per route. */
     var body = el("div", "fp-body");
     var selected = rows;
-    var expanded = false;
+    /* How many of `selected` are drawn. Reset to one page whenever the
+       selection changes: a pill is a new question. */
+    var shownCount = PAGE_ROWS;
 
     function paint() {
       while (body.firstChild) body.removeChild(body.firstChild);
@@ -1018,35 +1022,21 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
         var n = priceNumber(r);
         if (n !== null && (cheapest === null || n < cheapest)) { cheapest = n; cheapestRow = r; }
       });
-      /* How many routes are in the table RIGHT NOW: three under All, one
-         under a pill. It decides both the destination column and what the
-         band is allowed to claim. */
+      /* Routes in the table RIGHT NOW: it decides the To column and what
+         the band may claim. */
       var routes = bucketsOf(selected).length;
+      /* Computed from the whole SELECTION, never from the page on screen:
+         "cheapest" must not change when someone taps Show more. */
       var band = bandOf(selected, cheapest, cheapestRow, routes);
       if (band) body.appendChild(renderBand(band, sym, routes));
-      var built = renderTable(selected, isRoundTrip(selected), cheapest, routes > 1);
-      body.appendChild(built.scroll);
-
       var total = selected.length;
-      function toggle() { expanded = !expanded; paint(); }
-      var shown = total, more = null;
-      if (expanded) {
-        uncapRows(built.scroll);
-        more = moreLine(total, true, toggle);
-        body.appendChild(more);
-        setMoreText(more, total, total, true);
-      } else {
-        /* The fit decides whether anything is hidden -- not "more than
-           ten", because on a narrow frame the ceiling hides rows out of
-           eight -- and then runs again, because the line it produced is
-           part of the card. */
-        shown = fitRows(built.scroll, built.rowEls);
-        if (shown < total) {
-          more = moreLine(total, false, toggle);
-          body.appendChild(more);
-          shown = fitRows(built.scroll, built.rowEls);
-          setMoreText(more, shown, total, false);
-        }
+      var shown = Math.min(Math.max(PAGE_ROWS, shownCount), total);
+      body.appendChild(
+        renderTable(selected.slice(0, shown), isRoundTrip(selected), cheapest, routes > 1));
+      if (total > PAGE_ROWS) {
+        body.appendChild(moreLine(shown, total,
+          function () { shownCount = shown + PAGE_ROWS; paint(); },
+          function () { shownCount = PAGE_ROWS; paint(); }));
       }
       sizeChanged();
     }
@@ -1055,14 +1045,11 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     if (buckets.length > 1) {
       root.appendChild(renderPills(buckets, rows, function (picked) {
         selected = picked;
-        expanded = false;
+        shownCount = PAGE_ROWS;
         paint();
       }));
     }
     root.appendChild(body);
-    /* Before the first paint, not after: the height trim measures the
-       whole document, and a footer appended later would push the card
-       past the budget it was just fitted to. */
     var ft = footerOf(sc);
     if (ft) root.appendChild(ft);
     paint();
@@ -1091,11 +1078,8 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
   window.addEventListener("load", tryOpenAI);
 
   window.addEventListener("message", function (ev) {
-    /* Gate on source, never origin: sandbox proxies vary the origin, but
-       the sender window is fixed. A NULL source is refused too -- it is
-       what a message relayed from a detached context or a worker looks
-       like, and the tool result is the one input that decides what this
-       frame renders and what its buttons open. */
+    /* Gate on source, never origin: sandbox proxies vary the origin, the
+       sender window does not. A NULL source is refused too. */
     if (!ev.source || ev.source !== window.parent) return;
     var data = ev && ev.data;
     if (!data) return;
@@ -1118,3 +1102,83 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+#: The FlightPowers robot mark, the same file the site serves at
+#: `public/brand/robot-mark-56.png` (2,737 bytes), inlined because this
+#: frame is allowed no network of any kind. Read at import from a module
+#: constant rather than from disk: the deployment bundle is the source of
+#: truth for what is served, and a file read at request time on a cold
+#: serverless instance is a failure mode this card does not need.
+MARK_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAC8AAAA4CAMAAABaKlG9AAADAFBMVEVMaXETH1AtN6Yp"
+    "SLkNFzwmKlYKECpPbM8XJoYKFDUNFzkzRaxXedcfMYM7a98qSbgwO7IsTsMVHT0KESol"
+    "MY4fMYUgN5A6ctkNFTYMFTUOFzslQaweK25AQrMkMZgwUbU/dM5CTbYuL44vVMpGjNoZ"
+    "IVcuRbwZJ2gWJmRVcrAvNpIfKnwoLYgrUa0MFTMOEi89PKEiNItHjepIQbQpPaQmOqAm"
+    "MYEiLHwrMaBAOrA4P488YtMkPZ03TLI8et40NZ0OGDsSFDEOFzwWHkkNEzBVRLcLEy5F"
+    "QbUKEClSSblGPblbSbdDPrcKECYzPKkoRag1N5AZLW5LldYpLIRAcNsvV7g/UddHlOc0"
+    "ZbwKEC1Fi+I2ZtQbIlcADBkkLX0aJmkoRLQ4TcE/ddQ/fd89c903Y9lNQ7pAOag2NJVD"
+    "gdJDXtNDiuc8WskxNZ5AgtwXKWY2ZcZSiuswWbsqTa4yW7oKEiwgGEMOEShOQbYUIEoM"
+    "Ei4aFjkKECkjNI4PGDRDWdhOl9wvUsM2MIMyWMthp/WP+v8NFjUsUa05adkNFzoOGDsL"
+    "EiwKESkvUMgMEzAwVcsNFTMzV9A5aNwrSLoyUMwOFzcKDyUSHUgIFT82Ydk/dOU1X9Yj"
+    "N5g3YN0OGT80XNMqRbYrS74uVdIxWtgpQKw3ZNopQ7I9cOPY//8LFTkuTsIxSsUsS8Ic"
+    "KnIJGUk5Y+A8beMVIlY6aOLE7/onPqUlOZ0QIVEvVMUUGD0WI18pO6ozWtIqSbErM6BB"
+    "eu83YtM1YssbMXUlO6E5PbpAeugcMnw5adcvP7c2a9E1OawyWs1KddpVgd4xR8IuR78i"
+    "NJIoMZUfMIo/cespOKUtUL0aL2oZKGYvWLY1VIYjP5q86PbR+v/L+P4tNqk9d+IhOYwj"
+    "PXIsSH2t2PLM8PuDsOo4bdsnRqA8YOU7c96ApsUlRJCz3vVJbJp8qedfjONCa/hGiPgl"
+    "TtOFrc1WeaQnTMul0/SWxfB0mLlliLNQcJ93zP9bfqdkqv5rj7OSt9JllOOKNdaLAAAA"
+    "znRSTlMAof7QRwN0AgEYdBgG/v7+/vgKR/51ov6hzvjQGyv+Sich/flBKf1yRxBI/v7+"
+    "92lzzu+tpPqIpxP+VrvXNv39oTTQ291doMPMTOs9+/rA+zqjMOqQdkCa/Ty2zlsU1ev4"
+    "/XSf4PyV39hie/tT6Nz4pubF8/KmpliMfqmJfPVS71HnY+D+/vzt9P//////////////"
+    "////////////////////////////////////////////////////////////////////"
+    "/////////iUO0/8AAAAJcEhZcwAACxIAAAsSAdLdfvwAAAZ9SURBVEjHlZV3XBRXEMef"
+    "F9e7CHcHBEEjJRDpYO89amyJGmOJppree+89+dzu3e5e73uVInDAcZTQe0dBOoK9JbZE"
+    "03vmqcRAwJDfP2937zvzZt6bmUNoWG2duZVAAjQ68VHwJ5/+th3W0UmA5r/4y4tho+YB"
+    "3G5+ZvQ4kHe2bf9f/JNfPzX68Pne6OGvFyFvvmBUNOQb88ip93G+/P/cA3x6T3nohWTz"
+    "qVnT18Vg6/+IPOahR7IyA7PNpx48ULX+Da9rZ8FHU54rzc4sC8zOzHxwTp1P1fpbr2UA"
+    "57K0TSTKLgferMpR7fHxWTAdESPjHzz9pSE5K6u2NjPRnO9Upe3x4S0YcQc+umnmwcBq"
+    "MKitzzabU5XAR/JK1gePYMBHd30TuLTaYEhWlGfq9R0yVVraHl5J1azhCxWK4OlqQyDm"
+    "s8qMZnmqXCVL28vjHbj9tuE2EHiDe4Mh8CDmFY3GfDnmI50HeFWPIe9/70DwQ58rNZQa"
+    "IOFkkcjIyIvkEI+1zofX8PjCYXh0V/1SQ31Cd32pQaRI1BsdchXIafJvP7Bg2ayhzUag"
+    "haU7lio6NWr36fKsrESjRQ7xFAu1tKagfUG4z0eDbwGMX0recTCBUnM6XUbnJovZ7JD1"
+    "duno3SRN7WsIL3nCe9AGfBT2SvKOL3ulXMbZiz06WltxqEJL6Xou/pzHSV0N4XXLwgZt"
+    "AFf1iqj7xCFKd2R/yv4eHSvVaGj87OnRXeaXDDpT4F9uTDhxmtKdTfGkfJXBcSTJZfye"
+    "cizlVx3laogvCQ8e5B+KfrHy5ImTtO5s37GUP/JIyW4JmfEV8N/qWCEvLmRLzOADItBc"
+    "cW95Byc5vL8P/JMSCfA/pvR5juhIU6uwdd6QKiVQ0OLcBHMFlfGt50yP7hKvO3K0/6c8"
+    "uqswPm5LxNCqJlDonJNFTAWZcfgwdr8bB9R5OI/syi2Jj1/47woi0JKAmxlLDQueIXrg"
+    "8cq6CkOWzbtjuIKDWfCCXVYsIXEwIGxASkwhJbNH6HoChX2s8nWzkr9Fsu72kGfDRupI"
+    "PlryoV1IceQAz9E1hc/eca0GDn4piWO5yyGRJM21bxyhG/l8gYBPQNIztBpaQnJww2pa"
+    "o70/FhEEISAI/tCpNlAWWjUlldIsy8IiVXP+A+H8M2cYmVO2Llq0aBvaVvu8Rq2mMSuV"
+    "UlJNAW8umr5x45rH1nlfjQs6/e6DbdmZjHDz56LyCrX6soVGIy0whWwZ84Czrq6qas3f"
+    "XQ9DcGapQvGo5dBnvScb9cYatxZHz3LagkrTvjghHbcnLdLH5/YrgwuPqWrcsvluLr88"
+    "IZ+pr83vKC4uFtuSWlr2xZlMnBZPrl3tV+aKAN1dCrjRWEx2nUiu7e6uZ+x2RiZLVzpb"
+    "hCbr3kK3OkeVvjeSx1uDux6iqVYo9EZLUa/0dJtCJCprzO/osNnEVqtVLFOlKq0u6SFZ"
+    "+l5rYUjDOvwXgh5ue1RvKZIzNVR3lkKhSITQyiyNjXZLrUMuA36f1AV4UntrySwckPc9"
+    "ZotFzjCpBWQ5xhP1eofDoXc0HT1+4RJvYt1KZVJhrn/r4zG4zO4xMwyjVFq1eSJ9IsjR"
+    "fO58s6LZ42mCNNKVSTmc1umszGnxb33CDx9PqC+4EStzyE5IWq/HnvuOnfF4mu1yRmYT"
+    "JxVq1SZnbq6/f/hCfNcEihaK0205BZrO/CKLxWg0OvTnj/b3HXdYwI/N6jS5NW5TZUu8"
+    "695LpUGg92A+CfMoTU1Hh7wITCx2x/f9/T/Yi1Q4nFxTl0aqdRVoqdev8GO0G6QUxUpr"
+    "YHdGLrc3Hf9h//nvz5TZsfvK3FyXhqagltSvYV6A/FZqoXZpmqpQptuKZQxTdq7/zwvN"
+    "nqbvZDZlZU5liwu8UTSrXukHNIEi8jiod5be8HySMl0sBoPvjjfb7eea0lNtzhyY6A9s"
+    "AFjN0l/cAjSB7s27ETSVXRtl2iUWb/L19b0ZC9bIXXM2zXlXGLWWhd+nTv1i2iX+zZWT"
+    "VqxYMWnVO/NnLJ583eTJ1w0IXhZPnjHj/qBpqyaB1q56GyfwzOaJy5cvn7j6rZ1obkDA"
+    "7NkB88YMaHPA7ICAeXPRLa9OBK1ePSYWIa+ntkWNB42b5ociJkyYEDV+3FWNj4IvEchv"
+    "2jhMjJ8w3QvdFBoaGj127A037IS9gqLhYexVwUt0BBz5TvwxOjY2NhjN98K6HoRP677r"
+    "h+o+fOL4wcsrKCho/l/lRgz0CMRqDgAAAABJRU5ErkJggg=="
+)
+
+#: What every host actually receives: the document above with the brand
+#: mark's bytes substituted in, and nothing else done to it.
+#:
+#: There WAS a build step here -- the frame was authored with 12 KB of
+#: comments and served with them stripped, to pay for the inlined mark.
+#: A zero-context review found two documents it corrupted: an apostrophe
+#: in HTML prose ("Google's band") desynchronised the quote state and ate
+#: the JavaScript after it, and a `//` line comment containing `/*` opened
+#: a block comment that swallowed the next string. Both are fixable and
+#: neither is worth fixing: a stripper correct on every input is a
+#: JavaScript tokenizer, and this is a 35 KB string constant. So the
+#: comments moved out of the frame instead -- the long ones into the
+#: docstring above, the rest shortened -- and the served bytes are now the
+#: authored bytes. `tests/test_widget.py` runs `node --check` over them.
+FLIGHTS_WIDGET_HTML = _FRAME_SOURCE.replace("__FP_MARK_B64__", MARK_PNG_BASE64)

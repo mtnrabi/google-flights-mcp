@@ -22,6 +22,8 @@ Four properties, in the order they would hurt:
 
 import hashlib
 import json
+import pathlib
+import re
 
 import httpx
 import pytest
@@ -58,6 +60,7 @@ def make_settings(**overrides) -> Settings:
         max_searches_per_tool_call=5,
         auto_max_searches=5,
         hub_requests_per_minute=0,
+        hub_burst_capacity=1,
         fanout_deadline_seconds=0.0,
         max_concurrent_searches=3,
         max_http_connections=10,
@@ -142,15 +145,151 @@ class TestTheResource:
             "src=",
         ):
             assert banned not in lowered, f"{banned!r} would be an external request"
+        # The one asset the card draws is the brand mark, and it is INSIDE
+        # the document. Stated as a rule rather than left as an accident of
+        # "no <img>": every CSS url() is a data URI. Matched case-sensitively
+        # on the source, because the other `URL(` in this frame is
+        # `new URL(...)` in the link allowlist -- a parser, not a fetch.
+        css_urls = re.findall(r"[\s:]url\(([^)]{0,32})", html)
+        assert len(css_urls) == 1, css_urls
+        assert css_urls[0].startswith("data:image/png;base64,"), css_urls
+        assert lowered.count("url(data:image/png;base64,") == 1
         # Every runtime value is written with textContent, never innerHTML:
         # `buy_link` and the airline names come from an upstream response.
         assert "innerhtml" not in lowered
         assert "textcontent" in lowered
-        # Theme: light is the base, dark is defined for the host that tells
-        # us nothing AND for the host that hands us a theme.
-        assert "prefers-color-scheme: dark" in lowered
-        assert '[data-theme="dark"]' in lowered
-        assert "color-scheme: light dark" in lowered
+
+    def test_the_card_commits_to_one_dark_look_on_every_host(self):
+        """Matan, 2026-09-22: "widget UI is WAYYYY too similar to google
+        flights. do dark mode something cooler with flightpowers logo."
+
+        So there is no light palette and no branch: a light claude.ai and a
+        dark one get the same card. `color-scheme: dark` is what stops
+        Chromium sliding an opaque white sheet under it, and the ground is
+        painted explicitly rather than inherited from the host.
+        """
+        html = FLIGHTS_WIDGET_HTML
+        lowered = html.lower()
+        assert "color-scheme: dark" in lowered
+        assert "prefers-color-scheme" not in lowered, (
+            "a theme branch is the chameleon behaviour this replaced"
+        )
+        assert "data-theme" not in lowered
+        # The site's own tokens, by value (src/app/globals.css).
+        for token in ("#0c0e11", "#171b21", "#222831", "#e8edf2", "#7d8794"):
+            assert token in lowered, f"ink token {token} missing"
+        assert lowered.count("#ffb020") >= 2, "signal-500 is the one accent"
+        # The verdict colours are the band's alone.
+        for token in ("#4ade80", "#f87171"):
+            assert token in lowered
+        # Google blue is gone, and so is the white ground.
+        assert "#1f6feb" not in lowered
+        assert "--fp-bg: #ffffff" not in lowered
+        # Numbers are monospace and tabular, on the site's stack.
+        assert "ui-monospace" in lowered
+        assert "font-variant-numeric: tabular-nums" in lowered
+
+    def test_the_brand_mark_is_the_sites_own_file(self):
+        """The logo is the bytes of public/brand/robot-mark-56.png, not a
+        redrawn lookalike: a card that carries a mark nobody else ships is
+        the point, and it has to be THE mark."""
+        import base64
+
+        from src.widget import MARK_PNG_BASE64
+
+        raw = base64.b64decode(MARK_PNG_BASE64)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+        assert len(raw) == 2737, "robot-mark-56.png is 2,737 bytes"
+        assert MARK_PNG_BASE64 in FLIGHTS_WIDGET_HTML
+        assert 'el("span", "fp-word", "FlightPowers")' in FLIGHTS_WIDGET_HTML
+        assert "function brandRow()" in FLIGHTS_WIDGET_HTML
+
+    def test_what_is_served_is_what_is_written(self):
+        """No build step between the source and the bytes.
+
+        There used to be one: the frame was authored with 12 KB of
+        comments and served with them stripped, to pay for the inlined
+        brand mark. A zero-context review found two documents it
+        corrupted -- an apostrophe in HTML prose ("Google's band")
+        desynchronised the quote state and ate the JavaScript after it,
+        and a `//` line comment containing `/*` swallowed the next string.
+        A stripper correct on every input is a JavaScript tokenizer, which
+        is not a thing to own for a 35 KB string constant, so the comments
+        moved out of the frame instead. This pins that there is nothing
+        left to get wrong.
+        """
+        from src.widget import _FRAME_SOURCE, MARK_PNG_BASE64
+
+        assert FLIGHTS_WIDGET_HTML == _FRAME_SOURCE.replace(
+            "__FP_MARK_B64__", MARK_PNG_BASE64
+        )
+        import src.widget as widget_module
+
+        assert not hasattr(widget_module, "_without_block_comments")
+        assert FLIGHTS_WIDGET_HTML.startswith("<!doctype html>")
+        assert FLIGHTS_WIDGET_HTML.rstrip().endswith("</html>")
+        assert FLIGHTS_WIDGET_HTML.count("<script>") == 1
+        assert FLIGHTS_WIDGET_HTML.count("</script>") == 1
+
+    def test_the_served_javascript_parses(self):
+        """A syntax gate on the bytes, not on the intention.
+
+        `tests/test_widget_render.py` executes the frame in headless
+        Chrome and SKIPS where there is no Chrome, so on a machine without
+        one a frame whose JavaScript does not parse would ship with a
+        green suite. This does not skip: no `node` is a FAILURE, because
+        the alternative is a gate that is absent exactly when it is the
+        only one left.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        node = shutil.which("node")
+        assert node, (
+            "node is required to syntax-check the served frame; install it "
+            "rather than skipping this test -- it is the only parse check "
+            "that runs without a browser"
+        )
+        start = FLIGHTS_WIDGET_HTML.index("<script>") + len("<script>")
+        end = FLIGHTS_WIDGET_HTML.index("</script>")
+        script = FLIGHTS_WIDGET_HTML[start:end]
+        assert "(function ()" in script
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+            fh.write(script)
+            path = fh.name
+        try:
+            done = subprocess.run(
+                [node, "--check", path], capture_output=True, text=True, timeout=60
+            )
+        finally:
+            pathlib.Path(path).unlink(missing_ok=True)
+        assert done.returncode == 0, done.stderr[-2000:]
+
+    def test_the_syntax_gate_would_catch_a_broken_frame(self):
+        """The gate above only means something if it can fail. Same check,
+        run over the served script with one quote removed."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        node = shutil.which("node")
+        assert node
+        start = FLIGHTS_WIDGET_HTML.index("<script>") + len("<script>")
+        end = FLIGHTS_WIDGET_HTML.index("</script>")
+        broken = FLIGHTS_WIDGET_HTML[start:end].replace(
+            'var LINK_HOSTS = ["google.com"', 'var LINK_HOSTS = ["google.com'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+            fh.write(broken)
+            path = fh.name
+        try:
+            done = subprocess.run(
+                [node, "--check", path], capture_output=True, text=True, timeout=60
+            )
+        finally:
+            pathlib.Path(path).unlink(missing_ok=True)
+        assert done.returncode != 0, "the gate passed a document it should refuse"
 
     def test_the_frame_draws_what_the_card_promises(self):
         """The three things a fare card has to show, present as code
@@ -200,35 +339,66 @@ class TestTheResource:
         # dead button appears on a row whose link is refused.
         assert html.count("allowedLink(") >= 3
 
-    def test_the_table_shows_ten_rows_and_scrolls_for_the_rest(self):
-        """Matan, 2026-09-22, on the live card: "widget should not be that
-        long: showcase the top 10, scrollable for more". A 36-fare answer
-        used to render as a 36-row card.
+    def test_the_table_draws_five_rows_and_a_button_for_the_rest(self):
+        """Matan, 2026-09-22, watching a demo scroll a 93-row answer: "wtf
+        is that long scroll. limit the presented items to the top 10, and
+        allow the user to tap on a button to view more." Then, on the
+        ten-row card: "make it top 5, still seems too long."
+
+        v2 answered the first half by capping the table's HEIGHT and
+        letting the reader scroll inside it. That is still a scroll, and at
+        93 rows it is a scroll trap in a chat message. v3 draws five ROWS
+        and appends five more per tap; the card is as tall as what it draws.
 
         The behaviour is executed in tests/test_widget_render.py; this
         pins the shape for a machine with no browser."""
         html = FLIGHTS_WIDGET_HTML
-        assert "var MAX_ROWS_SHOWN = 10;" in html
-        assert 'scroll.setAttribute("data-capped", "1");' in html
-        assert '.fp-scroll[data-capped="1"] { overflow-y: auto; }' in html
-        # The column names survive the scroll, or row 20 is six unlabelled
-        # cells.
-        assert "position: sticky; top: 0; z-index: 1;" in html
-        # The rest are reachable even on a host that swallows the inner
-        # scroll and sizes the frame to its content.
-        assert '"Show all " + total' in html
-        assert '"Show top " + MAX_ROWS_SHOWN' in html
+        assert "var PAGE_ROWS = 5;" in html
+        # Ten ROWS are built, not thirty-six with twenty-six hidden.
+        assert "renderTable(selected.slice(0, shown)" in html
+        # Nothing caps the box and nothing scrolls inside it.
+        for gone in (
+            "data-capped",
+            "overflow-y: auto",
+            "maxHeight",
+            "fitRows",
+            "MAX_CARD_PX",
+            "position: sticky",
+        ):
+            assert gone not in html, f"v2's scroll machinery is still here: {gone}"
 
-    def test_the_number_in_the_footer_is_measured_not_assumed(self):
-        """"Showing 10 of 36" over eight visible rows would be a number we
-        made up. The cap is measured off the layout (row 11's own position)
-        and trimmed again if the card is still over its ceiling, so the
-        count has to be counted afterwards rather than assumed to be 10."""
+    def test_the_button_says_how_many_more_and_how_many_are_left(self):
+        """A button that only said "Show more" would make someone tap nine
+        times to learn the answer is ninety. The count of what is left is
+        on the button; the count of what is on screen is beside it."""
         html = FLIGHTS_WIDGET_HTML
-        assert "rowEls[i].getBoundingClientRect().top - top" in html
-        assert "var cap = span(Math.min(MAX_ROWS_SHOWN, n));" in html
-        assert "if (rowEls[i].getBoundingClientRect().bottom > bottom + 0.5) break;" in html
+        assert 'var step = Math.min(PAGE_ROWS, left);' in html
+        assert (
+            '"Show " + step + " more" + (left > step ? " \u00b7 " + left + " left" : "")'
+            in html
+        )
         assert '"Showing " + shown + " of " + total' in html
+        # ...and the way back, once past the first page.
+        assert 'if (shown > PAGE_ROWS) {' in html
+        assert '"Show fewer"' in html
+
+    def test_a_tap_appends_one_page_and_a_pill_resets_to_one(self):
+        """`shownCount` is the only state the card keeps. A pill is a new
+        question, so landing on row 40 of a route just picked is not an
+        answer to it."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "function () { shownCount = shown + PAGE_ROWS; paint(); }" in html
+        assert "function () { shownCount = PAGE_ROWS; paint(); }" in html
+        assert "        shownCount = PAGE_ROWS;\n        paint();" in html
+
+    def test_the_cheapest_and_the_band_come_from_the_whole_selection(self):
+        """Not from the page on screen: "cheapest" means cheapest of the 93
+        fares the caller paid for, and it must not change when someone taps
+        Show more."""
+        html = FLIGHTS_WIDGET_HTML
+        assert "var band = bandOf(selected, cheapest, cheapestRow, routes);" in html
+        assert "var routes = bucketsOf(selected).length;" in html
+        assert "var total = selected.length;" in html
 
     def test_destinations_become_pills_and_only_when_there_are_several(self):
         """Both tools take a LIST of destinations and answer with one flat
@@ -251,8 +421,8 @@ class TestTheResource:
         html = FLIGHTS_WIDGET_HTML
         assert "var band = bandOf(selected, cheapest, cheapestRow, routes);" in html
         assert (
-            "renderTable(selected, isRoundTrip(selected), cheapest, routes > 1)"
-            in html
+            "renderTable(selected.slice(0, shown), isRoundTrip(selected), "
+            "cheapest, routes > 1)" in html
         )
         assert "selected = picked;" in html
 
@@ -306,29 +476,20 @@ class TestTheResource:
         drawn. A table where NO row names a route keeps its band -- there
         is nothing to mix it with."""
         html = FLIGHTS_WIDGET_HTML
-        assert "} else if (routes > 1) {\n      /*" in html
-        assert html.count("      return null;\n    }") >= 1
+        assert "} else if (routes > 1) {" in html
+        assert html.count("return null;") >= 1
 
     def test_a_narrow_frame_spends_its_height_on_fares(self):
-        """At 380px the header, pills, band and footer ate 580 of the 780
-        budget and the card answered a 36-fare search with two fares. The
-        band collapses to one line below 520px, and five rows is a floor
-        the ceiling gives way to."""
+        """A 70px bar in a phone-width frame is height that should be a
+        fare, so below 520px the whole band collapses to one line. The row
+        COUNT no longer varies with the width -- five rows are five rows at
+        every width, they are just taller ones -- which is what removing
+        the height ceiling bought."""
         html = FLIGHTS_WIDGET_HTML
-        assert "var MIN_ROWS_SHOWN = 5;" in html
         assert 'window.matchMedia("(max-width: 519px)")' in html
         assert "if (isNarrow()) return renderBandLine(b, sym, routes);" in html
         assert 'el("div", "fp-bandline")' in html
-        assert "var floor = Math.max(MIN_ROWS_PX, span(Math.min(MIN_ROWS_SHOWN, n)));" in html
-
-    def test_ten_rows_are_fitted_too(self):
-        """The old early return meant a 10-row answer was never capped at
-        all: ten 184px block rows are a 2,029px card with no scroll and no
-        Show all. The ceiling applies whatever the row count, and whether
-        anything is hidden is decided by the fit, not by the count."""
-        html = FLIGHTS_WIDGET_HTML
-        assert "if (rowEls.length <= MAX_ROWS_SHOWN) return rowEls.length;" not in html
-        assert "shown = fitRows(built.scroll, built.rowEls);\n        if (shown < total) {" in html
+        assert "MIN_ROWS_SHOWN" not in html, "the five-row floor was ceiling logic"
 
     def test_a_message_with_no_source_is_refused(self):
         """The tool result decides what this frame renders and what its

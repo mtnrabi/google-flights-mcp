@@ -312,14 +312,17 @@ _FLIGHTS_BODY = (
     "Fan-out is capped at {cap} date/destination combinations per call, and "
     "the cap RISES BY ITSELF, up to {auto_max}, when the question is bigger "
     "than that -- a whole month of departures at three trip lengths is 93 "
-    "combinations and runs as one call. `max_searches` sets it explicitly, "
-    "up or down, to a hard maximum of {hard_max}. A request past the cap in "
-    "force is sampled evenly across the range and says so in "
+    "combinations and runs as one call, and so does a whole month at three "
+    "trip lengths across three destinations (279). `max_searches` sets it "
+    "explicitly, up or down, to a hard maximum of {hard_max}. A request past "
+    "the cap in force is sampled evenly across the range and says so in "
     "`search_coverage`, which also names the cap and why it is that number "
     "(`max_searches_source`).\n\n"
-    "Every combination is one request billed to the caller's own plan, so a "
-    "whole-month search is 93 of them and the same month over two "
-    "destinations is 186. Worth one sentence to the user before running one, "
+    "Every combination is one request billed to the caller's own plan: a "
+    "whole month at one destination and three trip lengths is 93 requests, "
+    "the same month over two destinations is 186, and a whole month x 3 "
+    "nights x 3 destinations is about 279 requests and takes a couple of "
+    "minutes. Worth one sentence to the user before running one, "
     "unless they asked for the month themselves. `api_usage."
     "hub_requests_billed` is what the plan was actually charged -- higher "
     "than the combination count when a failed search was retried -- and is "
@@ -876,7 +879,7 @@ def _note_hidden_combinations(
 #: combination that ran and answered has a row, and a ceiling below the
 #: search cap breaks exactly that promise -- at 60 against a 93-combination
 #: month, 33 searches were billed, answered, named in `search_coverage`, and
-#: had nothing in `results`.
+#: had nothing in `results`. Tied, so the 300 cap moved it to 300 too.
 MAX_AUTO_LIMIT = HARD_MAX_SEARCHES
 
 
@@ -900,7 +903,8 @@ def resolve_cap(
     * with no `max_searches`, the cap is the default UNLESS the request is
       bigger than the default, in which case it rises to what was actually
       asked for, up to `auto_cap`. "Cheapest round trip to Rome any day in
-      October for 3, 4 or 5 nights" is one question and 93 combinations; a
+      October for 3, 4 or 5 nights" is one question and 93 combinations, and
+      the same question over Rome, Athens and Budapest is 279; a
       30 cap answered it from a third of the month and called it cheapest.
       The raise is bounded by the request, so a small question never costs
       more than it did.
@@ -2267,7 +2271,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 max_concurrency=settings.max_concurrent_searches,
                 # Shared with every other fan-out on this key, not owned
                 # by this call: see src/pacing.py.
-                pacer=bucket_for(credential.key, settings.hub_requests_per_minute),
+                pacer=bucket_for(
+                    credential.key,
+                    settings.hub_requests_per_minute,
+                    settings.hub_burst_capacity,
+                ),
                 deadline_seconds=settings.fanout_deadline_seconds,
                 # Only on a fan-out bigger than the default cap, and only
                 # for a caller spending their OWN plan: the trial is refused
@@ -2799,11 +2807,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             max_searches: The billed requests this call may make, up or down.
                 Leave it out for the normal behaviour: the cap covers the
                 request when the request is reasonable (a whole month at three
-                trip lengths, 93 combinations, runs in full) and anything
+                trip lengths is 93 combinations and a whole month x 3 nights
+                x 3 destinations is 279; both run in full) and anything
                 past it is sampled evenly across the range rather than cut
                 short. Set it lower to spend less of the
                 plan's quota on a wide search, or higher -- to a hard maximum
-                of 200 -- for a grid wider than that.
+                of 300 -- for a grid wider than that.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
                 line, is what the model actually sees -- see the note there.
         """
@@ -2965,11 +2974,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             max_searches: The billed requests this call may make, up or down.
                 Leave it out for the normal behaviour: the cap covers the
                 request when the request is reasonable (a whole month at three
-                trip lengths, 93 combinations, runs in full) and anything
+                trip lengths is 93 combinations and a whole month x 3 nights
+                x 3 destinations is 279; both run in full) and anything
                 past it is sampled evenly across the range rather than cut
                 short. Set it lower to spend less of the
                 plan's quota on a wide search, or higher -- to a hard maximum
-                of 200 -- for a grid wider than that.
+                of 300 -- for a grid wider than that.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
                 line, is what the model actually sees -- see the note there.
         """
@@ -3361,7 +3371,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 max_concurrency=settings.max_concurrent_searches,
                 # Shared with every other fan-out on this key, not owned
                 # by this call: see src/pacing.py.
-                pacer=bucket_for(credential.key, settings.hub_requests_per_minute),
+                pacer=bucket_for(
+                    credential.key,
+                    settings.hub_requests_per_minute,
+                    settings.hub_burst_capacity,
+                ),
                 deadline_seconds=settings.fanout_deadline_seconds,
                 # Same gate as the flights fan-out; see _quota_gate.
                 gate=_quota_gate(

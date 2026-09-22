@@ -10,8 +10,8 @@ is honest and is still the wrong answer: the cheapest of 30 days presented
 against a question about 31 is a number the user will book on.
 
 So the cap rises by itself to cover a request that size (AUTO_MAX_SEARCHES),
-an explicit `max_searches` reaches 200, and two new things had to come with
-that, both tested here:
+an explicit `max_searches` reaches the same ceiling, and two new things had to
+come with that, both tested here:
 
 * **a rate**, because 93 requests at twelve in flight is ~290 a minute and
   the caller's plan is rate limited per minute as well as per month;
@@ -21,6 +21,15 @@ that, both tested here:
 
 The integration test at the bottom is the one that answers Matan's question
 directly: 93 combinations, a stubbed backend, one call, under budget.
+
+2026-09-22, same day, second question: "what about multiple destinations
+support?" A month x 3 nights x THREE destinations is 31 x 3 x 3 = 279
+combinations, which the 100 auto cap sampled to a third of itself and which
+an explicit `max_searches` could not reach either at a hard cap of 200. Both
+are 300 now, and the two things that had to move with them are pinned below:
+the deadline (280s of a 300s function, because 279 combinations spend ~80s of
+wall clock on the pacer alone) and the pacer itself, which is NOT raised --
+120 a minute is what keeps a PRO key under its own 150/min limit.
 """
 
 import asyncio
@@ -36,11 +45,17 @@ from src.fanout import (
     execute_plan,
     plan_roundtrip,
 )
-from src.pacing import TokenBucket, bucket_for, reset_buckets
+from src.pacing import (
+    DEFAULT_HUB_BURST_CAPACITY,
+    TokenBucket,
+    bucket_for,
+    reset_buckets,
+)
 from src.quota_gate import QUOTA_EXCEEDED
 from src.server import resolve_cap
 from src.settings import (
     AUTO_MAX_SEARCHES,
+    DEFAULT_HUB_BURST_CAPACITY as SETTINGS_BURST_CAPACITY,
     DEFAULT_HUB_REQUESTS_PER_MINUTE,
     DEFAULT_MAX_SEARCHES,
     HARD_MAX_SEARCHES,
@@ -57,6 +72,12 @@ MONTH = dict(
     nights=[3, 4, 5],
 )
 MONTH_COMBOS = 31 * 3
+
+#: The same month and trip lengths over THREE destinations: 279
+#: combinations, the question Matan asked about on 2026-09-22 and the one
+#: the 300 cap exists for.
+MONTH3 = dict(MONTH, to_airport=["FCO", "ATH", "BUD"])
+MONTH3_COMBOS = 31 * 3 * 3
 
 
 def _cap(requested, max_searches=None, trial_remaining=None, default=None, auto=None):
@@ -79,17 +100,34 @@ class TestTheCapPolicy:
     def test_a_month_at_three_trip_lengths_raises_the_cap_to_cover_it(self):
         assert _cap(MONTH_COMBOS) == (MONTH_COMBOS, "auto_span")
 
+    def test_a_month_at_three_nights_across_three_destinations_runs_in_full(self):
+        """279 combinations, no `max_searches`, nothing sampled.
+
+        This is the whole point of the 2026-09-22 raise: at the old auto
+        ceiling of 100 the answer to "Rome, Athens or Budapest, any day in
+        October, 3-5 nights" was the cheapest of a third of the grid,
+        presented against a question about all of it.
+        """
+        assert _cap(MONTH3_COMBOS) == (MONTH3_COMBOS, "auto_span")
+        assert MONTH3_COMBOS == 279
+
     def test_the_automatic_raise_never_exceeds_its_own_ceiling(self):
-        # Three destinations across the month is 279; the raise stops at 100
-        # and the plan is sampled from there, which the coverage says.
-        assert _cap(279) == (AUTO_MAX_SEARCHES, "auto_span")
+        # Two months across three destinations is past even the raised
+        # ceiling; the raise stops at it and the plan is sampled from
+        # there, which the coverage says.
+        assert _cap(600) == (AUTO_MAX_SEARCHES, "auto_span")
+        assert AUTO_MAX_SEARCHES == 300
 
     def test_the_raise_is_bounded_by_what_was_actually_asked_for(self):
         """A 40-combination question costs 40, not the auto ceiling."""
         assert _cap(40) == (40, "auto_span")
 
-    def test_an_explicit_value_raises_past_the_automatic_ceiling(self):
-        assert _cap(279, max_searches=200) == (200, "explicit")
+    def test_an_explicit_value_raises_past_the_default(self):
+        """The automatic raise is bounded by the REQUEST; an explicit value
+        is not, which is how a caller buys headroom for a grid the planner
+        cannot know is coming."""
+        assert _cap(20, max_searches=250) == (250, "explicit")
+        assert _cap(MONTH3_COMBOS, max_searches=300) == (300, "explicit")
 
     def test_an_explicit_value_still_lowers(self):
         assert _cap(MONTH_COMBOS, max_searches=5) == (5, "explicit")
@@ -99,6 +137,20 @@ class TestTheCapPolicy:
 
     def test_a_trial_caller_gets_no_automatic_raise(self):
         assert _cap(MONTH_COMBOS, trial_remaining=10) == (10, "trial")
+
+    def test_a_trial_caller_is_not_raised_to_three_hundred_either(self):
+        """The 300 cap is a decision to spend more of the CALLER'S money.
+        On a trial the money is ours, so the default is the ceiling and the
+        day's remaining allowance lowers it further."""
+        assert _cap(MONTH3_COMBOS, trial_remaining=10) == (10, "trial")
+        assert _cap(MONTH3_COMBOS, max_searches=300, trial_remaining=10) == (
+            10,
+            "trial",
+        )
+        assert _cap(MONTH3_COMBOS, trial_remaining=10_000) == (
+            DEFAULT_MAX_SEARCHES,
+            "trial",
+        )
 
     def test_a_trial_caller_cannot_buy_the_raise_with_max_searches(self):
         assert _cap(MONTH_COMBOS, max_searches=93, trial_remaining=10) == (
@@ -126,6 +178,14 @@ class TestThePlanItself:
         assert plan.requested_combinations == MONTH_COMBOS
         assert plan.executed_combinations == MONTH_COMBOS
         assert plan.truncated is False
+
+    def test_three_destinations_expand_to_two_hundred_and_seventy_nine(self):
+        plan = plan_roundtrip(**MONTH3, cap=HARD_MAX_SEARCHES)
+        assert plan.requested_combinations == MONTH3_COMBOS
+        assert plan.executed_combinations == MONTH3_COMBOS
+        assert plan.truncated is False
+        assert plan.requested_destinations == ["FCO", "ATH", "BUD"]
+        assert len(plan.requested_departure_dates) == 31
 
     def test_recap_re_samples_from_the_full_expansion_not_the_sample(self):
         """The planner runs once, against the ceiling, and is re-capped.
@@ -160,6 +220,12 @@ class TestTheRate:
     The first version spread the starts of ONE call, which is not the limit
     RapidAPI enforces -- two concurrent month searches on one key are two
     compliant fan-outs and 186 requests a minute between them.
+
+    The bucket has TWO numbers, and the pair is the safety property: its
+    worst rolling minute is `capacity + per_minute`, so 120 and 120 allowed
+    240 -- above a PRO key's own 150/min, from the gate whose whole job is
+    to stay under it. 30 + 120 = 150 exactly, and 30 is the default search
+    cap, so an ordinary call still waits for nothing.
     """
 
     @staticmethod
@@ -178,40 +244,74 @@ class TestTheRate:
     def setup_method(self):
         reset_buckets()
 
-    def test_a_full_bucket_lets_a_whole_month_straight_through(self):
-        """93 out of 120 tokens, no wait. The month pays nothing for this."""
-        bucket = TokenBucket(DEFAULT_HUB_REQUESTS_PER_MINUTE)
-        assert [bucket.take() for _ in range(93)] == [0.0] * 93
+    def test_the_worst_rolling_minute_is_capacity_plus_refill(self):
+        """The arithmetic the whole split exists for, stated once.
 
-    def test_the_next_request_past_the_allowance_waits_for_a_refill(self):
-        bucket = TokenBucket(120)
-        for _ in range(120):
+        A bucket can empty instantly and then take everything the refill
+        hands out, so its ceiling over any 60 seconds is the SUM. The old
+        bucket's sum was 240 against a PRO key's 150.
+        """
+        assert TokenBucket(120, 120).worst_minute == 240
+        assert TokenBucket(120, 30).worst_minute == 150
+
+    def test_the_shipped_pair_never_exceeds_the_pro_limit(self):
+        bucket = TokenBucket(
+            DEFAULT_HUB_REQUESTS_PER_MINUTE, DEFAULT_HUB_BURST_CAPACITY
+        )
+        assert bucket.worst_minute <= 150, "a PRO key is rate limited at 150/min"
+
+    def test_the_burst_is_the_default_search_cap(self):
+        """That equality is what makes the bound free: an ordinary call is
+        capped at 30 combinations, so an ordinary call empties into a full
+        bucket and waits for nothing at all. The two constants live in two
+        modules (pacing imports no settings), so they are pinned here."""
+        assert DEFAULT_HUB_BURST_CAPACITY == DEFAULT_MAX_SEARCHES
+        assert SETTINGS_BURST_CAPACITY == DEFAULT_HUB_BURST_CAPACITY
+
+    def test_a_default_sized_call_goes_straight_through(self):
+        """30 out of 30 tokens, no wait. An ordinary call pays nothing."""
+        bucket = TokenBucket(
+            DEFAULT_HUB_REQUESTS_PER_MINUTE, DEFAULT_HUB_BURST_CAPACITY
+        )
+        assert [bucket.take() for _ in range(DEFAULT_MAX_SEARCHES)] == [
+            0.0
+        ] * DEFAULT_MAX_SEARCHES
+
+    def test_the_next_request_past_the_burst_waits_for_a_refill(self):
+        bucket = TokenBucket(120, 30)
+        for _ in range(30):
             bucket.take()
         wait = bucket.take()
-        # 120/minute is two a second, so the 121st waits about half a second.
+        # 120/minute is two a second, so the 31st waits about half a second.
         assert 0.4 < wait < 0.6
 
     def test_the_bucket_is_shared_by_every_call_on_one_key(self):
         """The whole point of item 5: two fan-outs, one allowance."""
-        first = bucket_for("key-AAA", 120)
-        second = bucket_for("key-AAA", 120)
+        first = bucket_for("key-AAA", 120, 30)
+        second = bucket_for("key-AAA", 120, 30)
         assert first is second
-        for _ in range(120):
+        for _ in range(30):
             first.take()
         assert second.take() > 0
 
+    def test_a_changed_rate_rebuilds_the_bucket_too(self):
+        """Capacity alone used to decide this, so a deployment that moved
+        the RATE and left the capacity kept the old rate until eviction."""
+        first = bucket_for("key-AAA", 120, 30)
+        assert bucket_for("key-AAA", 60, 30) is not first
+
     def test_a_different_key_has_its_own_allowance(self):
-        mine = bucket_for("key-AAA", 120)
-        theirs = bucket_for("key-BBB", 120)
+        mine = bucket_for("key-AAA", 120, 30)
+        theirs = bucket_for("key-BBB", 120, 30)
         assert mine is not theirs
-        for _ in range(120):
+        for _ in range(30):
             mine.take()
         assert theirs.take() == 0.0
 
     def test_the_key_itself_is_never_a_dictionary_key(self):
         from src import pacing
 
-        bucket_for("super-secret-key", 120)
+        bucket_for("super-secret-key", 120, 30)
         assert "super-secret-key" not in pacing._BUCKETS
         assert all(len(k) == 32 for k in pacing._BUCKETS)
 
@@ -220,16 +320,18 @@ class TestTheRate:
         assert TokenBucket(0).take() == 0.0
 
     @pytest.mark.asyncio
-    async def test_a_month_through_a_shared_bucket_is_not_delayed(self):
+    async def test_a_default_sized_call_through_a_shared_bucket_is_not_delayed(self):
         started = time.monotonic()
         out = await execute_plan(
-            self._plan(93),
+            self._plan(DEFAULT_MAX_SEARCHES),
             build_payload=lambda c: c,
             run_search=self._noop,
             max_concurrency=12,
-            pacer=bucket_for("key-AAA", DEFAULT_HUB_REQUESTS_PER_MINUTE),
+            pacer=bucket_for(
+                "key-AAA", DEFAULT_HUB_REQUESTS_PER_MINUTE, DEFAULT_HUB_BURST_CAPACITY
+            ),
         )
-        assert out.backend_calls_made == 93
+        assert out.backend_calls_made == DEFAULT_MAX_SEARCHES
         assert time.monotonic() - started < 1.0
 
     @pytest.mark.asyncio
@@ -239,7 +341,7 @@ class TestTheRate:
         Measured as delay rather than as a rate, because a rate needs a
         minute to observe. The bucket is sized down so the wait is short.
         """
-        pacer = bucket_for("key-AAA", 60)  # one a second, 60 in the bucket
+        pacer = bucket_for("key-AAA", 60, 60)  # one a second, 60 in the bucket
         started = time.monotonic()
         first, second = await asyncio.gather(
             execute_plan(
@@ -379,14 +481,250 @@ class TestTheWallClock:
         assert "cap" not in coverage["note"]
 
 
+#: How much faster the simulated clock runs than the real one. The claim
+#: under test is about 279 requests over a couple of MINUTES, which is not a
+#: thing to make a test suite sit through; ×100 makes it ~1s of real time
+#: while every number the code sees -- the pacer's waits, the deadline, the
+#: per-search latency -- is the real one.
+CLOCK_SCALE = 100.0
+
+
+class _ScaledClock:
+    """`time.monotonic`, run fast. Substituted for the MODULE reference.
+
+    Patching the real `time.monotonic` would speed up pytest's own timers
+    as well; replacing `src.fanout.time` and `src.pacing.time` with this
+    changes the clock for exactly the two modules under test.
+    """
+
+    def __init__(self) -> None:
+        self._t0 = time.monotonic()
+
+    def monotonic(self) -> float:
+        return (time.monotonic() - self._t0) * CLOCK_SCALE
+
+
+class _ScaledAsyncio:
+    """`asyncio`, with `sleep` reading the same fast clock.
+
+    `execute_plan` asks the pacer how long to wait IN SECONDS and hands
+    that number to `asyncio.sleep`. With a scaled clock those two have to
+    agree or the pacer's 0.5s waits become 0.5s of real waiting and the
+    simulation is no faster than the thing it simulates.
+    """
+
+    Semaphore = asyncio.Semaphore
+    gather = staticmethod(asyncio.gather)
+
+    @staticmethod
+    async def sleep(seconds: float) -> None:
+        await asyncio.sleep(seconds / CLOCK_SCALE)
+
+
+class TestTheThreeDestinationMonthAgainstTheClock:
+    """279 combinations, 2s a search, 12 in flight, 120 a minute, 280s.
+
+    The four numbers that have to fit together for the 300 cap to be safe,
+    simulated rather than asserted from arithmetic -- the arithmetic is what
+    said 93 combinations would take 20s and needed a pacer, and the pacer is
+    what makes the 279 case slow enough to need a longer deadline. Running
+    them together is the only way to know they still add up.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_two_hundred_and_seventy_nine_run_inside_the_deadline(
+        self, monkeypatch
+    ):
+        settings = load_settings("flights")
+        clock = _ScaledClock()
+        monkeypatch.setattr("src.fanout.time", clock)
+        monkeypatch.setattr("src.pacing.time", clock)
+        monkeypatch.setattr("src.fanout.asyncio", _ScaledAsyncio)
+
+        reset_buckets()
+        pacer = bucket_for(
+            "three-dest-month",
+            settings.hub_requests_per_minute,
+            settings.hub_burst_capacity,
+        )
+        # Every moment the GATE let a request through. That is where the
+        # bucket's guarantee is exact; `starts` below is where the request
+        # actually went out, which the 12-slot semaphore can re-bunch.
+        grants: list[float] = []
+
+        class _Recording:
+            """`TokenBucket` uses __slots__, so the probe wraps rather than
+            patches. `execute_plan` only ever calls `.take()`."""
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def take(self):
+                wait = self.inner.take()
+                if wait == 0.0:
+                    grants.append(clock.monotonic())
+                return wait
+
+        pacer = _Recording(pacer)
+
+        plan = plan_roundtrip(**MONTH3, cap=HARD_MAX_SEARCHES)
+        assert plan.executed_combinations == MONTH3_COMBOS
+
+        in_flight = 0
+        peak = 0
+        starts: list[float] = []
+
+        async def two_seconds(_endpoint, payload):
+            nonlocal in_flight, peak
+            starts.append(clock.monotonic())
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(2.0 / CLOCK_SCALE)
+            finally:
+                in_flight -= 1
+            return [{"price": "$1", "price_as_number": 1}]
+
+        began = clock.monotonic()
+        out = await execute_plan(
+            plan,
+            build_payload=lambda c: c,
+            run_search=two_seconds,
+            max_concurrency=settings.max_concurrent_searches,
+            pacer=pacer,
+            deadline_seconds=settings.fanout_deadline_seconds,
+        )
+        elapsed = clock.monotonic() - began
+
+        # Nothing sampled, nothing skipped, nothing cut short.
+        assert out.backend_calls_made == MONTH3_COMBOS
+        assert out.stopped_reason is None
+        assert out.skipped_combos == []
+        assert len(out.results_by_combo) == MONTH3_COMBOS
+
+        # Inside the shipped deadline, with room.
+        assert elapsed < settings.fanout_deadline_seconds, (
+            f"279 combinations took {elapsed:.0f}s of a "
+            f"{settings.fanout_deadline_seconds:.0f}s deadline"
+        )
+
+        # ...and the pacer really is what it spent that time on. 279 starts
+        # against a burst of 30 refilling at 2/s cannot be quicker than
+        # (279 - 30) / 2 = ~125s however fast the upstream answers.
+        floor = (MONTH3_COMBOS - settings.hub_burst_capacity) / (
+            settings.hub_requests_per_minute / 60
+        )
+        assert elapsed > floor * 0.8, (
+            f"{elapsed:.0f}s is under the pacer's own floor of {floor:.0f}s, "
+            "so the pacer was not consulted"
+        )
+
+        # The busiest rolling minute, MEASURED -- the assertion the whole
+        # capacity/refill split exists for.
+        #
+        # A token bucket empties instantly and then takes everything the
+        # refill hands out, so its ceiling over any 60 seconds is
+        # `capacity + per_minute`. Tied together at 120 and 120 that was
+        # 240, and this same run measured 239 -- above a PRO key's own
+        # 150/min, from the gate whose entire job is to stay under it.
+        # At 30 + 120 it cannot pass 150.
+        #
+        # Measured on the GRANTS, which is where the bucket's guarantee
+        # lives and where it is exact. `starts` -- when each search reached
+        # the stub -- is a looser thing: a token taken while all twelve
+        # slots are busy is spent later, so under load the starts bunch
+        # behind the grants and the count over a 60s window drifts. A
+        # review run caught exactly that (169 against a 162 bound), so the
+        # start-time check below is a sanity bound, not the claim.
+        def busiest(times: list[float]) -> int:
+            times = sorted(times)
+            worst = 0
+            for i, start in enumerate(times):
+                j = i
+                while j < len(times) and times[j] < start + 60.0:
+                    j += 1
+                worst = max(worst, j - i)
+            return worst
+
+        ceiling = settings.hub_burst_capacity + settings.hub_requests_per_minute
+        assert ceiling <= 150, "the pair must not exceed a PRO key's 150/min"
+        assert len(grants) == MONTH3_COMBOS
+        # THE CLAIM: no rolling minute ever let more than 150 searches out
+        # of the gate.
+        assert busiest(grants) <= ceiling, (
+            f"{busiest(grants)} searches were let through inside one minute, "
+            f"past the bucket's capacity-plus-refill ceiling of {ceiling}"
+        )
+        assert busiest(grants) <= 150
+        # A sanity bound on when they actually reached the upstream: the
+        # semaphore can delay a granted search and bunch it with later
+        # ones, so this is deliberately loose. It exists to catch a pacer
+        # that was bypassed entirely, not to restate the line above.
+        assert busiest(starts) <= ceiling + 2 * settings.max_concurrent_searches
+
+        assert peak <= settings.max_concurrent_searches
+
+    @pytest.mark.asyncio
+    async def test_an_upstream_slow_enough_to_run_out_of_clock_stops_dispatching(
+        self, monkeypatch
+    ):
+        """The other side of the same arithmetic: the deadline still bites.
+
+        At 20s a search the 279-combination plan cannot finish inside 280s
+        whatever the pacer does, and what must NOT happen is the function
+        being killed mid-response with ~200 requests billed. Everything that
+        did not go out comes back as skipped and the plan reads truncated.
+        """
+        settings = load_settings("flights")
+        clock = _ScaledClock()
+        monkeypatch.setattr("src.fanout.time", clock)
+        monkeypatch.setattr("src.pacing.time", clock)
+        monkeypatch.setattr("src.fanout.asyncio", _ScaledAsyncio)
+
+        reset_buckets()
+        pacer = bucket_for(
+            "slow-month",
+            settings.hub_requests_per_minute,
+            settings.hub_burst_capacity,
+        )
+        plan = plan_roundtrip(**MONTH3, cap=HARD_MAX_SEARCHES)
+
+        sent = 0
+
+        async def twenty_seconds(_endpoint, _payload):
+            nonlocal sent
+            sent += 1
+            await asyncio.sleep(20.0 / CLOCK_SCALE)
+            return []
+
+        out = await execute_plan(
+            plan,
+            build_payload=lambda c: c,
+            run_search=twenty_seconds,
+            max_concurrency=settings.max_concurrent_searches,
+            pacer=pacer,
+            deadline_seconds=settings.fanout_deadline_seconds,
+        )
+        assert out.stopped_reason == DEADLINE_REACHED
+        assert 0 < out.backend_calls_made < MONTH3_COMBOS
+        assert out.backend_calls_made == sent
+        assert len(out.skipped_combos) == MONTH3_COMBOS - sent
+        narrowed = plan.narrowed_to(
+            [combo for combo, _rows in out.results_by_combo], DEADLINE_REACHED
+        )
+        assert narrowed.truncated is True
+        assert narrowed.coverage()["stopped_early"] == DEADLINE_REACHED
+
+
 class TestTheDeploymentDefaults:
-    def test_the_shipped_cap_covers_a_whole_month(self):
+    def test_the_shipped_cap_covers_a_whole_month_over_three_destinations(self):
         settings = load_settings("flights")
         assert settings.max_searches_per_tool_call == DEFAULT_MAX_SEARCHES
-        # The number Matan asked for: a whole month at three trip lengths,
-        # in one call, with no argument from the model.
-        assert settings.auto_max_searches >= MONTH_COMBOS
-        assert HARD_MAX_SEARCHES >= 2 * MONTH_COMBOS
+        # The number Matan asked for: a whole month at three trip lengths
+        # across three destinations, in one call, with no argument from the
+        # model.
+        assert settings.auto_max_searches >= MONTH3_COMBOS
+        assert HARD_MAX_SEARCHES >= MONTH3_COMBOS
         assert settings.max_concurrent_searches <= settings.max_http_connections
 
     def test_the_shipped_rate_is_under_the_pro_limit_and_really_paces(self):
@@ -397,16 +735,30 @@ class TestTheDeploymentDefaults:
         """
         settings = load_settings("flights")
         assert 0 < settings.hub_requests_per_minute < 150  # PRO is 150/min
+        # The BOUND, not just the rate: burst + refill is what a rolling
+        # minute can hold, and it must not pass the Hub's own limit.
+        assert (
+            settings.hub_burst_capacity + settings.hub_requests_per_minute <= 150
+        )
         reset_buckets()
-        bucket = bucket_for("shipped-key", settings.hub_requests_per_minute)
+        bucket = bucket_for(
+            "shipped-key",
+            settings.hub_requests_per_minute,
+            settings.hub_burst_capacity,
+        )
         assert bucket is not None
+        assert bucket.worst_minute <= 150
         taken = 0
         while bucket.take() == 0.0:
             taken += 1
-            assert taken <= settings.hub_requests_per_minute + 1
-        # The bucket handed out its whole allowance and then said wait --
-        # which is what "120 a minute" means.
-        assert taken == settings.hub_requests_per_minute
+            assert taken <= settings.hub_burst_capacity + 1
+        # The bucket handed out its whole burst and then said wait -- which
+        # is what "30 at once, then 120 a minute" means.
+        assert taken == settings.hub_burst_capacity
+        assert taken == DEFAULT_MAX_SEARCHES, (
+            "the burst is the default search cap, so a default-sized call "
+            "never waits"
+        )
 
     def test_the_shipped_deadline_leaves_room_under_maxduration(self):
         import json
@@ -418,9 +770,19 @@ class TestTheDeploymentDefaults:
         )
         max_duration = vercel["functions"]["api/index.py"]["maxDuration"]
         assert 0 < settings.fanout_deadline_seconds < max_duration
-        # Enough headroom for the slowest in-flight search to land and the
-        # response to be built: a deadline at maxDuration protects nothing.
-        assert max_duration - settings.fanout_deadline_seconds >= 30
+        # It is a DISPATCH deadline, so the headroom is for the searches
+        # already in flight to land and the response to be built. Measured
+        # tails are 1.9-5.5s; 20s is several times that. A deadline AT
+        # maxDuration would protect nothing.
+        assert max_duration - settings.fanout_deadline_seconds >= 20
+        # ...and it has to be long enough for the plan the 300 cap allows:
+        # 279 combinations spend (279 - 30) / (120/60) = ~125s on the pacer
+        # before a single slow upstream second is counted.
+        pacer_floor = (MONTH3_COMBOS - settings.hub_burst_capacity) / (
+            settings.hub_requests_per_minute / 60
+        )
+        assert 120 < pacer_floor < 130, pacer_floor
+        assert settings.fanout_deadline_seconds > pacer_floor * 2
 
 
 class TestTheWholeMonthThroughTheTool:

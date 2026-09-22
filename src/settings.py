@@ -44,12 +44,21 @@ from .trial import DEFAULT_DAY_CAP as DEFAULT_TRIAL_DAY_CAP
 #   The raise is never larger than what was actually asked for, so a small
 #   question still costs a small number of requests.
 # * HARD_MAX_SEARCHES -- the ceiling an EXPLICIT `max_searches` may reach.
-#   Two destinations across a month at three trip lengths is 186; 200 is the
-#   round number above it, and the pacing gate below is what keeps a plan of
-#   that size from tripping a per-minute rate limit.
+#
+# 300, both of them, from 2026-09-22. The question that moved them is the one
+# a traveller actually asks: a whole month at three trip lengths across THREE
+# destinations is 31 x 3 x 3 = 279 combinations. At the old auto cap of 100 it
+# was sampled to a third of itself and at the old hard cap of 200 an explicit
+# `max_searches` could not reach it either, so the answer named a "cheapest"
+# that was the cheapest of a third of the grid. 300 is the round number above
+# 279; the pacer (120 a minute per key) and the fan-out deadline below are
+# what keep a plan of that size from tripping a per-minute rate limit or the
+# function's own budget. A keyless TRIAL caller gets neither raise -- see
+# `resolve_cap` -- because raising the spend is only ours to decide when the
+# money is the caller's.
 DEFAULT_MAX_SEARCHES = 30
-AUTO_MAX_SEARCHES = 100
-HARD_MAX_SEARCHES = 200
+AUTO_MAX_SEARCHES = 300
+HARD_MAX_SEARCHES = 300
 
 #: Requests per rolling minute one fan-out may START. The listing's plans are
 #: rate limited per minute as well as per month (PRO 150/min, ULTRA 250,
@@ -64,22 +73,54 @@ HARD_MAX_SEARCHES = 200
 #: never delayed, while a SECOND concurrent month on the same key queues
 #: instead of putting 186 requests a minute through the Hub -- which is the
 #: case a per-call interval could not see at all. 0 disables pacing.
+#:
+#: Unchanged when the cap went to 300 (2026-09-22), and that is the whole
+#: reason the deadline below had to move: a 279-combination plan takes the
+#: burst from the bucket and then waits for the rest to refill, which is
+#: ~125s of pacing on top of the searches themselves. Raising the pace
+#: instead would put the throughput over a PRO key's 150/min and turn a
+#: healthy plan into a 429.
 DEFAULT_HUB_REQUESTS_PER_MINUTE = 120
+
+#: How many of those may go AT ONCE, before the refill rate starts to bite.
+#: Separate from the rate on purpose: a token bucket's worst rolling minute
+#: is `capacity + per_minute`, so a capacity tied to the rate (120 and 120)
+#: allowed 240 requests in a minute -- above a PRO key's own 150/min, from
+#: the gate whose entire job is to stay under it. 30 + 120 = 150 exactly.
+#:
+#: 30 is DEFAULT_MAX_SEARCHES, which is what makes the bound free: an
+#: ordinary call is capped at 30 combinations, so an ordinary call still
+#: empties into a full bucket and waits for nothing. Only a search past the
+#: default cap -- the whole month -- pays the refill. `src/pacing.py` holds
+#: the same number as DEFAULT_HUB_BURST_CAPACITY (it imports no settings);
+#: a test pins the two equal to each other and to DEFAULT_MAX_SEARCHES.
+DEFAULT_HUB_BURST_CAPACITY = DEFAULT_MAX_SEARCHES
 
 #: Wall clock on one fan-out, in seconds. Past it nothing further is
 #: dispatched and the partial answer is returned as truncated; what is
 #: already in flight is left to finish, because a sent request is already
 #: billed.
 #:
-#: 240 against the function's own 300s `maxDuration` (mcp_server_paid/
-#: vercel.json), leaving a minute for the slowest in-flight search to land
-#: and the response to be built. Measured 2026-09-22: 93 combinations took
-#: 36s and 186 took 99s, so this only engages when the upstream is far
-#: slower than it has ever been -- around 18s a search at 200 combinations,
-#: against a measured 1.9-5.5s. Without it that case spends ~180 of the
-#: caller's requests and returns them nothing at all, because the function
-#: is killed mid-response. 0 disables the deadline.
-DEFAULT_FANOUT_DEADLINE_SECONDS = 240.0
+#: 280 against the function's own 300s `maxDuration` (mcp_server_paid/
+#: vercel.json). It is a DISPATCH deadline: past it nothing further is sent,
+#: and the 20s left is for the searches already in flight to land and the
+#: response to be built. Measured tails are 1.9-5.5s, so 20s is several times
+#: the real case -- but it is NOT proof against the pathological one, because
+#: `request_timeout_seconds` is 75 and a search dispatched at 279.9s that then
+#: times out would run past `maxDuration`. That was equally true of the old
+#: 240 (240 + 75 > 300); the deadline bounds the spend, the timeout bounds one
+#: request, and only a smaller per-request timeout would bound the sum.
+#:
+#: Why it moved with the cap: a 279-combination plan (a month x 3 nights x 3
+#: destinations, the case the 300 cap exists for) spends ~125s of its wall
+#: clock waiting on the pacer alone -- (279 - 30) / 2, the burst of 30 then
+#: 120 a minute (src/pacing.py) -- before a single slow upstream second is
+#: added. 240 would have cut exactly that plan short while the
+#: function still had a minute of budget in hand. Measured 2026-09-22: 93
+#: combinations 36s, 186 99s. Without any deadline the same case spends the
+#: caller's requests and returns them nothing at all, because the function is
+#: killed mid-response. 0 disables the deadline.
+DEFAULT_FANOUT_DEADLINE_SECONDS = 280.0
 
 
 def _strip_quotes(value: str) -> str:
@@ -231,6 +272,10 @@ class Settings:
     #: ONE key; 0 is off. See DEFAULT_HUB_REQUESTS_PER_MINUTE and
     #: src/pacing.py.
     hub_requests_per_minute: int
+    #: How many of those may be spent at once before the rate bites; the
+    #: worst rolling minute is this plus `hub_requests_per_minute`. See
+    #: DEFAULT_HUB_BURST_CAPACITY.
+    hub_burst_capacity: int
     #: Wall clock on one fan-out, in seconds; 0 is off. See
     #: DEFAULT_FANOUT_DEADLINE_SECONDS.
     fanout_deadline_seconds: float
@@ -482,6 +527,14 @@ def load_settings(products: str | None = None) -> Settings:
     hub_requests_per_minute = max(
         0, _env_int("HUB_REQUESTS_PER_MINUTE", DEFAULT_HUB_REQUESTS_PER_MINUTE)
     )
+    # At least 1: a burst of 0 against a live rate makes the FIRST request of
+    # every call wait for a token, which is a gate on traffic that was never
+    # the problem. Never above the rate either -- past that the sum stops
+    # describing a limit anyone published.
+    hub_burst_capacity = min(
+        hub_requests_per_minute,
+        max(1, _env_int("HUB_BURST_CAPACITY", DEFAULT_HUB_BURST_CAPACITY)),
+    )
     fanout_deadline = max(
         0.0, _env_float("FANOUT_DEADLINE_SECONDS", DEFAULT_FANOUT_DEADLINE_SECONDS)
     )
@@ -505,11 +558,14 @@ def load_settings(products: str | None = None) -> Settings:
         max_searches_per_tool_call=max_searches,
         auto_max_searches=auto_max_searches,
         hub_requests_per_minute=hub_requests_per_minute,
+        hub_burst_capacity=hub_burst_capacity,
         fanout_deadline_seconds=fanout_deadline,
         # 12, not 10: a 93-combination month at 10 in flight is ~24s of the
         # function's 300s budget and at 12 it is ~20s, and 12 leaves the
         # shared httpx pool (max_http_connections, 60) five times the room it
-        # needs. Raised with the cap rather than independently -- the pacing
+        # needs. NOT raised again with the 300 cap: past 120 requests a minute
+        # the pacer is what a 279-combination plan waits on, so more slots in
+        # flight would buy nothing and only widen the burst.  The pacing
         # gate, not this number, is what bounds the request RATE.
         max_concurrent_searches=_env_int("MAX_CONCURRENT_SEARCHES", 12),
         max_http_connections=_env_int("MAX_HTTP_CONNECTIONS", 60),

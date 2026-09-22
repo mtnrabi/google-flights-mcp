@@ -34,6 +34,7 @@ def make_settings(**overrides) -> Settings:
         max_searches_per_tool_call=5,
         auto_max_searches=5,
         hub_requests_per_minute=0,
+        hub_burst_capacity=1,
         fanout_deadline_seconds=0.0,
         max_concurrent_searches=3,
         max_http_connections=10,
