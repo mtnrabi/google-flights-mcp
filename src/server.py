@@ -195,6 +195,7 @@ from .settings import (
     VALID_PRODUCTS,
     Settings,
     load_settings,
+    normalise_host,
 )
 from .stores import build_counter_store
 from .trial import (
@@ -218,6 +219,18 @@ from .telemetry import CallRecord, Telemetry
 logger = logging.getLogger(__name__)
 
 SORT_CHOICES = ("best", "price", "duration")
+
+#: The two flights hostnames the M8ven MCP directory's crawler checks for
+#: `/.well-known/m8ven-verify.txt`. Hardcoded rather than derived from
+#: `host_products()`: this route is registered on every product's FastMCP
+#: instance (hotels included, and the "both" fallback), so a host check
+#: tied to the live product map could widen silently if
+#: `MCP_PRODUCTS_BY_HOST` is ever repointed. M8ven's directory entry names
+#: these two hosts specifically; the hotels listing must never answer for a
+#: flights domain verification.
+M8VEN_VERIFY_HOSTS = frozenset(
+    {"flights.flightpowers.com", "google-flights-mcp.flightpowers.com"}
+)
 
 SERVICE_NAME = "google-flights-mcp"
 
@@ -5097,6 +5110,25 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if not token:
             return PlainTextResponse("not configured", status_code=404)
         return PlainTextResponse(token, media_type="text/plain")
+
+    @mcp.custom_route("/.well-known/m8ven-verify.txt", methods=["GET"])
+    async def m8ven_verify(request: Request) -> Response:
+        """Domain verification for the M8ven MCP directory.
+
+        Same shape as the OpenAI challenge above: a 404 until
+        M8VEN_VERIFY_TOKEN is set, so an unconfigured server cannot appear
+        to pass verification with an empty body. Also 404s on any host
+        other than M8VEN_VERIFY_HOSTS -- this route is registered on every
+        product's FastMCP instance (hotels included), and the hotels
+        listing must never answer for a flights domain check.
+        """
+        token = os.environ.get("M8VEN_VERIFY_TOKEN", "").strip()
+        if not token:
+            return PlainTextResponse("not configured", status_code=404)
+        host = normalise_host(request.headers.get("host", ""))
+        if host not in M8VEN_VERIFY_HOSTS:
+            return PlainTextResponse("not found", status_code=404)
+        return PlainTextResponse(f"m8ven-verify={token}", media_type="text/plain")
 
     @mcp.custom_route("/metrics", methods=["GET"])
     async def metrics(request: Request) -> JSONResponse:
