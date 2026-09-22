@@ -40,9 +40,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
+    from .pacing import TokenBucket
 
 MAX_RANGE_DAYS = 180
 
@@ -50,6 +54,10 @@ MAX_RANGE_DAYS = 180
 #: hotel client picks the route -- but the discriminator `coverage()` reads to
 #: decide whether it is describing dates and destinations or stays.
 STAY_ENDPOINT = "hotel_stays"
+
+#: `FanoutResult.stopped_reason` when the wall clock, not the caller's
+#: quota, is what ended the fan-out. See `execute_plan`.
+DEADLINE_REACHED = "deadline"
 
 
 class PlanError(ValueError):
@@ -230,10 +238,61 @@ class SearchPlan:
     #: Defaults to empty for plans built by hand (tests, older callers); the
     #: two accessors below fall back to `combos` in that case.
     requested_combos: list[dict[str, str]] = field(default_factory=list)
+    #: WHY the cap is the number it is. Reported in `coverage()` because the
+    #: cap moved from "one constant" to "a decision": a caller who sees 93
+    #: searches billed for a question they thought cost 30 is owed the
+    #: sentence that explains it, and a caller who was sampled down is owed
+    #: the difference between "you hit the default" and "you asked for this".
+    #: One of `default`, `auto_span`, `explicit`, `trial`.
+    cap_source: str = "default"
+    #: Set when something other than the cap cut the plan short -- today
+    #: only `DEADLINE_REACHED`. It changes the WORDING of the truncation
+    #: note, which otherwise tells a caller their range was too wide for the
+    #: cap when the cap had nothing to do with it.
+    stopped_early: str | None = None
 
     @property
     def executed_combinations(self) -> int:
         return len(self.combos)
+
+    def narrowed_to(self, combos: list[dict[str, str]], reason: str) -> "SearchPlan":
+        """The same request, recorded as having run only `combos`.
+
+        Not a re-sample: the fan-out already decided which combinations went
+        out, and this records that. Everything derived from `combos` --
+        `executed_combinations`, `truncated`, the dates and destinations the
+        coverage lists, the per-destination `not_searched` entries -- then
+        describes what actually happened rather than what was planned.
+        """
+        return SearchPlan(
+            endpoint=self.endpoint,
+            combos=list(combos),
+            requested_combinations=self.requested_combinations,
+            cap=self.cap,
+            degraded_reason=self.degraded_reason,
+            requested_combos=list(self.requested_combos or self.combos),
+            cap_source=self.cap_source,
+            stopped_early=reason,
+        )
+
+    def recap(self, cap: int, *, cap_source: str | None = None) -> "SearchPlan":
+        """The same request, sampled against a different cap.
+
+        The cap is not knowable until the plan is: it can depend on how many
+        combinations the request expanded to (see AUTO_MAX_SEARCHES). Rather
+        than expand the request twice -- once to count it, once to sample it,
+        with two chances to disagree -- the planner runs once against the
+        highest cap this caller could possibly get and the answer is re-sampled
+        here. `requested_combos` is the full, unsampled expansion, so this is
+        exactly the plan the planner would have produced with `cap` in hand.
+        """
+        return _cap_plan(
+            self.endpoint,
+            list(self.requested_combos or self.combos),
+            cap,
+            cap_source=cap_source or self.cap_source,
+            degraded_reason=self.degraded_reason,
+        )
 
     @property
     def requested_destinations(self) -> list[str]:
@@ -285,12 +344,24 @@ class SearchPlan:
             "searched_combinations": self.executed_combinations,
             "truncated": self.truncated,
             "max_searches_per_request": self.cap,
+            "max_searches_source": self.cap_source,
             "departure_dates_searched": sorted(
                 {c["departure_date"] for c in self.combos}
             ),
             "destinations_searched": sorted({c["to_airport"] for c in self.combos}),
         }
-        if self.truncated:
+        if self.truncated and self.stopped_early == DEADLINE_REACHED:
+            summary["stopped_early"] = DEADLINE_REACHED
+            summary["note"] = (
+                f"This request expanded to {self.requested_combinations} "
+                f"searches and {self.executed_combinations} of them ran "
+                "before this call reached its time limit; the rest were "
+                "never sent and nothing was billed for them. The fares below "
+                "are real and paid for, but they do not cover the whole "
+                "range. Ask again for the dates that are missing, or narrow "
+                "the range so the whole of it fits in one call."
+            )
+        elif self.truncated:
             # Wording differs from the free server's planner on purpose: there
             # the cap is a free-tier limit, here it is a spend ceiling on the
             # caller's own plan, and they can raise it. Telling a paying user
@@ -322,6 +393,7 @@ class SearchPlan:
             "searched_combinations": self.executed_combinations,
             "truncated": self.truncated,
             "max_searches_per_request": self.cap,
+            "max_searches_source": self.cap_source,
             "stays_searched": [
                 {
                     "checkin_date": c["checkin_date"],
@@ -331,7 +403,16 @@ class SearchPlan:
             ],
             "checkin_dates_searched": sorted({c["checkin_date"] for c in self.combos}),
         }
-        if self.truncated:
+        if self.truncated and self.stopped_early == DEADLINE_REACHED:
+            summary["stopped_early"] = DEADLINE_REACHED
+            summary["note"] = (
+                f"This request expanded to {self.requested_combinations} "
+                f"stays and {self.executed_combinations} of them were priced "
+                "before this call reached its time limit; the rest were "
+                "never sent and nothing was billed for them. Ask again for "
+                "the check-in dates that are missing, or narrow the range."
+            )
+        elif self.truncated:
             summary["note"] = (
                 f"This request expanded to {self.requested_combinations} stays, "
                 f"above the {self.cap}-search cap for a single call. "
@@ -616,6 +697,9 @@ def _cap_plan(
     endpoint: Literal["oneway", "roundtrip", "hotel_stays"],
     combos: list[dict[str, str]],
     cap: int,
+    *,
+    cap_source: str = "default",
+    degraded_reason: str | None = None,
 ) -> SearchPlan:
     requested = len(combos)
     if requested == 0:
@@ -627,6 +711,8 @@ def _cap_plan(
         requested_combinations=requested,
         cap=cap,
         requested_combos=list(combos),
+        cap_source=cap_source,
+        degraded_reason=degraded_reason,
     )
 
 
@@ -656,6 +742,11 @@ class FanoutResult:
     results_by_combo: list[tuple[dict[str, str], list[dict[str, Any]]]] = field(
         default_factory=list
     )
+    #: Set when a `gate` stopped the fan-out after the first combination.
+    #: The combinations that never ran are in `skipped_combos`; they are not
+    #: failures -- nothing was attempted and nothing was billed for them.
+    stopped_reason: str | None = None
+    skipped_combos: list[dict[str, str]] = field(default_factory=list)
 
 
 async def execute_plan(
@@ -663,8 +754,45 @@ async def execute_plan(
     build_payload: Callable[[dict[str, str]], dict[str, Any]],
     run_search: Callable[[str, dict[str, Any]], Any],
     max_concurrency: int,
+    pacer: "TokenBucket | None" = None,
+    gate: Callable[[], str | None] | None = None,
+    deadline_seconds: float = 0.0,
 ) -> FanoutResult:
-    """Run every combo in the plan concurrently, bounded by max_concurrency.
+    """Run every combo in the plan concurrently, bounded two ways.
+
+    `max_concurrency` bounds how many searches are IN FLIGHT. `pacer` bounds
+    how many are STARTED per rolling minute, and they are different limits
+    protecting different things:
+
+    * in flight is about this process -- sockets out of the shared pool, and
+      the file-descriptor ceiling a Vercel instance shares across executions.
+    * the pacer is about the caller's plan, and it is shared by every
+      fan-out running on the same key rather than owned by this one. See
+      src/pacing.py for why that distinction is the whole point.
+
+    `deadline_seconds`, when set, is a wall clock on the whole fan-out. Past
+    it nothing further is DISPATCHED; what is already in flight is left to
+    finish, because a request that has been sent is already billed and
+    cancelling it throws away a fare the caller has paid for. The
+    combinations that never went out come back in `skipped_combos` with
+    `stopped_reason` DEADLINE, so the caller can narrow the plan to what
+    actually ran and report it as truncated. Without it, a 200-combination
+    plan against a slow upstream (~18s a search is enough) runs past the
+    function's own `maxDuration`, and the caller gets a dead connection
+    having been billed for ~180 searches.
+
+    `gate`, when given, runs the FIRST combination on its own and then asks
+    the caller whether to continue; a string back stops the fan-out there and
+    nothing further is sent. It exists for one question the caller cannot
+    answer in advance: how much quota the key has left, which RapidAPI
+    reports only in the headers of a request it has already answered. The
+    cost of asking is exactly one request, and that request is a real
+    combination of the plan, not a throwaway probe -- if the gate says
+    continue, its rows are kept and the remaining combinations run as usual.
+    When it stops, those rows are still in `results` -- they were paid for,
+    and the caller returns them alongside the refusal.
+    The serial first request costs one round trip, so it is worth passing
+    only for a fan-out large enough that losing it to a wrong guess matters.
 
     A single failing combo does not fail the whole search -- with a fan-out
     of 15 across a flaky upstream, all-or-nothing would make large searches
@@ -672,18 +800,75 @@ async def execute_plan(
     caller decides whether a partial answer is worth returning.
     """
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
+    started_at = time.monotonic()
+    deadline = started_at + deadline_seconds if deadline_seconds > 0 else None
+    timed_out: list[dict[str, str]] = []
 
     async def run_one(
-        combo: dict[str, str]
-    ) -> tuple[dict[str, str], list[dict[str, Any]], str | None]:
+        combo: dict[str, str],
+    ) -> tuple[dict[str, str], list[dict[str, Any]], str | None, bool]:
+        """`(combo, rows, error, dispatched)`.
+
+        `dispatched` False means nothing was sent for this combination and
+        nothing was billed -- a different fact from a failure, and the one
+        the coverage has to report.
+        """
+        if pacer is not None:
+            # Waited BEFORE the semaphore: the point is to spread the STARTS,
+            # and a task holding a slot while it waits its turn spreads
+            # nothing. Re-checked in a loop because several waiters wake to
+            # the same refilled token and only one of them gets it.
+            wait = pacer.take()
+            while wait > 0:
+                if deadline is not None and time.monotonic() + wait > deadline:
+                    # Waiting for a token past the deadline would burn the
+                    # whole budget queueing and dispatch nothing.
+                    return combo, [], None, False
+                await asyncio.sleep(wait)
+                wait = pacer.take()
+        if deadline is not None and time.monotonic() >= deadline:
+            return combo, [], None, False
         async with semaphore:
+            # Checked again inside the slot: a combination can queue behind
+            # eleven slow searches and reach the front after the clock ran
+            # out, and sending it then is money spent on an answer the
+            # caller will never see.
+            if deadline is not None and time.monotonic() >= deadline:
+                return combo, [], None, False
             try:
                 rows = await run_search(plan.endpoint, build_payload(combo))
-                return combo, rows, None
+                return combo, rows, None, True
             except Exception as exc:  # noqa: BLE001 - reported, never swallowed
-                return combo, [], f"{combo}: {exc}"
+                return combo, [], f"{combo}: {exc}", True
 
-    outcomes = await asyncio.gather(*(run_one(c) for c in plan.combos))
+    combos = plan.combos
+    stopped_reason: str | None = None
+    skipped: list[dict[str, str]] = []
+    raw: list[tuple[dict[str, str], list[dict[str, Any]], str | None, bool]] = []
+
+    if gate is not None and len(combos) > 1:
+        raw.append(await run_one(combos[0]))
+        stopped_reason = gate()
+        if stopped_reason is not None:
+            skipped = list(combos[1:])
+            combos = combos[:1]
+
+    rest = combos[len(raw):]
+    raw += await asyncio.gather(*(run_one(c) for c in rest))
+
+    outcomes: list[tuple[dict[str, str], list[dict[str, Any]], str | None]] = []
+    for combo, rows, error, dispatched in raw:
+        if dispatched:
+            outcomes.append((combo, rows, error))
+        else:
+            timed_out.append(combo)
+
+    if timed_out:
+        # The deadline never overrides a refusal: a fan-out the gate already
+        # stopped has a better reason to report than "it took too long".
+        skipped = skipped + timed_out
+        if stopped_reason is None:
+            stopped_reason = DEADLINE_REACHED
 
     merged: list[dict[str, Any]] = []
     failures = 0
@@ -705,9 +890,14 @@ async def execute_plan(
 
     return FanoutResult(
         results=merged,
-        backend_calls_made=len(plan.combos),
+        # What was ATTEMPTED, not what was planned: a gated fan-out stops
+        # after the first combination and the rest are never sent, so the
+        # planned count would bill the caller for requests that do not exist.
+        backend_calls_made=len(outcomes),
         backend_failures=failures,
         first_error=first_error,
         failed_combos=failed_combos,
         results_by_combo=results_by_combo,
+        stopped_reason=stopped_reason,
+        skipped_combos=skipped,
     )

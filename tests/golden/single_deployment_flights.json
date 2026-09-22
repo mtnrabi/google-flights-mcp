@@ -16,7 +16,7 @@
     "trial_day_cap": 0,
     "trial_enabled": false
   },
-  "instructions": "FlightPowers: real-time Google Flights fare search, ad-free. Requires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.\n\nReach for `search_oneway_flights` and `search_roundtrip_flights` for live fares, not schedules. Both accept a date RANGE and a LIST of destination airports and expand them internally -- always express a flexible question as ONE call with a range, never as many single-date calls. Round trips take a `nights` value instead of a fixed return date.\n\nEvery result carries Google's own historical range for that route and period (`price_insights_low`, `price_insights_high`, and a `price_range_in_relation_to_other_periods` verdict of low / typical / high), so judge a fare against that band rather than quoting a bare number, and a `buy_link` to book it. `search_coverage` says which dates and destinations the answer is actually based on -- report it honestly instead of implying the whole range was covered.\n\nFan-out is capped at 30 date/destination combinations per call; `max_searches` raises or lowers it per call, up to a hard maximum of 60. A request that expands past the cap is sampled evenly across the range and says so in `search_coverage`.\n\nProvenance: prices from these tools come from a FlightPowers live fetch at request time, not from a cache or a stored table. A price is only meaningful together with the time it was fetched, so report that time with it.\n\nResults are live prices and go stale within minutes. Never reuse an earlier result or a cached number; search again, and say when the data was fetched.\n\nEvery response carries `api_usage`: what this call spent on the caller's own RapidAPI plan and what is left of it.",
+  "instructions": "FlightPowers: real-time Google Flights fare search, ad-free. Requires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.\n\nReach for `search_oneway_flights` and `search_roundtrip_flights` for live fares, not schedules. Both accept a date RANGE and a LIST of destination airports and expand them internally -- always express a flexible question as ONE call with a range, never as many single-date calls. Round trips take a `nights` value instead of a fixed return date.\n\nEvery result carries Google's own historical range for that route and period (`price_insights_low`, `price_insights_high`, and a `price_range_in_relation_to_other_periods` verdict of low / typical / high), so judge a fare against that band rather than quoting a bare number, and a `buy_link` to book it. `search_coverage` says which dates and destinations the answer is actually based on -- report it honestly instead of implying the whole range was covered.\n\nFan-out is capped at 30 date/destination combinations per call, and the cap RISES BY ITSELF, up to 100, when the question is bigger than that -- a whole month of departures at three trip lengths is 93 combinations and runs as one call. `max_searches` sets it explicitly, up or down, to a hard maximum of 200. A request past the cap in force is sampled evenly across the range and says so in `search_coverage`, which also names the cap and why it is that number (`max_searches_source`).\n\nEvery combination is one request billed to the caller's own plan, so a whole-month search is 93 of them and the same month over two destinations is 186. Worth one sentence to the user before running one, unless they asked for the month themselves. `api_usage.hub_requests_billed` is what the plan was actually charged -- higher than the combination count when a failed search was retried -- and is the number to quote.\n\nProvenance: prices from these tools come from a FlightPowers live fetch at request time, not from a cache or a stored table. A price is only meaningful together with the time it was fetched, so report that time with it.\n\nResults are live prices and go stale within minutes. Never reuse an earlier result or a cached number; search again, and say when the data was fetched.\n\nEvery response carries `api_usage`: what this call spent on the caller's own RapidAPI plan and what is left of it.",
   "serverInfo": {
     "name": "google-flights-mcp",
     "version": "1.0.0",
@@ -197,7 +197,7 @@
               }
             ],
             "default": null,
-            "description": "Cap the billed requests this call may make. Lower it to spend less of the plan's quota on a wide search; the range is then sampled evenly rather than cut short."
+            "description": "The billed requests this call may make, up or down. Leave it out for the normal behaviour: the cap covers the request when the request is reasonable (a whole month at three trip lengths, 93 combinations, runs in full) and anything past it is sampled evenly across the range rather than cut short. Set it lower to spend less of the plan's quota on a wide search, or higher -- to a hard maximum of 200 -- for a grid wider than that."
           },
           "max_stops": {
             "anyOf": [
@@ -285,6 +285,11 @@
             "additionalProperties": true,
             "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
             "properties": {
+              "hub_requests_billed": {
+                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. This is the figure the invoice will show.",
+                "minimum": 0,
+                "type": "integer"
+              },
               "note": {
                 "description": "The same figures as a sentence, for the model to relay.",
                 "type": "string"
@@ -296,6 +301,7 @@
                 "type": "integer"
               },
               "requests_used_by_this_call": {
+                "description": "How many date/destination combinations were searched -- what the answer COVERS.",
                 "minimum": 0,
                 "type": "integer"
               }
@@ -431,6 +437,11 @@
                 },
                 "type": "array"
               },
+              "hub_requests_billed": {
+                "description": "HTTP requests billed by RapidAPI for this call, retries included; see api_usage.hub_requests_billed.",
+                "minimum": 0,
+                "type": "integer"
+              },
               "max_searches_per_request": {
                 "minimum": 1,
                 "type": "integer"
@@ -446,6 +457,10 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "stopped_early": {
+                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but do not cover the whole range.",
+                "type": "string"
+              },
               "truncated": {
                 "description": "True when the request expanded past this call's spend ceiling and was sampled. A date absent from departure_dates_searched was never searched, which is not the same as having no flights.",
                 "type": "boolean"
@@ -454,13 +469,14 @@
             "type": "object"
           },
           "search_status": {
-            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help.",
+            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan.",
             "enum": [
               "ok",
               "empty",
               "partial",
               "degraded",
-              "trial_exhausted"
+              "trial_exhausted",
+              "quota_exceeded"
             ],
             "type": "string"
           },
@@ -497,7 +513,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: search round-trip flights"
       },
-      "description": "FlightPowers round-trip fare search: live prices read from Google Flights, priced as paired legs rather than two separate one-ways. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure date or range, and either a return date or a trip length in nights. Returns the total price for both legs, per-leg airline, stops and duration, and a single bookable buy_link for the trip.\n\nUse it for any return-trip fare question. For a flexible search make ONE call: pass departure_date_from / departure_date_to for the outbound range and `nights` instead of return_date to compare trip lengths -- '5 to 7 nights in Rome sometime in May' is one call.\n\nEach date/destination combination is one billed request; the count and the plan's remaining quota come back in `api_usage`.\n\n`by_destination` carries one entry per destination you asked for -- empty ones included, each with a `reason` -- so read it before telling a user a destination has no flights.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
+      "description": "FlightPowers round-trip fare search: live prices read from Google Flights, priced as paired legs rather than two separate one-ways. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure date or range, and either a return date or a trip length in nights. Returns the total price for both legs, per-leg airline, stops and duration, and a single bookable buy_link for the trip.\n\nUse it for any return-trip fare question. For a flexible search make ONE call: pass departure_date_from / departure_date_to for the outbound range and `nights` instead of return_date to compare trip lengths -- '5 to 7 nights in Rome sometime in May' is one call.\n\nA WHOLE MONTH is one call too. departure_date_from \"2026-10-01\", departure_date_to \"2026-10-31\" and nights [3, 4, 5] prices every departure day in October at three trip lengths and tells you which combination is cheapest. That is 93 date/night combinations and the cap rises to cover them by itself -- do not narrow the question to make it fit, and do not split it into several calls.\n\nEach date/night/destination combination is ONE request billed to the caller's plan, so a month at three trip lengths costs 93 of them and the same month across two destinations costs 186. Say that number before running a search that large if the user has not asked for it in so many words. A search that fails with a server error is retried once and RapidAPI bills the retry, so the figure to quote back is `api_usage.hub_requests_billed` (what the plan was actually charged), not the combination count. Both come back in `api_usage`, with the plan's remaining quota.\n\n`by_destination` carries one entry per destination you asked for -- empty ones included, each with a `reason` -- so read it before telling a user a destination has no flights.\n\nRequires the caller's own RapidAPI key for the Google Flights Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/google-flights-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -612,7 +628,7 @@
               }
             ],
             "default": null,
-            "description": "Cap the billed requests this call may make. Lower it to spend less of the plan's quota on a wide search; the range is then sampled evenly rather than cut short."
+            "description": "The billed requests this call may make, up or down. Leave it out for the normal behaviour: the cap covers the request when the request is reasonable (a whole month at three trip lengths, 93 combinations, runs in full) and anything past it is sampled evenly across the range rather than cut short. Set it lower to spend less of the plan's quota on a wide search, or higher -- to a hard maximum of 200 -- for a grid wider than that."
           },
           "nights": {
             "anyOf": [
@@ -733,6 +749,11 @@
             "additionalProperties": true,
             "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
             "properties": {
+              "hub_requests_billed": {
+                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. This is the figure the invoice will show.",
+                "minimum": 0,
+                "type": "integer"
+              },
               "note": {
                 "description": "The same figures as a sentence, for the model to relay.",
                 "type": "string"
@@ -744,6 +765,7 @@
                 "type": "integer"
               },
               "requests_used_by_this_call": {
+                "description": "How many date/destination combinations were searched -- what the answer COVERS.",
                 "minimum": 0,
                 "type": "integer"
               }
@@ -879,6 +901,11 @@
                 },
                 "type": "array"
               },
+              "hub_requests_billed": {
+                "description": "HTTP requests billed by RapidAPI for this call, retries included; see api_usage.hub_requests_billed.",
+                "minimum": 0,
+                "type": "integer"
+              },
               "max_searches_per_request": {
                 "minimum": 1,
                 "type": "integer"
@@ -894,6 +921,10 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "stopped_early": {
+                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but do not cover the whole range.",
+                "type": "string"
+              },
               "truncated": {
                 "description": "True when the request expanded past this call's spend ceiling and was sampled. A date absent from departure_dates_searched was never searched, which is not the same as having no flights.",
                 "type": "boolean"
@@ -902,13 +933,14 @@
             "type": "object"
           },
           "search_status": {
-            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help.",
+            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan.",
             "enum": [
               "ok",
               "empty",
               "partial",
               "degraded",
-              "trial_exhausted"
+              "trial_exhausted",
+              "quota_exceeded"
             ],
             "type": "string"
           },

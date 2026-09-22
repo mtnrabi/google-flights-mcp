@@ -75,6 +75,16 @@ of them. `src/widget_domain.py` rewrites it per request from the Host the
 caller actually connected to, the same way the OAuth issuer is chosen.
 `claude_apps_domain` and `canonical_connector_url` live here so that the
 hash and the URL it is taken of are defined in one place.
+
+The `quota_exceeded` refusal
+----------------------------
+A search the caller's free allowance or plan cannot pay for is refused
+outright rather than sampled down (src/quota_gate.py). It arrives here with
+no rows, a `search_status` of `quota_exceeded` and the two numbers that
+explain it, so the card draws a SMALL block -- "93 requests needed / 10
+left" and the message, which already names the two ways forward -- and never
+a table. Rendering the usual empty table over a refusal is exactly the
+misreading the refusal exists to prevent.
 """
 
 from __future__ import annotations
@@ -378,6 +388,7 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     background: var(--fp-warn-bg); color: var(--fp-warn-ink); font-size: 12px;
   }
   .fp-empty { padding: 4px 16px 16px; color: var(--fp-soft); font-size: 13px; }
+  .fp-quota { padding: 0 16px 2px; font-size: 15px; font-weight: 650; }
   .fp-ft {
     padding: 9px 16px 12px; font-size: 11px; color: var(--fp-faint);
     border-top: 1px solid var(--fp-line-soft);
@@ -965,9 +976,19 @@ FLIGHTS_WIDGET_HTML = r"""<!doctype html>
     /* The non-search exits are returned as data on purpose (a model has to
        relay them to a human), so the card relays them too instead of
        drawing an empty table. */
+    /* A refusal: two numbers, then the message. See the docstring. */
+    if (status === "quota_exceeded") {
+      var need = num(sc.combos_requested), got = num(sc.combos_allowed_now);
+      if (need !== null && got !== null) {
+        root.appendChild(el("div", "fp-quota",
+          need.toLocaleString("en-US") + " requests needed · "
+          + got.toLocaleString("en-US") + " left"));
+      }
+    }
     var msg = txt(sc.message) || txt(sc.partial);
     if (sc.needs_api_key === true || sc.quota_exhausted === true
-        || status === "degraded" || status === "trial_exhausted" || status === "empty" || msg) {
+        || status === "degraded" || status === "trial_exhausted"
+        || status === "quota_exceeded" || status === "empty" || msg) {
       if (msg) root.appendChild(el("div", "fp-note", msg));
     }
 

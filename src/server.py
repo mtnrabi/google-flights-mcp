@@ -146,7 +146,14 @@ from .providers import (
 )
 from .prompts import register_prompts
 from .schema_docs import document_params
+from .pacing import bucket_for
+from .quota_gate import (
+    QUOTA_EXCEEDED,
+    plan_quota_refusal,
+    trial_quota_refusal,
+)
 from .fanout import (
+    DEADLINE_REACHED,
     FanoutResult,
     PlanError,
     SearchPlan,
@@ -302,10 +309,21 @@ _FLIGHTS_BODY = (
     "number, and a `buy_link` to book it. `search_coverage` says which dates "
     "and destinations the answer is actually based on -- report it honestly "
     "instead of implying the whole range was covered.\n\n"
-    "Fan-out is capped at {cap} date/destination combinations per call; "
-    "`max_searches` raises or lowers it per call, up to a hard maximum of "
-    "{hard_max}. A request that expands past the cap is sampled evenly "
-    "across the range and says so in `search_coverage`."
+    "Fan-out is capped at {cap} date/destination combinations per call, and "
+    "the cap RISES BY ITSELF, up to {auto_max}, when the question is bigger "
+    "than that -- a whole month of departures at three trip lengths is 93 "
+    "combinations and runs as one call. `max_searches` sets it explicitly, "
+    "up or down, to a hard maximum of {hard_max}. A request past the cap in "
+    "force is sampled evenly across the range and says so in "
+    "`search_coverage`, which also names the cap and why it is that number "
+    "(`max_searches_source`).\n\n"
+    "Every combination is one request billed to the caller's own plan, so a "
+    "whole-month search is 93 of them and the same month over two "
+    "destinations is 186. Worth one sentence to the user before running one, "
+    "unless they asked for the month themselves. `api_usage."
+    "hub_requests_billed` is what the plan was actually charged -- higher "
+    "than the combination count when a failed search was retried -- and is "
+    "the number to quote."
 )
 
 _HOTELS_BODY = (
@@ -416,6 +434,7 @@ def build_instructions(settings: Settings, trial_tail: str = "") -> str:
         bodies = [
             _FLIGHTS_BODY.format(
                 cap=settings.max_searches_per_tool_call,
+                auto_max=settings.auto_max_searches,
                 hard_max=HARD_MAX_SEARCHES,
             )
         ]
@@ -439,6 +458,7 @@ def build_instructions(settings: Settings, trial_tail: str = "") -> str:
         bodies = [
             _FLIGHTS_BODY.format(
                 cap=settings.max_searches_per_tool_call,
+                auto_max=settings.auto_max_searches,
                 hard_max=HARD_MAX_SEARCHES,
             ),
             _HOTELS_BODY,
@@ -596,6 +616,13 @@ class _UpstreamState:
     #: flights. The combo is carried so the coverage line can NAME the dates a
     #: caller asked for and did not get; nothing here reaches the wire.
     search_outcomes: list[dict[str, str]] = field(default_factory=list)
+    #: One entry per HTTP request SENT to the Hub, retries included. A
+    #: retried 5xx is billed twice and the combination count says once, so
+    #: this is the figure the caller's invoice will agree with. Appended to
+    #: from many concurrent searches; a list of 1s rather than a counter
+    #: because `+=` on an int in a closure is not the atomic thing it looks
+    #: like once a rebind is involved.
+    attempts: list[int] = field(default_factory=list)
 
 
 def _request_context() -> tuple[dict[str, str], dict[str, str]]:
@@ -844,7 +871,124 @@ def _note_hidden_combinations(
 #: paid), so the raise always reaches every combination a call can possibly
 #: search. It exists so that raising a fan-out cap later cannot silently turn
 #: one tool call into an unbounded response.
-MAX_AUTO_LIMIT = 60
+#: The highest `limit` the server will raise itself to. Tied to
+#: HARD_MAX_SEARCHES, not chosen separately: the raise exists so that every
+#: combination that ran and answered has a row, and a ceiling below the
+#: search cap breaks exactly that promise -- at 60 against a 93-combination
+#: month, 33 searches were billed, answered, named in `search_coverage`, and
+#: had nothing in `results`.
+MAX_AUTO_LIMIT = HARD_MAX_SEARCHES
+
+
+def resolve_cap(
+    *,
+    requested: int,
+    max_searches: int | None,
+    default_cap: int,
+    auto_cap: int,
+    hard_cap: int,
+    trial_remaining: int | None = None,
+) -> tuple[int, str]:
+    """How many searches this one call may bill, and why.
+
+    Three inputs decide it, in this order:
+
+    * an explicit `max_searches` wins, up to `hard_cap`. It RAISES as well as
+      lowers -- which is what the tool description has always said and what
+      the code did not do: `min(max_searches, cap)` meant a caller asking for
+      60 got 30 and was told, in `search_coverage`, to raise `max_searches`.
+    * with no `max_searches`, the cap is the default UNLESS the request is
+      bigger than the default, in which case it rises to what was actually
+      asked for, up to `auto_cap`. "Cheapest round trip to Rome any day in
+      October for 3, 4 or 5 nights" is one question and 93 combinations; a
+      30 cap answered it from a third of the month and called it cheapest.
+      The raise is bounded by the request, so a small question never costs
+      more than it did.
+    * a trial caller (no key of their own, spending OURS) gets neither: the
+      default is their ceiling, and the day's remaining allowance lowers it
+      further. The automatic raise is a decision to spend more of the
+      CALLER'S money, which is only ours to make when it is theirs.
+
+    Returns `(cap, source)`; `source` goes into `search_coverage` so the
+    number is never unexplained.
+    """
+    # An auto ceiling below the default cap would be a cap that lowers
+    # itself. load_settings already clamps it; re-stated here because this
+    # function is also called with hand-built Settings.
+    auto_cap = max(auto_cap, default_cap)
+
+    if max_searches is not None:
+        cap, source = min(max_searches, hard_cap), "explicit"
+    elif requested > default_cap:
+        cap, source = min(requested, auto_cap), "auto_span"
+    else:
+        cap, source = default_cap, "default"
+
+    if trial_remaining is not None:
+        # The trial ceiling REPLACES a cap that reaches it and leaves a lower
+        # one alone: spending less of our money never needs permission, so an
+        # explicit `max_searches: 2` still means two.
+        ceiling = max(0, min(default_cap, trial_remaining))
+        if cap >= ceiling:
+            return ceiling, "trial"
+    return cap, source
+
+
+def _quota_gate(
+    quota: dict[str, int],
+    plan_size: int,
+    *,
+    enabled: bool,
+):
+    """A `gate` for `execute_plan`, or None when there is nothing to gate.
+
+    Returns a callable the fan-out invokes after its FIRST combination has
+    answered. `quota` is the sink the client writes RapidAPI's rate-limit
+    headers into, so by then it holds the caller's real remaining balance --
+    the only moment this server can learn it, since the gateway reports the
+    number on responses and nowhere else.
+
+    Off unless the plan is large: below the default cap the worst case is a
+    handful of requests, and the serial first round trip a gate costs would
+    be paid by every ordinary search to protect nobody.
+    """
+    if not enabled:
+        return None
+
+    def gate() -> str | None:
+        remaining = quota.get("plan_requests_remaining")
+        if remaining is None:
+            # The gateway did not say. Not a reason to refuse a paying
+            # caller -- the fan-out continues exactly as it did before this
+            # existed.
+            return None
+        # `remaining` is the balance AFTER the request that reported it, so
+        # it is compared against the combinations still to run.
+        if remaining >= plan_size - 1:
+            return None
+        return QUOTA_EXCEEDED
+
+    return gate
+
+
+def _planning_ceiling(settings, max_searches: int | None, trial) -> int:
+    """The largest cap this caller could possibly end up with.
+
+    The planner needs a cap before it can tell us how big the request is, and
+    `resolve_cap` needs the size before it can pick the cap. This breaks the
+    circle from the safe side: plan against the ceiling -- which no policy
+    can exceed -- and re-sample afterwards. `SearchPlan.requested_combos`
+    keeps the full expansion either way, so nothing is lost by planning wide.
+    """
+    cap, _ = resolve_cap(
+        requested=HARD_MAX_SEARCHES,
+        max_searches=max_searches,
+        default_cap=settings.max_searches_per_tool_call,
+        auto_cap=settings.auto_max_searches,
+        hard_cap=HARD_MAX_SEARCHES,
+        trial_remaining=None if trial is None else trial.remaining,
+    )
+    return cap
 
 
 def _effective_limit(limit: int, combinations: int) -> tuple[int, str | None]:
@@ -1221,6 +1365,7 @@ def build_stay_response(
     plan: SearchPlan,
     outcome: FanoutResult,
     quota: dict[str, int],
+    billed: int | None = None,
 ) -> dict[str, Any]:
     """The answer to a date-range hotel search.
 
@@ -1283,7 +1428,10 @@ def build_stay_response(
         "search_status": status,
         "search_coverage": plan.coverage(),
         "api_usage": _usage_block(
-            outcome.backend_calls_made, quota, BILLING_UNIT_NOTES["hotels_range"]
+            outcome.backend_calls_made,
+            quota,
+            BILLING_UNIT_NOTES["hotels_range"],
+            billed=billed,
         ),
     }
 
@@ -1330,6 +1478,7 @@ def _usage_block(
     calls: int,
     quota: dict[str, int],
     unit_note: str = BILLING_UNIT_NOTES["flights"],
+    billed: int | None = None,
 ) -> dict[str, Any]:
     """The `api_usage` field carried by every successful response.
 
@@ -1343,20 +1492,38 @@ def _usage_block(
     its cost as "each date and destination combination is one billed request"
     -- a fan-out the hotel tools do not have.
     """
-    usage: dict[str, Any] = {"requests_used_by_this_call": calls}
+    # `calls` is combinations searched; `billed` is HTTP requests sent,
+    # which is larger whenever a 5xx was retried -- and the retry is billed.
+    # Both are reported because they answer different questions ("how much
+    # of my range did you cover" and "what will this cost me"), and the NOTE
+    # quotes the billed figure, because that is the one the invoice shows.
+    if billed is None or billed < calls:
+        billed = calls
+    usage: dict[str, Any] = {
+        "requests_used_by_this_call": calls,
+        "hub_requests_billed": billed,
+    }
     usage.update(quota)
+    retry_note = (
+        ""
+        if billed == calls
+        else (
+            f" {billed - calls} of them were automatic retries of a failed "
+            "search, which RapidAPI bills like any other request."
+        )
+    )
     remaining = quota.get("plan_requests_remaining")
     limit = quota.get("plan_requests_limit")
     if remaining is not None and limit is not None:
         usage["note"] = (
-            f"This search used {calls} of your RapidAPI plan's requests; "
-            f"{remaining} of {limit} remain in the current period. "
-            f"{unit_note}"
+            f"This search used {billed} of your RapidAPI plan's requests; "
+            f"{remaining} of {limit} remain in the current period."
+            f"{retry_note} {unit_note}"
         )
     else:
         usage["note"] = (
-            f"This search used {calls} of your RapidAPI plan's requests. "
-            f"{unit_note}"
+            f"This search used {billed} of your RapidAPI plan's requests."
+            f"{retry_note} {unit_note}"
         )
     return usage
 
@@ -1942,17 +2109,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     upstream_api_name("flights"),
                 )
 
-        cap = settings.max_searches_per_tool_call
-        if max_searches is not None:
-            if max_searches < 1:
-                raise ToolError("max_searches must be at least 1")
-            cap = min(max_searches, cap)
-
-        if trial is not None:
-            # A cap is only a cap if the last call of the day cannot overshoot
-            # it. Without this a caller at 9 of 10 gets a full 30-way fan-out
-            # and ends the day at 39 -- on our key.
-            cap = min(cap, trial.remaining)
+        if max_searches is not None and max_searches < 1:
+            raise ToolError("max_searches must be at least 1")
+        # A cap is only a cap if the last call of the day cannot overshoot it.
+        # Without the trial branch a caller at 9 of 10 gets a full fan-out and
+        # ends the day well past the cap -- on our key. See resolve_cap.
+        ceiling = _planning_ceiling(settings, max_searches, trial)
 
         # Attribution, rule 11, on BOTH paths. Merged into every request body
         # rather than sent as a header: this path goes through the RapidAPI
@@ -1975,7 +2137,20 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return {**_build(combo), **_tags}
 
         try:
-            plan = plan_builder(cap)
+            # Planned against the highest cap this caller could get, then
+            # re-sampled once the size of the request is known: the cap can
+            # DEPEND on that size (resolve_cap), and expanding the request
+            # twice is two chances for the count and the sample to disagree.
+            plan = plan_builder(ceiling)
+            cap, cap_source = resolve_cap(
+                requested=plan.requested_combinations,
+                max_searches=max_searches,
+                default_cap=settings.max_searches_per_tool_call,
+                auto_cap=settings.auto_max_searches,
+                hard_cap=HARD_MAX_SEARCHES,
+                trial_remaining=None if trial is None else trial.remaining,
+            )
+            plan = plan.recap(cap, cap_source=cap_source)
         except PlanError as exc:
             await log(
                 requested=0,
@@ -1986,6 +2161,36 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 error=str(exc),
             )
             raise ToolError(str(exc)) from exc
+
+        # A free allowance that cannot cover the question is told so, not
+        # sampled down to fit. See src/quota_gate.py: at a 30 cap the
+        # difference was cosmetic; at 93 the "cheapest October fare" a
+        # ten-search allowance can buy is the cheapest of eight days.
+        # `max_searches` is the caller saying "spend at most N" -- sampling
+        # is then what they asked for, not something done behind their back,
+        # so an explicit cap is never refused for being smaller than the
+        # question.
+        if (
+            trial is not None
+            and max_searches is None
+            and plan.requested_combinations > trial.remaining
+        ):
+            logger.info("%s", trial_log_line(trial, "refuse_size", tool_name))
+            await log(
+                requested=plan.requested_combinations,
+                calls=0,
+                failures=0,
+                results=0,
+                truncated=False,
+                error=QUOTA_EXCEEDED,
+            )
+            return trial_quota_refusal(
+                requested=plan.requested_combinations,
+                remaining_today=trial.remaining,
+                day_cap=trial.day_cap,
+                connect_url=_connect_url or flights_signup,
+                signup_url=flights_signup,
+            )
 
         # The allowance is taken BEFORE the searches run, now that the plan
         # says how many there will be. Counting afterwards made the cap a
@@ -2035,6 +2240,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     api_key=credential.key,
                     quota_sink=state.quota,
                     outcome_sink=sink,
+                    attempt_sink=state.attempts,
                 )
             except AuthError as exc:
                 state.auth_error = str(exc)
@@ -2059,6 +2265,22 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 build_payload=payload_builder,
                 run_search=run_search,
                 max_concurrency=settings.max_concurrent_searches,
+                # Shared with every other fan-out on this key, not owned
+                # by this call: see src/pacing.py.
+                pacer=bucket_for(credential.key, settings.hub_requests_per_minute),
+                deadline_seconds=settings.fanout_deadline_seconds,
+                # Only on a fan-out bigger than the default cap, and only
+                # for a caller spending their OWN plan: the trial is refused
+                # earlier, from a counter we can read for free.
+                gate=_quota_gate(
+                    state.quota,
+                    plan.executed_combinations,
+                    enabled=(
+                        trial is None
+                        and plan.executed_combinations
+                        > settings.max_searches_per_tool_call
+                    ),
+                ),
             )
 
         # Settled before any of the branches below, because every one of them
@@ -2067,6 +2289,41 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if trial is not None:
             trial = await _trial_settle(
                 trial, tool_name, trial_planned, outcome.backend_calls_made
+            )
+
+        # The wall clock, not the cap, ended the fan-out: the plan is
+        # narrowed to the combinations that actually went out, so everything
+        # derived from it -- truncated, the dates listed, the per-destination
+        # `not_searched` entries -- describes what happened. The combinations
+        # that never dispatched were never billed.
+        if outcome.stopped_reason == DEADLINE_REACHED:
+            plan = plan.narrowed_to(
+                [c for c, _rows in outcome.results_by_combo]
+                + list(outcome.failed_combos),
+                DEADLINE_REACHED,
+            )
+
+        # The gate stopped after the first combination: the plan cannot pay
+        # for the question. Reported as a refusal with the real numbers
+        # rather than as a thin sample of what was asked.
+        if outcome.stopped_reason == QUOTA_EXCEEDED:
+            await log(
+                requested=plan.requested_combinations,
+                calls=outcome.backend_calls_made,
+                failures=outcome.backend_failures,
+                results=0,
+                truncated=plan.truncated,
+                error=QUOTA_EXCEEDED,
+            )
+            return plan_quota_refusal(
+                requested=plan.requested_combinations,
+                remaining_month=state.quota.get("plan_requests_remaining", 0),
+                spent_probing=len(state.attempts) or outcome.backend_calls_made,
+                signup_url=flights_signup,
+                plan_limit=state.quota.get("plan_requests_limit"),
+                # The combination that read the quota was a real search and
+                # is already billed. Its fares go back with the refusal.
+                results=sorted(outcome.results, key=_row_sort_key(sort_by)),
             )
 
         # Account-level failures first: these are one fact about the caller,
@@ -2110,7 +2367,25 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 ),
             }
 
-        if state.quota_error is not None:
+        # A quota failure on SOME combinations is not a quota failure on the
+        # search. At a cap of 30 the distinction barely existed; at 93 or 200
+        # it is the difference between "your plan ran out on the 88th of 93
+        # searches, here are the 87 fares you paid for" and throwing all of
+        # them away with the money. Only a fan-out that produced nothing
+        # takes the branch below.
+        if state.quota_error is not None and outcome.results and trial is None:
+            _quota_note = (
+                f"The plan ran out of requests part-way through this search "
+                f"({state.quota_error}). "
+                f"{outcome.backend_calls_made - outcome.backend_failures} of "
+                f"{plan.executed_combinations} searches answered and their "
+                "fares are below; the rest were not priced. Plans can be "
+                f"changed at {flights_signup}."
+            )
+        else:
+            _quota_note = None
+
+        if state.quota_error is not None and _quota_note is None:
             await log(
                 requested=plan.requested_combinations,
                 calls=outcome.backend_calls_made,
@@ -2135,6 +2410,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     outcome.backend_calls_made,
                     state.quota,
                     BILLING_UNIT_NOTES["flights"],
+                    billed=len(state.attempts),
                 ),
                 "message": (
                     "This RapidAPI plan is out of requests for the current "
@@ -2178,8 +2454,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         )
 
         coverage = plan.coverage()
+        # Combinations and billed requests are two different numbers the
+        # moment a 5xx is retried, and a coverage block that reports only
+        # the first is the one a caller checks against their invoice.
+        coverage["hub_requests_billed"] = len(state.attempts)
         _note_hidden_combinations(coverage, hidden_combos, limit)
         _append_coverage_note(coverage, raised_limit_note)
+        if _quota_note is not None:
+            coverage["quota_exhausted_mid_search"] = True
+            _append_coverage_note(coverage, _quota_note)
 
         response: dict[str, Any] = {
             "results": rows,
@@ -2198,6 +2481,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 outcome.backend_calls_made,
                 state.quota,
                 BILLING_UNIT_NOTES["flights"],
+                billed=len(state.attempts),
             ),
         }
         if trial is not None:
@@ -2206,9 +2490,21 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             response["trial"] = trial_note(trial, _connect_url, flights_signup)
 
         if outcome.backend_failures:
+            why = (
+                " The plan ran out of requests part-way through, which is "
+                "why they failed."
+                if _quota_note is not None
+                else ""
+            )
             response["partial"] = (
                 f"{outcome.backend_failures} of {plan.executed_combinations} "
-                "searches failed; results cover the rest."
+                f"searches failed; results cover the rest.{why}"
+            )
+        elif plan.stopped_early == DEADLINE_REACHED:
+            response["partial"] = (
+                f"{plan.executed_combinations} of "
+                f"{plan.requested_combinations} searches ran before this "
+                "call reached its time limit; results cover those."
             )
 
         # A search that answered HTTP 200 with `[]` may still have failed: the
@@ -2223,6 +2519,21 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 response["search_status"] = "degraded" if incomplete else "empty"
             else:
                 response["search_status"] = "partial" if incomplete else "ok"
+
+        # A plan that ran out of requests part-way through is `partial`,
+        # never `ok`. The coverage already carried
+        # `quota_exhausted_mid_search` and the note, and the status stayed
+        # "ok" beside them -- so a client that branches on the status alone
+        # (which is what the status is FOR) read a half-covered range as a
+        # complete answer. The combinations that 429ed are counted as
+        # failures by the fan-out, so the sentence below is about the same
+        # facts the `partial` field already reports, with the reason named.
+        if _quota_note is not None and rows:
+            response["search_status"] = "partial"
+        # Same for a fan-out the wall clock cut short: rows, but not the
+        # range that was asked for.
+        if plan.stopped_early == DEADLINE_REACHED and rows:
+            response["search_status"] = "partial"
 
         if not rows:
             if incomplete:
@@ -2485,9 +2796,14 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             passengers: Passenger counts as [adults, children, infants].
             sort_by: "best", "price", or "duration". Applied across all results.
             limit: Maximum flights to return, after merging and sorting.
-            max_searches: Cap the billed requests this call may make. Lower it
-                to spend less of the plan's quota on a wide search; the range
-                is then sampled evenly rather than cut short.
+            max_searches: The billed requests this call may make, up or down.
+                Leave it out for the normal behaviour: the cap covers the
+                request when the request is reasonable (a whole month at three
+                trip lengths, 93 combinations, runs in full) and anything
+                past it is sampled evenly across the range rather than cut
+                short. Set it lower to spend less of the
+                plan's quota on a wide search, or higher -- to a hard maximum
+                of 200 -- for a grid wider than that.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
                 line, is what the model actually sees -- see the note there.
         """
@@ -2571,8 +2887,23 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "the outbound range and `nights` instead of return_date to compare "
             "trip lengths -- '5 to 7 nights in Rome sometime in May' is one "
             "call.\n\n"
-            "Each date/destination combination is one billed request; the "
-            "count and the plan's remaining quota come back in `api_usage`.\n\n"
+            "A WHOLE MONTH is one call too. departure_date_from "
+            "\"2026-10-01\", departure_date_to \"2026-10-31\" and "
+            "nights [3, 4, 5] prices every departure day in October at three "
+            "trip lengths and tells you which combination is cheapest. That "
+            "is 93 date/night combinations and the cap rises to cover them "
+            "by itself -- do not narrow the question to make it fit, and do "
+            "not split it into several calls.\n\n"
+            "Each date/night/destination combination is ONE request billed to "
+            "the caller's plan, so a month at three trip lengths costs 93 of "
+            "them and the same month across two destinations costs 186. Say "
+            "that number before running a search that large if the user has "
+            "not asked for it in so many words. A search that fails with a "
+            "server error is retried once and RapidAPI bills the retry, so "
+            "the figure to quote back is `api_usage.hub_requests_billed` "
+            "(what the plan was actually charged), not the combination "
+            "count. Both come back in `api_usage`, with the plan's "
+            "remaining quota.\n\n"
             "`by_destination` carries one entry per destination you asked for "
             "-- empty ones included, each with a `reason` -- so read it before "
             "telling a user a destination has no flights."
@@ -2631,9 +2962,14 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             passengers: Passenger counts as [adults, children, infants].
             sort_by: "best", "price", or "duration". Applied across all results.
             limit: Maximum trips to return, after merging and sorting.
-            max_searches: Cap the billed requests this call may make. Lower it
-                to spend less of the plan's quota on a wide search; the range
-                is then sampled evenly rather than cut short.
+            max_searches: The billed requests this call may make, up or down.
+                Leave it out for the normal behaviour: the cap covers the
+                request when the request is reasonable (a whole month at three
+                trip lengths, 93 combinations, runs in full) and anything
+                past it is sampled evenly across the range rather than cut
+                short. Set it lower to spend less of the
+                plan's quota on a wide search, or higher -- to a hard maximum
+                of 200 -- for a grid wider than that.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
                 line, is what the model actually sees -- see the note there.
         """
@@ -2917,16 +3253,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     upstream_api_name("hotels"),
                 )
 
-        cap = settings.max_searches_per_tool_call
-        if max_searches is not None:
-            if max_searches < 1:
-                raise ToolError("max_searches must be at least 1")
-            cap = min(max_searches, cap)
-
-        if trial is not None:
-            # Same reason as the flights fan-out: the last stay of the day must
-            # not overshoot the cap.
-            cap = min(cap, trial.remaining)
+        if max_searches is not None and max_searches < 1:
+            raise ToolError("max_searches must be at least 1")
+        # Same policy as the flights fan-out, same helper: a month of check-in
+        # dates at three stay lengths is the same 93 combinations, and the
+        # last stay of the day must not overshoot a trial allowance.
+        ceiling = _planning_ceiling(settings, max_searches, trial)
 
         # ...and the same attribution on both paths, for the same reason.
         _tags = (
@@ -2940,9 +3272,35 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             return {**_build(combo), **_tags}
 
         try:
-            plan = plan_builder(cap)
+            plan = plan_builder(ceiling)
+            cap, cap_source = resolve_cap(
+                requested=plan.requested_combinations,
+                max_searches=max_searches,
+                default_cap=settings.max_searches_per_tool_call,
+                auto_cap=settings.auto_max_searches,
+                hard_cap=HARD_MAX_SEARCHES,
+                trial_remaining=None if trial is None else trial.remaining,
+            )
+            plan = plan.recap(cap, cap_source=cap_source)
         except PlanError as exc:
             raise ToolError(str(exc)) from exc
+
+        # Same refusal as the flights fan-out, same reason: a month of
+        # check-in dates at three stay lengths is 93 stays, and sampling
+        # that down to a ten-stay allowance answers a different question.
+        if (
+            trial is not None
+            and max_searches is None
+            and plan.requested_combinations > trial.remaining
+        ):
+            logger.info("%s", trial_log_line(trial, "refuse_size", tool))
+            return trial_quota_refusal(
+                requested=plan.requested_combinations,
+                remaining_today=trial.remaining,
+                day_cap=trial.day_cap,
+                connect_url=_connect_url or hotels_signup,
+                signup_url=hotels_signup,
+            )
 
         # Same order as the flights fan-out: hold the allowance before any
         # stay is priced, give back what was never sent afterwards.
@@ -2976,7 +3334,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             async def run_search(_endpoint: str, payload: dict[str, Any]):
                 try:
                     body = await client.call(
-                        endpoint, payload, api_key=credential.key, quota_sink=quota
+                        endpoint,
+                        payload,
+                        api_key=credential.key,
+                        quota_sink=quota,
+                        attempt_sink=state.attempts,
                     )
                 except AuthError as exc:
                     state.auth_error = str(exc)
@@ -2997,6 +3359,20 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 build_payload=payload_builder,
                 run_search=run_search,
                 max_concurrency=settings.max_concurrent_searches,
+                # Shared with every other fan-out on this key, not owned
+                # by this call: see src/pacing.py.
+                pacer=bucket_for(credential.key, settings.hub_requests_per_minute),
+                deadline_seconds=settings.fanout_deadline_seconds,
+                # Same gate as the flights fan-out; see _quota_gate.
+                gate=_quota_gate(
+                    quota,
+                    plan.executed_combinations,
+                    enabled=(
+                        trial is None
+                        and plan.executed_combinations
+                        > settings.max_searches_per_tool_call
+                    ),
+                ),
             )
 
         async def log(*, results: int, error: str | None) -> None:
@@ -3018,6 +3394,25 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if trial is not None:
             trial = await _trial_settle(
                 trial, tool, trial_planned, outcome.backend_calls_made
+            )
+
+        if outcome.stopped_reason == DEADLINE_REACHED:
+            plan = plan.narrowed_to(
+                [c for c, _rows in outcome.results_by_combo]
+                + list(outcome.failed_combos),
+                DEADLINE_REACHED,
+            )
+
+        # Same refusal as the flights fan-out; see _quota_gate.
+        if outcome.stopped_reason == QUOTA_EXCEEDED:
+            await log(results=0, error=QUOTA_EXCEEDED)
+            return plan_quota_refusal(
+                requested=plan.requested_combinations,
+                remaining_month=quota.get("plan_requests_remaining", 0),
+                spent_probing=len(state.attempts) or outcome.backend_calls_made,
+                signup_url=hotels_signup,
+                plan_limit=quota.get("plan_requests_limit"),
+                results=list(outcome.results),
             )
 
         # Account-level failures first: one fact about the caller, not N
@@ -3065,7 +3460,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 f"Hotel search is temporarily unavailable ({outcome.first_error})"
             )
 
-        response = build_stay_response(plan, outcome, quota)
+        response = build_stay_response(
+            plan, outcome, quota, billed=len(state.attempts)
+        )
         if trial is not None:
             response["trial"] = trial_note(trial, _connect_url, hotels_signup)
         if applied_filters:
@@ -3346,10 +3743,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 ([2, 3, 7]) to price several lengths. Derives the check-out
                 date from each check-in date, so it replaces checkout_date
                 rather than joining it.
-            max_searches: Cap the billed requests this call may make. One
-                stay is one request, so a 30-day range at two lengths is 60;
-                lower this to spend less and the range is sampled evenly
-                across the calendar rather than cut short at the front.
+            max_searches: The billed requests this call may make, up or down.
+                One stay is one request, so a 30-day range at two lengths is
+                60 and a month at three is 93 -- the cap rises to cover a
+                request that size by itself. Set it lower to spend less, or
+                higher (hard maximum 200) for a wider grid; either way the
+                range is sampled evenly across the calendar rather than cut
+                short at the front.
             adults: Number of adult guests. Defaults to the upstream default
                 when omitted.
             children: Number of children sharing the room.
@@ -3625,9 +4025,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 ([2, 3, 7]) to price several lengths. Derives the check-out
                 date from each check-in date, so it replaces checkout_date
                 rather than joining it.
-            max_searches: Cap the billed requests this call may make. One
-                stay is one request; lower it and the range is sampled evenly
-                across the calendar rather than cut short at the front.
+            max_searches: The billed requests this call may make, up or down.
+                One stay is one request; the cap rises by itself to cover a
+                month-sized request, and anything past the cap in force is
+                sampled evenly across the calendar rather than cut short at
+                the front.
             adults: Number of adult guests.
             children: Number of children sharing the room.
             currency: ISO currency code for the prices returned, e.g. "usd".

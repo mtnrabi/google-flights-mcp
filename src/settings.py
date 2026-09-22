@@ -30,8 +30,56 @@ from .trial import DEFAULT_DAY_CAP as DEFAULT_TRIAL_DAY_CAP
 # protect our own bill. Higher than the free server's 15 for exactly that
 # reason: the spend is the user's to authorise, and they can raise it per call
 # with `max_searches` up to this hard maximum.
+#
+# Three numbers, not one, because "how much may this call spend" has three
+# different answers depending on who is asking and what they asked for:
+#
+# * DEFAULT_MAX_SEARCHES -- what a call gets when the question is small. It is
+#   also the number the tool description advertises, and the only ceiling a
+#   keyless trial caller can ever reach.
+# * AUTO_MAX_SEARCHES -- how far the cap rises BY ITSELF when the request
+#   itself is bigger than the default. A whole month of departures priced at
+#   three trip lengths is 93 combinations; under a 30 cap two thirds of the
+#   month were silently sampled away, which is not what "search October" means.
+#   The raise is never larger than what was actually asked for, so a small
+#   question still costs a small number of requests.
+# * HARD_MAX_SEARCHES -- the ceiling an EXPLICIT `max_searches` may reach.
+#   Two destinations across a month at three trip lengths is 186; 200 is the
+#   round number above it, and the pacing gate below is what keeps a plan of
+#   that size from tripping a per-minute rate limit.
 DEFAULT_MAX_SEARCHES = 30
-HARD_MAX_SEARCHES = 60
+AUTO_MAX_SEARCHES = 100
+HARD_MAX_SEARCHES = 200
+
+#: Requests per rolling minute one fan-out may START. The listing's plans are
+#: rate limited per minute as well as per month (PRO 150/min, ULTRA 250,
+#: MEGA 500) and RapidAPI answers a burst over that limit with 429 -- which
+#: this client reads, correctly, as "plan exhausted". A 93-combination plan at
+#: 12 in flight and ~2.5s a search finishes in ~20s, i.e. ~280 requests a
+#: minute, so the pace matters the moment the cap is above the low tens.
+#:
+#: 120 sits under the PRO limit with room for the caller's own other traffic.
+#: It is a TOKEN BUCKET shared per key (src/pacing.py), not an interval
+#: inside one call: the bucket starts full, so a 93-combination month is
+#: never delayed, while a SECOND concurrent month on the same key queues
+#: instead of putting 186 requests a minute through the Hub -- which is the
+#: case a per-call interval could not see at all. 0 disables pacing.
+DEFAULT_HUB_REQUESTS_PER_MINUTE = 120
+
+#: Wall clock on one fan-out, in seconds. Past it nothing further is
+#: dispatched and the partial answer is returned as truncated; what is
+#: already in flight is left to finish, because a sent request is already
+#: billed.
+#:
+#: 240 against the function's own 300s `maxDuration` (mcp_server_paid/
+#: vercel.json), leaving a minute for the slowest in-flight search to land
+#: and the response to be built. Measured 2026-09-22: 93 combinations took
+#: 36s and 186 took 99s, so this only engages when the upstream is far
+#: slower than it has ever been -- around 18s a search at 200 combinations,
+#: against a measured 1.9-5.5s. Without it that case spends ~180 of the
+#: caller's requests and returns them nothing at all, because the function
+#: is killed mid-response. 0 disables the deadline.
+DEFAULT_FANOUT_DEADLINE_SECONDS = 240.0
 
 
 def _strip_quotes(value: str) -> str:
@@ -176,6 +224,16 @@ class Settings:
     # own quota, which is why the number is reported back in every response
     # rather than left for them to discover on their invoice.
     max_searches_per_tool_call: int
+    #: The ceiling the cap rises to on its own when the REQUEST is bigger than
+    #: `max_searches_per_tool_call`. See AUTO_MAX_SEARCHES.
+    auto_max_searches: int
+    #: Requests per rolling minute allowed across every fan-out running on
+    #: ONE key; 0 is off. See DEFAULT_HUB_REQUESTS_PER_MINUTE and
+    #: src/pacing.py.
+    hub_requests_per_minute: int
+    #: Wall clock on one fan-out, in seconds; 0 is off. See
+    #: DEFAULT_FANOUT_DEADLINE_SECONDS.
+    fanout_deadline_seconds: float
     max_concurrent_searches: int
     # Vercel functions share 1,024 file descriptors across every concurrent
     # execution on an instance and sockets come out of that pool, so an
@@ -414,6 +472,20 @@ def load_settings(products: str | None = None) -> Settings:
         raise RuntimeError("MAX_SEARCHES_PER_TOOL_CALL must be at least 1")
     max_searches = min(max_searches, HARD_MAX_SEARCHES)
 
+    # Never below the default cap: the automatic raise exists to let a big
+    # question be asked once, and an AUTO below MAX_SEARCHES_PER_TOOL_CALL
+    # would be a cap that lowers itself.
+    auto_max_searches = _env_int("AUTO_MAX_SEARCHES", AUTO_MAX_SEARCHES)
+    auto_max_searches = min(
+        HARD_MAX_SEARCHES, max(max_searches, auto_max_searches)
+    )
+    hub_requests_per_minute = max(
+        0, _env_int("HUB_REQUESTS_PER_MINUTE", DEFAULT_HUB_REQUESTS_PER_MINUTE)
+    )
+    fanout_deadline = max(
+        0.0, _env_float("FANOUT_DEADLINE_SECONDS", DEFAULT_FANOUT_DEADLINE_SECONDS)
+    )
+
     host = _env_str("RAPIDAPI_HOST", "google-flights-live-api.p.rapidapi.com")
 
     # Negative is a typo, not "unlimited". Clamped rather than raised, because
@@ -431,7 +503,15 @@ def load_settings(products: str | None = None) -> Settings:
                                            DEFAULT_TIMEOUT_SECONDS),
         fallback_rapidapi_key=_env_str("RAPIDAPI_KEY", ""),
         max_searches_per_tool_call=max_searches,
-        max_concurrent_searches=_env_int("MAX_CONCURRENT_SEARCHES", 10),
+        auto_max_searches=auto_max_searches,
+        hub_requests_per_minute=hub_requests_per_minute,
+        fanout_deadline_seconds=fanout_deadline,
+        # 12, not 10: a 93-combination month at 10 in flight is ~24s of the
+        # function's 300s budget and at 12 it is ~20s, and 12 leaves the
+        # shared httpx pool (max_http_connections, 60) five times the room it
+        # needs. Raised with the cap rather than independently -- the pacing
+        # gate, not this number, is what bounds the request RATE.
+        max_concurrent_searches=_env_int("MAX_CONCURRENT_SEARCHES", 12),
         max_http_connections=_env_int("MAX_HTTP_CONNECTIONS", 60),
         public_url=_scoped_env_str(
             "MCP_PUBLIC_URL", products, "http://localhost:8000/mcp"

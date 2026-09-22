@@ -348,6 +348,7 @@ class RapidAPIClient:
         api_key: str,
         quota_sink: dict[str, int] | None = None,
         outcome_sink: list[dict[str, str]] | None = None,
+        attempt_sink: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         """POST one search. Returns the (possibly empty) result list.
 
@@ -359,6 +360,14 @@ class RapidAPIClient:
         read off the response. Every request in one fan-out carries the same
         key, so last-writer-wins is not a race to avoid but the behaviour we
         want: the final value is the most recent view of that plan's usage.
+
+        `attempt_sink`, when given, gets one appended entry per HTTP request
+        actually SENT -- which is not the same as one per call. A 5xx is
+        retried once (see `_RETRYABLE_STATUS`), and RapidAPI bills the retry:
+        a fan-out of 93 over a flaky window can cost 130 requests, and
+        reporting 93 as the bill is a number the invoice contradicts. The
+        retry policy is deliberate and unchanged; what changes is that the
+        cost is now counted rather than assumed.
 
         `outcome_sink`, when given, gets one appended entry per answered
         request: that response's `X-Search-*` headers. A list rather than a
@@ -378,6 +387,10 @@ class RapidAPIClient:
 
         last_error = "unknown"
         for attempt in range(1, _MAX_ATTEMPTS + 1):
+            # Recorded BEFORE the await: a request that times out was still
+            # sent, and the gateway may well have billed it.
+            if attempt_sink is not None:
+                attempt_sink.append(1)
             try:
                 response = await self._client.post(
                     url, json=payload, headers=headers, timeout=self._timeout

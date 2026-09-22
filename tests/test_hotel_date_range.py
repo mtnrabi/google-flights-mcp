@@ -29,6 +29,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from src.fanout import PlanError, plan_hotel_stays
+from src.settings import HARD_MAX_SEARCHES
 from tests.test_server import build_with_upstream
 
 KEY = "2b3b32aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -422,12 +423,19 @@ class TestOneCallManyStays:
         assert len(out["search_coverage"]["stays_searched"]) == 3
 
     @pytest.mark.asyncio
-    async def test_max_searches_cannot_exceed_the_deployment_cap(self):
+    async def test_max_searches_raises_the_cap_past_the_deployment_default(self):
+        """The deployment cap is the DEFAULT, not the ceiling.
+
+        It used to be both, while the tool description promised otherwise --
+        so a caller who read the description, asked for 50 and got 4 was told
+        in `search_coverage` to raise `max_searches`, which is what they had
+        just done.
+        """
         handler, seen = recording_handler(lambda ci, _co: [])
         mcp = build_with_upstream(
             handler, fallback_rapidapi_key=KEY, max_searches_per_tool_call=4
         )
-        await call(
+        out = await call(
             mcp,
             "search_hotels",
             destination="Rome",
@@ -436,7 +444,27 @@ class TestOneCallManyStays:
             nights=1,
             max_searches=50,
         )
-        assert len(seen) == 4
+        assert len(seen) == 20
+        assert out["search_coverage"]["truncated"] is False
+        assert out["search_coverage"]["max_searches_source"] == "explicit"
+
+    @pytest.mark.asyncio
+    async def test_max_searches_cannot_exceed_the_hard_maximum(self):
+        handler, seen = recording_handler(lambda ci, _co: [])
+        mcp = build_with_upstream(
+            handler, fallback_rapidapi_key=KEY, max_searches_per_tool_call=4
+        )
+        out = await call(
+            mcp,
+            "search_hotels",
+            destination="Rome",
+            checkin_date_from="2026-05-01",
+            checkin_date_to="2026-09-30",
+            nights=[1, 2, 3],
+            max_searches=5000,
+        )
+        assert len(seen) == HARD_MAX_SEARCHES
+        assert out["search_coverage"]["truncated"] is True
 
     @pytest.mark.asyncio
     async def test_max_searches_below_one_is_refused(self):
@@ -726,6 +754,11 @@ class TestTheOldShapeIsUntouched:
             "result_count": 1,
             "api_usage": {
                 "requests_used_by_this_call": 1,
+                # Added 2026-09-22: what the Hub actually billed, which
+                # differs from the combination count whenever a 5xx was
+                # retried. A single stay has no fan-out and no retry here,
+                # so the two agree and the note is unchanged.
+                "hub_requests_billed": 1,
                 "plan_requests_remaining": 19990,
                 "plan_requests_limit": 20000,
                 "note": (
@@ -758,6 +791,7 @@ class TestTheOldShapeIsUntouched:
             "result_count": 1,
             "api_usage": {
                 "requests_used_by_this_call": 1,
+                "hub_requests_billed": 1,
                 "plan_requests_remaining": 19990,
                 "note": (
                     "This search used 1 of your RapidAPI plan's requests. Each "

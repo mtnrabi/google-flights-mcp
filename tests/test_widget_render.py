@@ -914,3 +914,225 @@ class TestALongDestinationString:
 
     def test_it_cannot_widen_the_table(self, partial):
         assert partial["hscroll"] == 0, "a 400-character destination scrolled 3,370px"
+
+
+# ── a whole month of fares, and a refusal (2026-09-22) ──────────────────
+#
+# The cap that made one call cover a month (AUTO_MAX_SEARCHES) changed what
+# reaches this frame: 93 rows for one destination, 186 for two, where the
+# card was designed and measured against 36. Two things had to be proven
+# rather than assumed -- that the fit still caps the card at 780px and that
+# it does so in the same three passes, not in a loop that grows with the row
+# count -- and one thing had to be added: a search REFUSED for want of quota
+# arrives with no rows at all and must draw a small card, never an empty
+# table (src/quota_gate.py).
+
+MONTH_ROWS = {
+    "search_status": "ok",
+    "result_count": 186,
+    "search_coverage": {
+        "requested_combinations": 186,
+        "searched_combinations": 186,
+        "truncated": False,
+        "max_searches_source": "explicit",
+        "destinations_searched": ["ATH", "FCO"],
+    },
+    "api_usage": {
+        "requests_used_by_this_call": 186,
+        "plan_requests_remaining": 2314,
+    },
+    "results": sorted(
+        (
+            {
+                "price": f"${base + i}",
+                "price_as_number": base + i,
+                "total_price_as_number": base + i,
+                "airline": airline,
+                "stops": i % 2,
+                "duration": "4 hr 55 min",
+                "departure_description": "08:15 AM on Thu, Oct 1",
+                "arrival_description": "arrives 11:10 AM",
+                "from_airport": "TLV",
+                "to_airport": dest,
+                "price_insights_low": low,
+                "price_insights_high": high,
+                "price_range_in_relation_to_other_periods": "typical",
+                "buy_link": f"https://www.google.com/travel/flights?tfs={dest}{i}",
+            }
+            for dest, base, airline, low, high in (
+                ("FCO", 300, "ITA Airways", 320, 540),
+                ("ATH", 600, "Aegean", 610, 870),
+            )
+            for i in range(93)
+        ),
+        key=lambda r: r["total_price_as_number"],
+    ),
+}
+
+REFUSAL = {
+    "search_status": "quota_exceeded",
+    "results": [],
+    "result_count": 0,
+    "retry": False,
+    "combos_requested": 93,
+    "combos_allowed_now": 9,
+    "remaining_month": 9,
+    "requests_spent": 1,
+    "message": (
+        "This search needs 93 requests but your plan has 9 left this month "
+        "(plan quota 10 a month). Ask for fewer dates or nights (e.g. one "
+        "week, 3 nights), or move to PRO ($10/month, 2,500 requests) at "
+        "https://rapidapi.com/mtnrabi/api/google-flights-live-api."
+    ),
+}
+
+REFUSAL_PROBE = r"""
+<script>
+(function () {
+  var out = {};
+  window.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
+                       params: { structuredContent: __PAYLOAD__ } }, "*");
+  setTimeout(function () {
+    out.tables = document.querySelectorAll("table.fp-t").length;
+    out.pills = document.querySelectorAll("button.fp-pill").length;
+    var q = document.querySelector(".fp-quota");
+    out.quota = q ? q.textContent.replace(/\s+/g, " ").trim() : null;
+    var n = document.querySelector(".fp-note");
+    out.note = n ? n.textContent.replace(/\s+/g, " ").trim() : null;
+    out.cardHeight = Math.round(document.querySelector(".fp-card").getBoundingClientRect().height);
+    out.hscroll = document.documentElement.scrollWidth - document.documentElement.clientWidth;
+    try { document.title = "RESULT:" + btoa(unescape(encodeURIComponent(JSON.stringify(out)))); }
+    catch (e) { document.title = "RESULTERROR:" + String(e); }
+  }, 80);
+})();
+</script>
+"""
+
+
+@pytest.fixture(scope="module")
+def month():
+    return _run_page(
+        _chrome_or_skip(),
+        LAYOUT_PROBE.replace("__PAYLOAD__", _inline(MONTH_ROWS)),
+        width=760,
+    )
+
+
+@pytest.fixture(scope="module")
+def refusal():
+    return _run_page(
+        _chrome_or_skip(),
+        REFUSAL_PROBE.replace("__PAYLOAD__", _inline(REFUSAL)),
+        width=760,
+    )
+
+
+class TestAWholeMonthOfFares:
+    def test_all_of_them_arrive_and_the_card_is_still_short(self, month):
+        assert month["rows"] == 186
+        assert month["visible"] == 10
+        assert month["capped"] == "1"
+        assert month["cardHeight"] <= 780
+        assert month["hscroll"] == 0
+
+    def test_the_footer_counts_the_month_not_the_design_sample(self, month):
+        assert month["more"] == "Showing 10 of 186 · scroll for moreShow all 186"
+
+    def test_the_pills_still_group_the_two_destinations(self, month):
+        assert [p["text"] for p in month["pills"]] == ["All186", "FCO93", "ATH93"]
+        assert month["f_rows"] == 93
+        assert month["f_visible"] == 10
+        assert month["f_cardHeight"] <= 780
+
+    def test_show_all_opens_the_whole_month_and_all_puts_it_back(self, month):
+        assert month["e_visible"] == 93
+        assert month["e_capped"] is None
+        assert month["back_rows"] == 186
+
+    def test_the_cheapest_of_the_month_is_the_one_badged(self, month):
+        assert month["badged"] == "$300cheapest"
+
+
+class TestARefusedSearch:
+    """No rows, so no table: the two numbers and the message, nothing else."""
+
+    def test_it_is_a_small_card_with_no_table_and_no_pills(self, refusal):
+        assert refusal["tables"] == 0
+        assert refusal["pills"] == 0
+        assert refusal["cardHeight"] <= 780
+        assert refusal["hscroll"] == 0
+
+    def test_the_two_numbers_are_the_headline(self, refusal):
+        assert refusal["quota"] == "93 requests needed · 9 left"
+
+    def test_both_ways_forward_are_on_the_card(self, refusal):
+        assert "fewer dates or nights" in refusal["note"]
+        assert "PRO ($10/month, 2,500 requests)" in refusal["note"]
+
+
+# A refusal now carries the ONE combination's fares (they were billed), so
+# the card has both a refusal headline and a table. Pinned here because the
+# two halves have to agree: the numbers say 93 were asked for, the table
+# shows one date's worth, and the message is what reconciles them.
+REFUSAL_WITH_FARES = dict(
+    REFUSAL,
+    result_count=2,
+    combos_searched=1,
+    results=[
+        {
+            "price": "$412",
+            "price_as_number": 412,
+            "airline": "ITA Airways",
+            "stops": 0,
+            "duration": "4 hr 5 min",
+            "departure_description": "08:15 AM on Thu, Oct 1",
+            "from_airport": "TLV",
+            "to_airport": "FCO",
+            "price_insights_low": 320,
+            "price_insights_high": 540,
+            "price_range_in_relation_to_other_periods": "typical",
+            "buy_link": "https://www.google.com/travel/flights?tfs=a",
+        },
+        {
+            "price": "$488",
+            "price_as_number": 488,
+            "airline": "Wizz Air",
+            "stops": 1,
+            "duration": "7 hr",
+            "departure_description": "06:00 PM on Thu, Oct 1",
+            "from_airport": "TLV",
+            "to_airport": "FCO",
+            "buy_link": "https://www.google.com/travel/flights?tfs=b",
+        },
+    ],
+)
+
+REFUSAL_ROWS_PROBE = REFUSAL_PROBE.replace(
+    'out.cardHeight =',
+    'out.rows = document.querySelectorAll("table.fp-t tbody tr").length;\n'
+    "    out.cardHeight =",
+)
+
+
+@pytest.fixture(scope="module")
+def refusal_with_fares():
+    return _run_page(
+        _chrome_or_skip(),
+        REFUSAL_ROWS_PROBE.replace("__PAYLOAD__", _inline(REFUSAL_WITH_FARES)),
+        width=760,
+    )
+
+
+class TestARefusalThatStillHasFares:
+    def test_the_paid_for_fares_are_drawn(self, refusal_with_fares):
+        assert refusal_with_fares["rows"] == 2
+        assert refusal_with_fares["tables"] == 1
+
+    def test_the_refusal_headline_is_still_above_them(self, refusal_with_fares):
+        assert refusal_with_fares["quota"] == "93 requests needed · 9 left"
+        assert "9 left this month" in refusal_with_fares["note"]
+
+    def test_one_destination_means_no_pills(self, refusal_with_fares):
+        assert refusal_with_fares["pills"] == 0
+        assert refusal_with_fares["cardHeight"] <= 780
+        assert refusal_with_fares["hscroll"] == 0

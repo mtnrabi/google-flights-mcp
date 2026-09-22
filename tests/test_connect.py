@@ -57,6 +57,9 @@ def make_settings(**overrides) -> Settings:
         request_timeout_seconds=5.0,
         fallback_rapidapi_key="",
         max_searches_per_tool_call=5,
+        auto_max_searches=5,
+        hub_requests_per_minute=0,
+        fanout_deadline_seconds=0.0,
         max_concurrent_searches=3,
         max_http_connections=10,
         public_url="https://mcp.test/mcp",
@@ -68,6 +71,12 @@ def make_settings(**overrides) -> Settings:
         products="flights",
     )
     base.update(overrides)
+    # The automatic raise is OFF unless a test asks for it: a helper
+    # whose auto ceiling sat above the cap a test had just set would
+    # quietly search more than the test said, which is how a cap
+    # regression hides. Tests for the raise pass auto_max_searches.
+    if "auto_max_searches" not in overrides:
+        base["auto_max_searches"] = base["max_searches_per_tool_call"]
     return Settings(**base)
 
 

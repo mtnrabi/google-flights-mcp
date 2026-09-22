@@ -193,8 +193,15 @@ class HotelsClient:
         *,
         api_key: str,
         quota_sink: dict[str, int] | None = None,
+        attempt_sink: list[int] | None = None,
     ) -> Any:
-        """One request. Raises AuthError / QuotaError / RapidAPIError."""
+        """One request. Raises AuthError / QuotaError / RapidAPIError.
+
+        `attempt_sink` counts HTTP requests SENT, not calls made: a retry is
+        billed by RapidAPI like any other request. Same contract as
+        `RapidAPIClient.search`; see its docstring for why the cost is
+        counted rather than assumed.
+        """
         if self._client is None:
             raise RuntimeError("HotelsClient must be used as an async context manager")
 
@@ -208,6 +215,8 @@ class HotelsClient:
 
         last_error: Exception | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
+            if attempt_sink is not None:
+                attempt_sink.append(1)
             try:
                 response = await self._client.post(
                     url, json=payload, headers=headers, timeout=self._timeout

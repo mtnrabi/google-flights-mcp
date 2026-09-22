@@ -165,7 +165,7 @@
               }
             ],
             "default": null,
-            "description": "Cap the billed requests this call may make. One stay is one request, so a 30-day range at two lengths is 60; lower this to spend less and the range is sampled evenly across the calendar rather than cut short at the front."
+            "description": "The billed requests this call may make, up or down. One stay is one request, so a 30-day range at two lengths is 60 and a month at three is 93 -- the cap rises to cover a request that size by itself. Set it lower to spend less, or higher (hard maximum 200) for a wider grid; either way the range is sampled evenly across the calendar rather than cut short at the front."
           },
           "nights": {
             "anyOf": [
@@ -227,6 +227,11 @@
             "additionalProperties": true,
             "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
             "properties": {
+              "hub_requests_billed": {
+                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. This is the figure the invoice will show.",
+                "minimum": 0,
+                "type": "integer"
+              },
               "note": {
                 "description": "The same figures as a sentence, for the model to relay.",
                 "type": "string"
@@ -238,6 +243,7 @@
                 "type": "integer"
               },
               "requests_used_by_this_call": {
+                "description": "How many date/destination combinations were searched -- what the answer COVERS.",
                 "minimum": 0,
                 "type": "integer"
               }
@@ -566,6 +572,10 @@
                 },
                 "type": "array"
               },
+              "stopped_early": {
+                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but do not cover the whole range.",
+                "type": "string"
+              },
               "truncated": {
                 "description": "True when the request expanded past this call's spend ceiling and was sampled. A stay absent from stays_searched was never priced, which is not the same as having no rooms.",
                 "type": "boolean"
@@ -574,13 +584,14 @@
             "type": "object"
           },
           "search_status": {
-            "description": "Date-range searches only, except 'trial_exhausted'. 'ok': every stay searched was priced. 'empty': they all answered and none had priced availability -- a real answer. 'partial': some stays were priced and some errored. 'degraded': every stay errored, so nothing is known; safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help.",
+            "description": "Date-range searches only, except 'trial_exhausted'. 'ok': every stay searched was priced. 'empty': they all answered and none had priced availability -- a real answer. 'partial': some stays were priced and some errored. 'degraded': every stay errored, so nothing is known; safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan.",
             "enum": [
               "ok",
               "empty",
               "partial",
               "degraded",
-              "trial_exhausted"
+              "trial_exhausted",
+              "quota_exceeded"
             ],
             "type": "string"
           },
@@ -841,7 +852,7 @@
               }
             ],
             "default": null,
-            "description": "Cap the billed requests this call may make. One stay is one request; lower it and the range is sampled evenly across the calendar rather than cut short at the front."
+            "description": "The billed requests this call may make, up or down. One stay is one request; the cap rises by itself to cover a month-sized request, and anything past the cap in force is sampled evenly across the calendar rather than cut short at the front."
           },
           "nights": {
             "anyOf": [
@@ -888,6 +899,11 @@
             "additionalProperties": true,
             "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
             "properties": {
+              "hub_requests_billed": {
+                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. This is the figure the invoice will show.",
+                "minimum": 0,
+                "type": "integer"
+              },
               "note": {
                 "description": "The same figures as a sentence, for the model to relay.",
                 "type": "string"
@@ -899,6 +915,7 @@
                 "type": "integer"
               },
               "requests_used_by_this_call": {
+                "description": "How many date/destination combinations were searched -- what the answer COVERS.",
                 "minimum": 0,
                 "type": "integer"
               }
@@ -1227,6 +1244,10 @@
                 },
                 "type": "array"
               },
+              "stopped_early": {
+                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but do not cover the whole range.",
+                "type": "string"
+              },
               "truncated": {
                 "description": "True when the request expanded past this call's spend ceiling and was sampled. A stay absent from stays_searched was never priced, which is not the same as having no rooms.",
                 "type": "boolean"
@@ -1235,13 +1256,14 @@
             "type": "object"
           },
           "search_status": {
-            "description": "Date-range searches only, except 'trial_exhausted'. 'ok': every stay searched was priced. 'empty': they all answered and none had priced availability -- a real answer. 'partial': some stays were priced and some errored. 'degraded': every stay errored, so nothing is known; safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help.",
+            "description": "Date-range searches only, except 'trial_exhausted'. 'ok': every stay searched was priced. 'empty': they all answered and none had priced availability -- a real answer. 'partial': some stays were priced and some errored. 'degraded': every stay errored, so nothing is known; safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan.",
             "enum": [
               "ok",
               "empty",
               "partial",
               "degraded",
-              "trial_exhausted"
+              "trial_exhausted",
+              "quota_exceeded"
             ],
             "type": "string"
           },
@@ -1494,6 +1516,11 @@
             "additionalProperties": true,
             "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
             "properties": {
+              "hub_requests_billed": {
+                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. This is the figure the invoice will show.",
+                "minimum": 0,
+                "type": "integer"
+              },
               "note": {
                 "description": "The same figures as a sentence, for the model to relay.",
                 "type": "string"
@@ -1505,6 +1532,7 @@
                 "type": "integer"
               },
               "requests_used_by_this_call": {
+                "description": "How many date/destination combinations were searched -- what the answer COVERS.",
                 "minimum": 0,
                 "type": "integer"
               }

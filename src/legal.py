@@ -215,11 +215,15 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
         # and not a cap that applies to them.
         "TOOL_BEHAVIOUR": (
             "Both accept a date range and a list of destinations, expand them "
-            "internally into individual searches (30 per call by default; a "
-            "per-call `max_searches` argument can lower that figure for a "
-            "single call but cannot raise it, and 60 is the hard ceiling the "
-            "deployment-wide setting itself cannot exceed), and forward each "
-            "search to the Google Flights Live API on RapidAPI."
+            "internally into individual searches (30 per call by default, "
+            "rising automatically to as many as 100 when the request itself "
+            "is larger -- a whole month of departures at three trip lengths "
+            "is 93; a per-call `max_searches` argument sets the figure "
+            "explicitly, up or down, and 200 is the hard ceiling), and "
+            "forward each search to the Google Flights Live API on RapidAPI. "
+            "Every search is one request billed to the caller's own RapidAPI "
+            "plan, and a call whose remaining allowance cannot cover the "
+            "request is refused rather than run in part."
         ),
         "SEARCH_PARAM_NOUNS": (
             "Origins, destinations, dates, passenger counts, cabin class, "
@@ -348,10 +352,11 @@ PRODUCT_CONTEXT["both"] = dict(
     TOOL_BEHAVIOUR=(
         "The two flight tools accept a date range and a list of destinations "
         "and expand them internally into individual searches (30 per call by "
-        "default; a per-call `max_searches` argument can lower that figure "
-        "for a single call but cannot raise it, and 60 is the hard ceiling "
-        "the deployment-wide setting itself cannot exceed), forwarding each "
-        "search to the Google Flights Live API on RapidAPI. The two hotel "
+        "default, rising automatically to as many as 100 when the request "
+        "itself is larger -- a whole month of departures at three trip "
+        "lengths is 93; a per-call `max_searches` argument sets the figure "
+        "explicitly, up or down, and 200 is the hard ceiling), forwarding "
+        "each search to the Google Flights Live API on RapidAPI. The two hotel "
         "tools take one stay -- a destination or a property name, plus "
         "check-in and check-out dates -- and forward it to the Booking Live "
         "API on RapidAPI as a single request, with no fan-out: one hotel tool "

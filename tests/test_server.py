@@ -32,6 +32,9 @@ def make_settings(**overrides) -> Settings:
         # Production leaves this empty; see test_settings.py.
         fallback_rapidapi_key=KEY,
         max_searches_per_tool_call=5,
+        auto_max_searches=5,
+        hub_requests_per_minute=0,
+        fanout_deadline_seconds=0.0,
         max_concurrent_searches=3,
         max_http_connections=10,
         public_url="https://mcp.test/mcp",
@@ -42,6 +45,12 @@ def make_settings(**overrides) -> Settings:
         signup_url="https://rapidapi.test/google-flights",
     )
     base.update(overrides)
+    # The automatic raise is OFF unless a test asks for it: a helper
+    # whose auto ceiling sat above the cap a test had just set would
+    # quietly search more than the test said, which is how a cap
+    # regression hides. Tests for the raise pass auto_max_searches.
+    if "auto_max_searches" not in overrides:
+        base["auto_max_searches"] = base["max_searches_per_tool_call"]
     return Settings(**base)
 
 
@@ -302,7 +311,14 @@ class TestSuccessPath:
         assert calls["n"] == 2
 
     @pytest.mark.asyncio
-    async def test_max_searches_cannot_raise_the_cap(self):
+    async def test_max_searches_raises_the_cap_past_the_deployment_default(self):
+        """The deployment cap is the DEFAULT, not the ceiling.
+
+        It was both until 2026-09-22, while the tool description said
+        "`max_searches` raises or lowers it per call, up to a hard maximum" --
+        so a caller who asked for 99 got 3 and was told, in `search_coverage`,
+        to raise `max_searches`.
+        """
         calls = {"n": 0}
 
         def handler(_request):
@@ -310,7 +326,7 @@ class TestSuccessPath:
             return httpx.Response(200, json=[])
 
         mcp = build_with_upstream(handler, max_searches_per_tool_call=3)
-        await call(
+        out = await call(
             mcp,
             "search_oneway_flights",
             from_airport="TLV",
@@ -319,7 +335,30 @@ class TestSuccessPath:
             departure_date_to="2026-09-30",
             max_searches=99,
         )
-        assert calls["n"] == 3
+        assert calls["n"] == 30
+        assert out["search_coverage"]["truncated"] is False
+        assert out["search_coverage"]["max_searches_source"] == "explicit"
+
+    @pytest.mark.asyncio
+    async def test_max_searches_cannot_exceed_the_hard_maximum(self):
+        calls = {"n": 0}
+
+        def handler(_request):
+            calls["n"] += 1
+            return httpx.Response(200, json=[])
+
+        mcp = build_with_upstream(handler, max_searches_per_tool_call=3)
+        out = await call(
+            mcp,
+            "search_oneway_flights",
+            from_airport="TLV",
+            to_airport=["BUD", "ATH", "FCO", "BCN", "LIS", "CDG", "AMS"],
+            departure_date_from="2026-09-01",
+            departure_date_to="2026-10-31",
+            max_searches=5000,
+        )
+        assert calls["n"] == HARD_MAX_SEARCHES
+        assert out["search_coverage"]["truncated"] is True
 
     @pytest.mark.asyncio
     async def test_empty_result_is_answered_not_raised(self):

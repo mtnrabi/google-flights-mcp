@@ -263,10 +263,15 @@ class TestWhatCounts:
         assert await trial.trial_store.usage(SUB, utc_day()) == 3
 
     async def test_the_last_call_of_the_day_cannot_overshoot(self, trial):
-        """A caller at 2 of 3 asking for ten dates gets one search, not ten.
+        """A caller at 2 of 3 asking for ten dates gets a refusal, not a
+        one-date answer dressed up as ten.
 
-        Without this a cap is a suggestion: one over-broad question at the end
-        of the day spends the whole of the next one."""
+        It used to get one search -- the allowance's remainder -- and a
+        `search_coverage` saying so. That was safe for the counter and wrong
+        for the user: "cheapest over these ten days" answered from one day
+        reads as an answer. Nothing is searched and nothing is spent; the
+        reply carries both numbers and the two ways forward.
+        """
         await trial.trial_store.spend(SUB, utc_day(), 2)
         async with Session(trial) as session:
             token = await _bearer(session.http)
@@ -278,6 +283,30 @@ class TestWhatCounts:
                     "to_airport": "ATH",
                     "departure_date_from": "2026-09-20",
                     "departure_date_to": "2026-09-29",
+                },
+                {"authorization": f"Bearer {token}"},
+            )
+        assert trial.upstream.keys_seen == []
+        assert await trial.trial_store.usage(SUB, utc_day()) == 2
+        assert reply["search_status"] == "quota_exceeded"
+        assert reply["combos_requested"] == 10
+        assert reply["combos_allowed_now"] == 1
+        assert reply["remaining_today"] == 1
+        assert "needs 10 requests" in reply["message"]
+        assert "1 left today" in reply["message"]
+
+    async def test_a_request_the_allowance_covers_still_runs(self, trial):
+        """The gate is "cannot pay", not "asked for a lot"."""
+        await trial.trial_store.spend(SUB, utc_day(), 2)
+        async with Session(trial) as session:
+            token = await _bearer(session.http)
+            reply = await call_tool(
+                session.http,
+                "/mcp",
+                {
+                    "from_airport": "TLV",
+                    "to_airport": "ATH",
+                    "departure_date": "2026-09-20",
                 },
                 {"authorization": f"Bearer {token}"},
             )
@@ -832,7 +861,11 @@ class TestConcurrency:
                 "from_airport": "TLV",
                 "to_airport": "ATH",
                 "departure_date_from": "2026-09-20",
-                "departure_date_to": "2026-09-29",
+                # Exactly the cap: wide enough that two of these together
+                # would double it, narrow enough that neither is refused for
+                # being unaffordable -- this test is about the RESERVATION
+                # race, not about the size gate.
+                "departure_date_to": "2026-09-22",
             }
             first, second = await asyncio.gather(
                 call_tool(

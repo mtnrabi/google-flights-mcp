@@ -72,7 +72,18 @@ from typing import Any
 # because a client validating a result against this schema has to find the
 # value the result actually carries -- and because the alternative, raising,
 # would have a model retry a call that cannot succeed until tomorrow.
-SEARCH_STATUS_VALUES = ("ok", "empty", "partial", "degraded", "trial_exhausted")
+# `quota_exceeded` joins them for the same reason: a free allowance that
+# cannot cover the fan-out the caller asked for is refused outright rather
+# than sampled down to fit (src/quota_gate.py), and the refusal is a result
+# the client must be able to validate.
+SEARCH_STATUS_VALUES = (
+    "ok",
+    "empty",
+    "partial",
+    "degraded",
+    "trial_exhausted",
+    "quota_exceeded",
+)
 
 SEARCH_STATUS_DESCRIPTION = (
     "Whether the underlying search actually completed, read from the "
@@ -85,7 +96,8 @@ SEARCH_STATUS_DESCRIPTION = (
     "isError: true and is safe to retry. 'trial_exhausted': the free "
     "signed-in allowance on this server is spent for today, so nothing was "
     "searched and nothing was billed; it renews at 00:00 UTC and connecting "
-    "your own RapidAPI key removes the cap. Retrying does not help."
+    "your own RapidAPI key removes the cap. Retrying does not help. "
+    "'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan."
 )
 
 _RESULT_ROWS: dict[str, Any] = {
@@ -108,7 +120,24 @@ _API_USAGE: dict[str, Any] = {
         "a degraded one -- a search that failed was still billed."
     ),
     "properties": {
-        "requests_used_by_this_call": {"type": "integer", "minimum": 0},
+        "requests_used_by_this_call": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "How many date/destination combinations were searched -- "
+                "what the answer COVERS."
+            ),
+        },
+        "hub_requests_billed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "How many HTTP requests RapidAPI actually billed. Larger "
+                "than requests_used_by_this_call when a search failed with "
+                "a server error and was retried, because the retry is "
+                "billed too. This is the figure the invoice will show."
+            ),
+        },
         "plan_requests_remaining": {"type": "integer"},
         "plan_requests_limit": {"type": "integer"},
         "note": {
@@ -137,6 +166,23 @@ _FLIGHT_COVERAGE: dict[str, Any] = {
             ),
         },
         "max_searches_per_request": {"type": "integer", "minimum": 1},
+        "hub_requests_billed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "HTTP requests billed by RapidAPI for this call, retries "
+                "included; see api_usage.hub_requests_billed."
+            ),
+        },
+        "stopped_early": {
+            "type": "string",
+            "description": (
+                "Present when something other than the cap ended the "
+                "fan-out. 'deadline': the call reached its time limit and "
+                "the remaining combinations were never sent or billed, so "
+                "the results are real but do not cover the whole range."
+            ),
+        },
         "departure_dates_searched": {"type": "array", "items": {"type": "string"}},
         "destinations_searched": {"type": "array", "items": {"type": "string"}},
         "note": {"type": "string"},
@@ -558,6 +604,15 @@ _STAY_COVERAGE: dict[str, Any] = {
             ),
         },
         "max_searches_per_request": {"type": "integer", "minimum": 1},
+        "stopped_early": {
+            "type": "string",
+            "description": (
+                "Present when something other than the cap ended the "
+                "fan-out. 'deadline': the call reached its time limit and "
+                "the remaining combinations were never sent or billed, so "
+                "the results are real but do not cover the whole range."
+            ),
+        },
         "stays_searched": {
             "type": "array",
             "description": "The exact date pairs priced.",
@@ -626,7 +681,7 @@ HOTELS_OUTPUT_SCHEMA: dict[str, Any] = {
                 "this server is spent for today, so nothing was searched and "
                 "nothing was billed; it renews at 00:00 UTC and connecting "
                 "your own RapidAPI key removes the cap. Retrying does not "
-                "help."
+                "help. " + "'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan."
             ),
         },
         "search_coverage": _STAY_COVERAGE,
