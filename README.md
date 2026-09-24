@@ -7,8 +7,10 @@ claude mcp add --transport http google-flights https://flights.flightpowers.com/
 ```
 
 In a client that supports MCP authorization, a **Sign in** button appears: you sign in with
-Google and paste your RapidAPI key once on the `/connect` page, and nothing goes in your client
-config. In a client that does not, bring the key yourself:
+Google, and **your first 10 searches each day are free and ad-free on our key, with nothing to
+paste**. Paste your own RapidAPI key once on the `/connect` page when you want that cap gone, and
+nothing goes in your client config either way. In a client that shows no Sign in button, bring
+the key yourself:
 
 ```bash
 claude mcp add --transport http google-flights https://flights.flightpowers.com/mcp --header "x-rapidapi-key: YOUR_RAPIDAPI_KEY"
@@ -23,14 +25,20 @@ Hosted. Nothing to clone, nothing to build. Listed in the official MCP Registry 
 `com.flightpowers/google-flights-mcp`. Health check:
 [`/health`](https://google-flights-mcp.flightpowers.com/health).
 
+**No key yet?** You do not need one to start. Add the URL above, sign in with Google, and the
+first 10 searches each UTC day run on our key, ad-free, with nothing to paste. The exact unit
+counted is in [Try it with no key](#try-it-with-no-key-sign-in-with-google).
+
 **Need a key?** Subscribe to the Google Flights Live API on RapidAPI, free tier available,
 and copy your `x-rapidapi-key`: **https://rapidapi.com/mtnrabi/api/google-flights-live-api**
 
-**No key yet? Start with the free server, same search, no signup:**
-`claude mcp add --transport http google-flights-free https://google-flights-lulu.flightpowers.com/mcp`
-(ad-supported: one disclosed sponsored card per result, fan-out capped at 15, and clients that
-cannot render the sponsored card may be capped further.) Come back here when the ads, the
-15-search cap, or those client restrictions get in your way.
+**Want more free searches than that, and do not mind ads?** There is a separate free,
+ad-supported server:
+`claude mcp add --transport http google-flights-free https://free-trial.flightpowers.com/mcp`
+(50 searches a day and 250 a month per signed-in account, one disclosed sponsored card per
+result, fan-out capped at 15, and clients that cannot render the sponsored card may be capped
+further.) Come back here when the ads, the 15-search cap, or those client restrictions get in
+your way.
 
 ---
 
@@ -57,12 +65,13 @@ result; search again and state when the data was fetched.**
 
 ## Try it with no key: sign in with Google
 
-Where a deployment has the allowance enabled (check `trial_enabled` and `trial_day_cap` on
-`/health` -- it is off by default and needs both `PAID_TRIAL_DAY_CAP` and
-`PAID_TRIAL_RAPIDAPI_KEY` set on purpose), a signed-in account gets **`trial_day_cap` free
-searches per UTC day** on our key, ad-free, with nothing to paste into your client. Sign in the
-way your client offers it, or at `https://google-flights-mcp.flightpowers.com/connect`, and ask
-for a fare.
+A signed-in account gets **10 free searches per UTC day** on our key, ad-free, with nothing to
+paste into your client. Sign in the way your client offers it, or at
+`https://flights.flightpowers.com/connect`, and ask for a fare. Ten is what the hosted
+deployment runs today; `/health` reports the live values as `trial_enabled` and `trial_day_cap`
+and is the number to trust. (The allowance is off by default in this code and needs both
+`PAID_TRIAL_DAY_CAP` and `PAID_TRIAL_RAPIDAPI_KEY` set on purpose, so a deployment you run
+yourself has none until you configure one.)
 
 A search is one date x destination combination, so one call with a three-day range spends three.
 The allowance is held for the whole plan before the first request goes out and whatever the
