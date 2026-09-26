@@ -126,6 +126,24 @@ class TestParameterDescriptions:
         assert "\n" not in properties["max_searches"]["description"]
         assert "sampled evenly" in properties["max_searches"]["description"]
 
+    @pytest.mark.parametrize(
+        "name", ["search_oneway_flights", "search_roundtrip_flights"]
+    )
+    def test_passengers_is_one_code_per_traveller(self, name):
+        """The backend reads `passengers` as one code per traveller (1 adult,
+        2 child, 3 infant on lap, 4 infant in seat) and, since flight_rabbi
+        #511, answers 422 to a 0 or to a party with no adult. Until 2026-09-26
+        this text said "counts as [adults, children, infants]", so a model
+        following it sent [1, 0, 0] for one adult; the client forwards the list
+        unchanged (src/rapidapi_client.py), so that became a billed 422."""
+        tool = next(t for t in tools_for("flights") if t["name"] == name)
+        text = tool["inputSchema"]["properties"]["passengers"]["description"]
+        for fragment in ("One entry per traveller", "not a count", "1 adult",
+                         "2 child", "3 infant on lap", "4 infant in seat",
+                         "[1, 1, 2]", "At least one adult", "Omit for one adult"):
+            assert fragment in text, (fragment, text)
+        assert "counts as" not in text
+
 
 class TestPublicPages:
     """Anthropic §3.A/§3.B and OpenAI's URL requirements: policy, terms and

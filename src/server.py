@@ -3024,7 +3024,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             currency: ISO currency code, default "usd".
             max_price: Only return flights at or below this price.
             seat_type: 1 economy, 2 premium economy, 3 business, 4 first.
-            passengers: Passenger counts as [adults, children, infants].
+            passengers: One entry per traveller, not a count: 1 adult,
+                2 child (aged 2-11), 3 infant on lap, 4 infant in seat,
+                e.g. [1, 1, 2] for two adults and a child. At least one
+                adult, each infant on lap needs its own adult, at most 9.
+                Omit for one adult.
             sort_by: "best", "price", or "duration". Applied across all results.
             limit: Maximum flights to return, after merging and sorting.
             max_searches: The billed requests this call may make, up or down.
@@ -3195,7 +3199,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             currency: ISO currency code, default "usd".
             max_price: Only return trips at or below this total price.
             seat_type: 1 economy, 2 premium economy, 3 business, 4 first.
-            passengers: Passenger counts as [adults, children, infants].
+            passengers: One entry per traveller, not a count: 1 adult,
+                2 child (aged 2-11), 3 infant on lap, 4 infant in seat,
+                e.g. [1, 1, 2] for two adults and a child. At least one
+                adult, each infant on lap needs its own adult, at most 9.
+                Omit for one adult.
             sort_by: "best", "price", or "duration". Applied across all results.
             limit: Maximum trips to return, after merging and sorting.
             max_searches: The billed requests this call may make, up or down.

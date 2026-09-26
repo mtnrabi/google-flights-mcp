@@ -224,7 +224,7 @@
               }
             ],
             "default": null,
-            "description": "Passenger counts as [adults, children, infants]."
+            "description": "One entry per traveller, not a count: 1 adult, 2 child (aged 2-11), 3 infant on lap, 4 infant in seat, e.g. [1, 1, 2] for two adults and a child. At least one adult, each infant on lap needs its own adult, at most 9. Omit for one adult."
           },
           "seat_type": {
             "anyOf": [
@@ -687,7 +687,7 @@
               }
             ],
             "default": null,
-            "description": "Passenger counts as [adults, children, infants]."
+            "description": "One entry per traveller, not a count: 1 adult, 2 child (aged 2-11), 3 infant on lap, 4 infant in seat, e.g. [1, 1, 2] for two adults and a child. At least one adult, each infant on lap needs its own adult, at most 9. Omit for one adult."
           },
           "return_airline_codes": {
             "anyOf": [

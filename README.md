@@ -500,7 +500,7 @@ search_oneway_flights(
     currency: str = "usd",
     max_price: int | None = None,
     seat_type: int | None = None,          # 1 economy, 2 premium economy, 3 business, 4 first
-    passengers: list[int] | None = None,   # [adults, children, infants]
+    passengers: list[int] | None = None,   # one code per traveller: 1 adult, 2 child, 3 infant on lap, 4 infant in seat
     sort_by: str = "best",                 # "best" | "price" | "duration"
     limit: int = 10,                       # results returned after merge + sort
     max_searches: int | None = None,       # cap the billed requests this call may make
