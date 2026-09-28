@@ -146,6 +146,11 @@ from .providers import (
 )
 from .prompts import register_prompts
 from .schema_docs import document_params
+from .passengers import (
+    is_upstream_reject,
+    normalise_passengers,
+    refusal_message,
+)
 from .compact import (
     bound_rows,
     compact_row,
@@ -2624,6 +2629,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 truncated=plan.truncated,
                 error=outcome.first_error,
             )
+            # A 422 on every combination is the backend refusing the input,
+            # not failing to serve it: say so, or the model retries the
+            # same request against "temporarily unavailable".
+            if is_upstream_reject(outcome.first_error):
+                raise ToolError(refusal_message(outcome.first_error))
             raise ToolError(
                 f"Flight search is temporarily unavailable ({outcome.first_error})"
             )
@@ -3028,7 +3038,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 2 child (aged 2-11), 3 infant on lap, 4 infant in seat,
                 e.g. [1, 1, 2] for two adults and a child. At least one
                 adult, each infant on lap needs its own adult, at most 9.
-                Omit for one adult.
+                Omit for one adult. A counts list [adults, children,
+                infants], e.g. [2, 1, 0], or a bare [2] for two adults, is
+                recognised and converted to codes before the search; a
+                list that is valid as codes is searched as codes.
             sort_by: "best", "price", or "duration". Applied across all results.
             limit: Maximum flights to return, after merging and sorting.
             max_searches: The billed requests this call may make, up or down.
@@ -3059,6 +3072,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "rejected here instead, and nothing is billed."
             )
 
+        # What the backend gets: a codes list as sent, a counts list expanded
+        # to codes, anything else unchanged so its 422 names the field.
+        pax_codes = normalise_passengers(passengers)
+
         def plan_builder(cap: int):
             return plan_oneway(
                 from_airport=from_airport,
@@ -3084,7 +3101,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 currency=currency,
                 max_price=max_price,
                 seat_type=seat_type,
-                passengers=passengers,
+                passengers=pax_codes,
                 limit=settings.default_result_limit,
                 use_fallback=use_fallback,
             )
@@ -3203,7 +3220,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 2 child (aged 2-11), 3 infant on lap, 4 infant in seat,
                 e.g. [1, 1, 2] for two adults and a child. At least one
                 adult, each infant on lap needs its own adult, at most 9.
-                Omit for one adult.
+                Omit for one adult. A counts list [adults, children,
+                infants], e.g. [2, 1, 0], or a bare [2] for two adults, is
+                recognised and converted to codes before the search; a
+                list that is valid as codes is searched as codes.
             sort_by: "best", "price", or "duration". Applied across all results.
             limit: Maximum trips to return, after merging and sorting.
             max_searches: The billed requests this call may make, up or down.
@@ -3234,6 +3254,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "rejected here instead, and nothing is billed."
             )
 
+        pax_codes = normalise_passengers(passengers)
+
         def plan_builder(cap: int):
             return plan_roundtrip(
                 from_airport=from_airport,
@@ -3259,7 +3281,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 currency=currency,
                 max_price=max_price,
                 seat_type=seat_type,
-                passengers=passengers,
+                passengers=pax_codes,
                 limit=settings.default_result_limit,
                 use_fallback=use_fallback,
             )
