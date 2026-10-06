@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from jsonschema import Draft202012Validator
 
 from src.hotels_client import (
     VALID_FILTERS,
@@ -22,6 +23,7 @@ from src.hotels_client import (
     build_search_payload,
     unknown_filters,
 )
+from src.output_schema import FLIGHTS_OUTPUT_SCHEMA, HOTELS_OUTPUT_SCHEMA
 from tests.test_server import build_with_upstream
 
 KEY = "2b3b32aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -249,6 +251,50 @@ class TestHotelTools:
             )
         assert out.structured_content["result_count"] == 1
         assert out.structured_content["results"][0]["name"] == "Kremlin Palace"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            ("search_hotels", {"destination": "Rome"}),
+            ("find_hotel_by_name", {"hotel_name": "c-hotels Fiume"}),
+        ],
+    )
+    async def test_coordinates_pass_through_and_null_survives(self, tool, args):
+        """hotel_agent #46 added latitude/longitude to every row. Nothing on
+        this server may drop them, and a null (Booking published none) must
+        arrive as null, not vanish."""
+        located = {**PROPERTY, "latitude": 41.91150739413484, "longitude": 12.500005960464478}
+        unlocated = {**PROPERTY, "name": "No Pin Inn", "latitude": None, "longitude": None}
+        body = {"properties": [located, unlocated]} if tool == "search_hotels" else located
+
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(200, json=body), fallback_rapidapi_key=KEY
+        )
+        async with Client(mcp) as client:
+            out = await client.call_tool(
+                tool,
+                {**args, "checkin_date": "2026-05-01", "checkout_date": "2026-05-03"},
+            )
+        rows = out.structured_content["results"]
+        assert rows[0]["latitude"] == 41.91150739413484
+        assert rows[0]["longitude"] == 12.500005960464478
+        if tool == "search_hotels":
+            assert "latitude" in rows[1] and rows[1]["latitude"] is None
+            assert "longitude" in rows[1] and rows[1]["longitude"] is None
+        Draft202012Validator(HOTELS_OUTPUT_SCHEMA).validate(out.structured_content)
+
+    def test_the_schema_declares_coordinates_on_hotel_rows_only(self):
+        items = HOTELS_OUTPUT_SCHEMA["properties"]["results"]["items"]
+        for field in ("latitude", "longitude"):
+            assert items["properties"][field] == {
+                "anyOf": [{"type": "number"}, {"type": "null"}]
+            }
+        assert "required" not in items
+        # The flights rows spread the shared base; the hotel fields must not
+        # leak into them.
+        flight_items = FLIGHTS_OUTPUT_SCHEMA["properties"]["results"]["items"]
+        assert "properties" not in flight_items
 
     @pytest.mark.asyncio
     async def test_bad_filter_is_rejected_before_spending_a_request(self):

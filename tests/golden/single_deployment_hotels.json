@@ -36,7 +36,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: search hotels"
       },
-      "description": "FlightPowers hotel search: live Booking.com availability and nightly prices for a destination and date range. Input: a free-text destination the way a person would say it (\"Rome\", \"Tokyo Shibuya\"), plus check-in and check-out dates. Returns each property's price, review score, room type, location and a booking link.\n\nSet price_as_seen_from to a two-letter country code to price the same stay the way a shopper resident in that country would see it, which no other travel tool here can do. Gaps are real but usually modest and property-dependent, and rates move between calls, so hold one named property fixed, call each country a few times, and never read one call per country as a gap.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and every check-in date is priced separately. The answer is stays -- one entry per stay with its cheapest property, per-night price and median -- plus cheapest_overall, and the full property list for the cheapest stay only. Each stay is one request billed to your plan; max_searches caps it, and a request that expands past the cap is sampled evenly across the range and says so in search_coverage.\n\nSet providers to price the same stay on more than one source in one call: [\"booking\"] (the default), [\"airbnb\"], or both. Booking rows rate out of 10 and Airbnb rows out of 5, so read rating_scale on every row before comparing two of them. A source you have no RapidAPI key for is not called and is named in providers_skipped with a subscribe link, never quietly dropped.\n\nRates go stale within minutes: never reuse an earlier result, search again.\n\nRequires the caller's own RapidAPI key for the Booking Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/booking-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
+      "description": "FlightPowers hotel search: live Booking.com availability and nightly prices for a destination and date range. Input: a free-text destination the way a person would say it (\"Rome\", \"Tokyo Shibuya\"), plus check-in and check-out dates. Returns each property's price, review score, room type, location, latitude/longitude and a booking link.\n\nSet price_as_seen_from to a two-letter country code to price the same stay the way a shopper resident in that country would see it, which no other travel tool here can do. Gaps are real but usually modest and property-dependent, and rates move between calls, so hold one named property fixed, call each country a few times, and never read one call per country as a gap.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and every check-in date is priced separately. The answer is stays -- one entry per stay with its cheapest property, per-night price and median -- plus cheapest_overall, and the full property list for the cheapest stay only. Each stay is one request billed to your plan; max_searches caps it, and a request that expands past the cap is sampled evenly across the range and says so in search_coverage.\n\nSet providers to price the same stay on more than one source in one call: [\"booking\"] (the default), [\"airbnb\"], or both. Booking rows rate out of 10 and Airbnb rows out of 5, so read rating_scale on every row before comparing two of them. A source you have no RapidAPI key for is not called and is named in providers_skipped with a subscribe link, never quietly dropped.\n\nRates go stale within minutes: never reuse an earlier result, search again.\n\nRequires the caller's own RapidAPI key for the Booking Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/booking-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -512,9 +512,31 @@
             "type": "integer"
           },
           "results": {
-            "description": "The itineraries or properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.",
+            "description": "The properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'. Each row is the source's own object, passed through. latitude and longitude are the property's WGS84 coordinates in decimal degrees, from the source that answered (Booking.com on Booking rows, Airbnb on Airbnb rows), null when the source publishes none.",
             "items": {
               "additionalProperties": true,
+              "properties": {
+                "latitude": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "longitude": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
               "type": "object"
             },
             "type": "array"
@@ -750,7 +772,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: find one hotel by name"
       },
-      "description": "FlightPowers single-property lookup: live Booking.com availability and pricing for one named property. Input: the hotel name a person would type (adding the city helps when a chain has many properties) plus check-in and check-out dates -- no internal property ID needed, the resolution is done for you. Returns the property's price, review score, room type and a booking link. Use it to check one specific hotel, or to track a single property's price over time.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and this property is priced for every check-in date -- a rate calendar for one hotel. The answer is stays, one entry per date with that date's price and per-night rate, plus cheapest_overall. Each stay is one request billed to your plan; max_searches caps it, and a range that expands past the cap is sampled evenly across the calendar and says so in search_coverage.\n\nprice_as_seen_from prices the stay as a shopper resident in that country would see it. Gaps are real but usually modest and property-dependent, and rates move between calls, so call each country a few times on this same property before reporting a gap.\n\nRates go stale within minutes: never reuse an earlier result.\n\nRequires the caller's own RapidAPI key for the Booking Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/booking-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
+      "description": "FlightPowers single-property lookup: live Booking.com availability and pricing for one named property. Input: the hotel name a person would type (adding the city helps when a chain has many properties) plus check-in and check-out dates -- no internal property ID needed, the resolution is done for you. Returns the property's price, review score, room type, latitude/longitude and a booking link. Use it to check one specific hotel, or to track a single property's price over time.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and this property is priced for every check-in date -- a rate calendar for one hotel. The answer is stays, one entry per date with that date's price and per-night rate, plus cheapest_overall. Each stay is one request billed to your plan; max_searches caps it, and a range that expands past the cap is sampled evenly across the calendar and says so in search_coverage.\n\nprice_as_seen_from prices the stay as a shopper resident in that country would see it. Gaps are real but usually modest and property-dependent, and rates move between calls, so call each country a few times on this same property before reporting a gap.\n\nRates go stale within minutes: never reuse an earlier result.\n\nRequires the caller's own RapidAPI key for the Booking Live API. Get one (free tier available) at https://rapidapi.com/mtnrabi/api/booking-live-api, then pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Usage counts against the caller's own RapidAPI plan, not ours; every response reports what it spent and what is left in `api_usage`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1184,9 +1206,31 @@
             "type": "integer"
           },
           "results": {
-            "description": "The itineraries or properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.",
+            "description": "The properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'. Each row is the source's own object, passed through. latitude and longitude are the property's WGS84 coordinates in decimal degrees, from the source that answered (Booking.com on Booking rows, Airbnb on Airbnb rows), null when the source publishes none.",
             "items": {
               "additionalProperties": true,
+              "properties": {
+                "latitude": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "longitude": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
               "type": "object"
             },
             "type": "array"

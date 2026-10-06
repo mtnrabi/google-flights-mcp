@@ -109,9 +109,9 @@ _RESULT_ROWS: dict[str, Any] = {
     "items": {"type": "object", "additionalProperties": True},
 }
 
-#: The flights version. Kept separate from `_RESULT_ROWS` because the hotels
-#: tools share that object and a compaction note in their schema would
-#: describe something their rows do not do.
+#: The flights version. Kept separate from the hotels rows because a
+#: compaction note in their schema would describe something their rows do not
+#: do.
 _FLIGHT_RESULT_ROWS: dict[str, Any] = {
     **_RESULT_ROWS,
     "description": (
@@ -130,6 +130,30 @@ _FLIGHT_RESULT_ROWS: dict[str, Any] = {
         "in seconds are dropped; `verbose: true` returns them, and every row "
         "that was selected, on that call."
     ),
+}
+
+#: The hotels version. Rows are the upstream's own objects, passed through;
+#: only the two coordinate fields are declared, so a client reading the schema
+#: knows they exist. Not required: an older upstream row without them is
+#: still a valid row.
+_HOTEL_RESULT_ROWS: dict[str, Any] = {
+    **_RESULT_ROWS,
+    "description": (
+        "The properties found, already sorted and deduplicated. An empty "
+        "array is only meaningful when search_status is 'empty'. Each row is "
+        "the source's own object, passed through. latitude and longitude are "
+        "the property's WGS84 coordinates in decimal degrees, from the "
+        "source that answered (Booking.com on Booking rows, Airbnb on Airbnb "
+        "rows), null when the source publishes none."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "latitude": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+            "longitude": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+        },
+        "additionalProperties": True,
+    },
 }
 
 # Every response that reached the upstream carries this, because the money is
@@ -723,7 +747,7 @@ HOTELS_OUTPUT_SCHEMA: dict[str, Any] = {
         "of the answer lives."
     ),
     "properties": {
-        "results": _RESULT_ROWS,
+        "results": _HOTEL_RESULT_ROWS,
         "result_count": {"type": "integer", "minimum": 0},
         "stays": _STAYS,
         "results_for_stay": {
