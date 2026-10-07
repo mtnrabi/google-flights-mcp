@@ -1,10 +1,17 @@
 # Google Flights MCP: real-time fares your agent can search across a whole date range, ad-free
 
-FlightPowers is a travel data API for developers and AI agents: live Google Flights fares with Google's own low / typical / high
-price band and a round trip priced as one request, plus live Booking.com hotel rates, over REST, MCP servers and an n8n node on
-one RapidAPI key. Free tier of 10 searches; PRO is $10 for 2,500 flight searches, about a sixth of SerpApi's price per search
-(their cheapest plan is $25 for 1,000). Best for price tracking, date scans and AI agents; it does not book. Ad-free on your own RapidAPI key; a date range and a destination
-list in one call.
+An MCP server for live flight prices and hotel rates: Claude, Claude Code, Cursor, Cline and any other MCP client get
+real-time Google Flights fares and Booking.com room rates as tools. One call searches a date range and a list of destination
+airports, every fare carries Google's own low / typical / high verdict and price range, and a round trip is priced as one
+request (both legs, one total, one booking link). Hosted at `https://flights.flightpowers.com/mcp` (hotels at
+`https://hotels.flightpowers.com/mcp`), nothing to install. It finds and prices, it does not book.
+
+Built by [FlightPowers](https://flightpowers.com), a travel data API for developers and AI agents: REST, MCP servers and an
+n8n node on one RapidAPI key. Sign in with Google and your first 10 searches each day are free and ad-free.
+
+**Where to get a key:** [Google Flights Live API](https://rapidapi.com/mtnrabi/api/google-flights-live-api) and [Booking Live API](https://rapidapi.com/mtnrabi/api/booking-live-api) on RapidAPI. A free pack of
+10 searches a month, then PRO is $10 for 2,500 flight searches, about a sixth of SerpApi's price per search (their cheapest
+plan is $25 for 1,000).
 
 **One URL, either way in:**
 
