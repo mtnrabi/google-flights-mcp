@@ -3184,6 +3184,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         passengers: list[int] | None = None,
         sort_by: str = "best",
         limit: int = 10,
+        returns_per_outbound: int | None = None,
         max_searches: int | None = None,
         # Tri-state, matching the backend's own field. None is the default and
         # is dropped from the payload by `_compact`, which is what lets the
@@ -3226,6 +3227,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 list that is valid as codes is searched as codes.
             sort_by: "best", "price", or "duration". Applied across all results.
             limit: Maximum trips to return, after merging and sorting.
+            returns_per_outbound: How many return flights to pair with each
+                outbound flight, 1 to 5 (default 2). Each date/destination
+                combination searched still returns at most 10 trips; at 5 they
+                are picked from up to 50 pairings instead of 20. It adds no
+                requests. Not applied when results come from the fallback
+                source.
             max_searches: The billed requests this call may make, up or down.
                 Leave it out for the normal behaviour: the cap covers the
                 request when the request is reasonable (a whole month at three
@@ -3242,6 +3249,16 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         """
         if sort_by not in SORT_CHOICES:
             raise ToolError(f"sort_by must be one of {', '.join(SORT_CHOICES)}")
+
+        # Same bounds as the backend's RoundtripAPI field (1-5). Refused here
+        # so an out-of-range value never reaches a search; left out, the key
+        # is dropped from the body and the backend default (2) applies.
+        if returns_per_outbound is not None and not 1 <= returns_per_outbound <= 5:
+            raise ToolError(
+                "returns_per_outbound must be a whole number from 1 to 5 "
+                f"(got {returns_per_outbound}); leave it out for the default "
+                "of 2. Nothing was searched."
+            )
 
         bad_codes = invalid_airports(from_airport, to_airport)
         if bad_codes:
@@ -3283,6 +3300,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 seat_type=seat_type,
                 passengers=pax_codes,
                 limit=settings.default_result_limit,
+                returns_per_outbound=returns_per_outbound,
                 use_fallback=use_fallback,
             )
 

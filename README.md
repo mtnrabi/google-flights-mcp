@@ -542,6 +542,7 @@ search_roundtrip_flights(
     passengers: list[int] | None = None,
     sort_by: str = "best",
     limit: int = 10,
+    returns_per_outbound: int | None = None,  # 1-5 returns paired with each outbound; unset = 2
     max_searches: int | None = None,
     use_fallback: bool | None = None,
 )

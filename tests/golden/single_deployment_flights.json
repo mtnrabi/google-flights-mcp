@@ -716,6 +716,18 @@
             "default": null,
             "description": "Fixed return date. Use this OR nights, not both."
           },
+          "returns_per_outbound": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "How many return flights to pair with each outbound flight, 1 to 5 (default 2). Each date/destination combination searched still returns at most 10 trips; at 5 they are picked from up to 50 pairings instead of 20. It adds no requests. Not applied when results come from the fallback source."
+          },
           "seat_type": {
             "anyOf": [
               {

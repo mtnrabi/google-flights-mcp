@@ -181,6 +181,7 @@ def build_roundtrip_payload(
     seat_type: int | None = None,
     passengers: list[int] | None = None,
     limit: int | None = None,
+    returns_per_outbound: int | None = None,
     use_fallback: bool | None = None,
     use_ext_proxy: bool | None = None,
 ) -> dict[str, Any]:
@@ -210,6 +211,7 @@ def build_roundtrip_payload(
             "seat_type": seat_type,
             "passengers": passengers,
             "limit": limit,
+            "returns_per_outbound": returns_per_outbound,
             "use_fallback": use_fallback,
             "use_ext_proxy": use_ext_proxy,
         }
