@@ -62,14 +62,14 @@ MAX_NAMED_COMBINATIONS = 8
 
 #: Fixed prose, no interpolation. See rule 1 above.
 DEGRADED_FIRST_LINE = (
-    "WARNING: this search did not complete. Do not treat the result below as "
-    "a complete result and do not tell the user whether flights exist on this "
+    "WARNING: this search did not complete. The result below is not a "
+    "complete result and says nothing about whether flights exist on this "
     "route -- the JSON that follows records a failed search, not an answer."
 )
 
 _PARTIAL_TAIL = (
-    "Treat the results below as a floor on what is available, not the full "
-    "picture, and say so if you report them."
+    "The results below are a floor on what is available, not the full "
+    "picture."
 )
 
 

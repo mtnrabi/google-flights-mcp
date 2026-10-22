@@ -116,6 +116,12 @@ from .legal import (
     render_document,
     support_html,
 )
+from .hotel_compact import (
+    HOTEL_DEFAULT_LIMIT,
+    IMAGE_FIELDS,
+    compact_hotel_row,
+    select_rows,
+)
 from .hotels_client import (
     VALID_FILTERS,
     HotelsClient,
@@ -324,31 +330,32 @@ BILLING_UNIT_NOTES = {
 # nothing else here can do.
 
 _FLIGHTS_BODY = (
-    "Reach for `search_oneway_flights` and `search_roundtrip_flights` for "
-    "live fares, not schedules. Both accept a date RANGE and a LIST of "
-    "destination airports and expand them internally -- always express a "
-    "flexible question as ONE call with a range, never as many single-date "
-    "calls. Round trips take a `nights` value instead of a fixed return "
+    "`search_oneway_flights` and `search_roundtrip_flights` return live "
+    "fares, not schedules. Both accept a date RANGE and a LIST of "
+    "destination airports and expand them internally, so one call covers "
+    "a whole range of dates and destinations. Round trips take a `nights` value instead of a fixed return "
     "date.\n\n"
     "Every result carries Google's own historical range for that route and "
     "period (`price_insights_low`, `price_insights_high`, and a "
     "`price_range_in_relation_to_other_periods` verdict of low / typical / "
-    "high), so judge a fare against that band rather than quoting a bare "
-    "number, and a `buy_link` to book it. `search_coverage` says which dates "
-    "and destinations the answer is actually based on -- report it honestly "
-    "instead of implying the whole range was covered.\n\n"
+    "high) that places a fare against its usual range, and a `buy_link` "
+    "to book it. `search_coverage` lists the dates and destinations the answer is "
+    "actually based on, which on a sampled search is less than the whole "
+    "range asked for.\n\n"
     "A wide search answers with the TOP `results_returned` of "
-    "`results_total` fares found -- by the `sort_by` you asked for, "
+    "`results_total` fares found -- by the requested `sort_by`, "
     "cheapest first by default, and never all of one destination at the "
     "expense of another -- each row carrying the dates, the "
     "destination, trip length in nights, airline, stops, duration, price and "
-    "the booking link. Say which of the two numbers you are summarising. "
-    "`by_destination` names every requested destination's own cheapest fare "
-    "whether or not it fits in `results`, so use it for 'which destination "
-    "is cheapest' rather than scanning the rows. `verbose: true` returns "
-    "every selected row and every upstream field, which on a month-wide "
-    "search is a megabyte of JSON some hosts will not accept -- ask for it "
-    "only when a dropped field is what the question needs.\n\n"
+    "the booking link. The two numbers differ only when the server raised "
+    "`limit` itself to cover the fan-out, and `search_coverage.note` then "
+    "says so. `by_destination` names every requested destination's own "
+    "cheapest fare whether or not it fits in `results`, so it answers "
+    "'which destination is cheapest' without scanning the rows. "
+    "`verbose: true` returns every selected row and every upstream field, "
+    "which on a month-wide search is a megabyte of JSON some hosts will "
+    "not accept; it is needed only for a field the compact rows drop or "
+    "for rows past `results_returned`.\n\n"
     "Fan-out is capped at {cap} date/destination combinations per call, "
     "and{own_key} the cap RISES BY ITSELF, up to {auto_max}, when the question is bigger "
     "than that -- a whole month of departures at three trip lengths is 93 "
@@ -361,49 +368,50 @@ _FLIGHTS_BODY = (
     "Every combination is one search: a whole month at one destination and "
     "three trip lengths is 93 searches, the same month over two destinations "
     "is 186, and a whole month x 3 nights x 3 destinations is about 279 and "
-    "takes a couple of minutes. Worth one sentence to the user before "
-    "running one, unless they asked for the month themselves. With the "
-    "caller's own key each search is one request on their RapidAPI plan, and "
+    "takes a couple of minutes. With the caller's own key each search is "
+    "one request on their RapidAPI plan, and "
     "`api_usage.hub_requests_billed` is what that plan was actually charged "
-    "-- higher than the combination count when a failed search was retried "
-    "-- and is the number to quote."
+    "-- higher than the combination count when a failed search was "
+    "retried."
 )
 
 _HOTELS_BODY = (
-    "Reach for `search_hotels` and `find_hotel_by_name` whenever a question "
-    "needs a CURRENT room rate rather than a description of a property: what "
-    "a stay costs, what is available on given dates, how properties compare "
-    "right now, or how a price moves over time.\n\n"
+    "`search_hotels` and `find_hotel_by_name` return a CURRENT room rate "
+    "rather than a description of a property: what a stay costs, what is "
+    "available on given dates, how properties compare right now, or how a "
+    "price moves over time.\n\n"
     "`search_hotels` takes a free-text destination the way a person says it "
     "(\"Rome\", \"Tokyo Shibuya\") plus check-in and check-out dates, and "
     "returns the bookable properties with price, review score and count, "
-    "room type, location and a booking link. Narrow it with "
-    "`budget_per_night` and `filters` -- 24 Booking.com filters such as "
+    "room type, location and a booking link. `budget_per_night` and "
+    "`filters` narrow the list -- 24 Booking.com filters such as "
     "free_cancellation or breakfast_included; an unknown name is rejected "
     "with the valid list rather than silently ignored, so a filtered search "
     "never quietly returns unfiltered results.\n\n"
     "{compare}"
-    "`find_hotel_by_name` prices ONE named property. Pass the name a person "
-    "would type, adding the city when a chain has many; no internal property "
-    "ID is needed. Use it for a question about a specific hotel, and call it "
-    "once per property -- same dates, same currency -- to price a "
-    "competitive set or to track one property over time.\n\n"
+    "`find_hotel_by_name` prices ONE named property. It takes the name a "
+    "person would type; adding the city picks one property out of a chain, "
+    "and no internal property ID is needed. It answers a question about a specific "
+    "hotel, and one call per property -- same dates, same currency -- prices "
+    "a competitive set or tracks one property over time.\n\n"
     "`price_as_seen_from` takes a two-letter country code, and the stay is "
     "priced "
     "through a residential connection in that country, so the answer is what "
     "a shopper resident there would actually be quoted. Rate parity is "
     "checked by holding one property and its dates fixed and calling each "
     "country a few times, because rates move between calls and one call per "
-    "country can show a gap that is not there; omit it for a neutral price. "
+    "country can show a gap that is not there; without "
+    "`price_as_seen_from` the price is neutral. "
     "Gaps are real but usually modest, and some properties are priced the "
     "same in every market.\n\n"
     "`search_hotels` and `find_hotel_by_name` also take a check-in RANGE "
     "(`checkin_date_from`, `checkin_date_to`) and a `nights` value (a number, "
     "or a list like [2, 3, 7]) instead of a fixed check-out date, and price "
-    "every stay that expands to in ONE call. Reach for it whenever the dates "
-    "are open -- \"cheapest week in May\", \"is the 12th cheaper than the "
-    "19th\" -- rather than picking one date and calling its price the "
-    "cheapest. The answer is `stays`, one entry per stay with its cheapest "
+    "every stay that expands to in ONE call. A range covers open dates -- "
+    "\"cheapest week in May\", \"is the 12th cheaper than the 19th\" -- "
+    "because one date's price alone does not show which date is cheapest. "
+    "The answer "
+    "is `stays`, one entry per stay with its cheapest "
     "property, its per-night price and its median, plus `cheapest_overall`; "
     "`results` holds the full property list for the cheapest stay only. "
     "`search_coverage` names the exact stays priced, a stay the cap sampled "
@@ -420,9 +428,9 @@ _HOTELS_BODY = (
 _HOTELS_COMPARE_PARAGRAPH = (
     "`compare_hotel_rates` prices the SAME stay on more than one source and "
     "returns one row per source: cheapest total, median total, how many "
-    "places were priced, the currency and when the rows were read. Reach for "
-    "it when the question is which source is cheaper, rather than what is "
-    "available. Before saying one source wins, read the row: `rating_scale` "
+    "places were priced, the currency and when the rows were read. It "
+    "answers which source is cheaper, rather than what is available. Each "
+    "row carries what decides that comparison: `rating_scale` "
     "is 10 on Booking.com and 5 on Airbnb, `taxes_included` is null on a "
     "source whose tax treatment we have not established, and a source with "
     "`search_status` \"degraded\" has a null count -- it did not answer, "
@@ -456,14 +464,13 @@ def _hotels_body(settings: Settings, allowance: str = "") -> str:
 _PROVENANCE = (
     "Provenance: prices from these tools come from a FlightPowers live "
     "fetch at request time, not from a cache or a stored table. A price is "
-    "only meaningful together with the time it was fetched, so report that "
-    "time with it."
+    "only meaningful together with the time it was fetched."
 )
 
 _STALENESS = (
-    "Results are live prices and go stale within minutes. When the user asks "
-    "for a current price, search again rather than reusing an earlier result "
-    "or a cached number, and always say when the data was fetched."
+    "Results are live prices and go stale within minutes: a current price "
+    "comes from a new search, not from an earlier result or a cached "
+    "number, and each price belongs with the time it was fetched."
 )
 
 _SPEND = (
@@ -483,9 +490,9 @@ _SPEND_WITH_ALLOWANCE = (
     "the free sign-in allowance each combination is one of the day's free "
     "searches, nothing is billed to the user, and `api_usage` carries the "
     "free-search counter instead of plan figures; a search larger than what "
-    "is left today is refused before anything runs, so narrow a wide "
-    "question (fewer dates, nights or destinations) and tell the user that a "
-    "wider grid needs their own key."
+    "is left today is refused before anything runs; a narrower question "
+    "(fewer dates, nights or destinations) fits, and a wider grid needs "
+    "the caller's own key."
 )
 
 
@@ -513,15 +520,16 @@ def build_instructions(
         flights_allowance = (
             " On the free sign-in allowance it does not rise: a question "
             "larger than what is left of the day's free searches is "
-            "refused before anything runs, so narrow it, or set "
-            "`max_searches` to sample it."
+            "refused before anything runs; a narrower question fits, and "
+            "so does `max_searches` set to sample it."
         )
         hotels_allowance = (
             " With the caller's own key the cap rises by itself to cover a "
             "month-sized range. On the free sign-in allowance it does not: a "
             "range larger than what is left of the day's free searches "
-            "is refused before anything runs, so narrow it (fewer check-in "
-            "dates or stay lengths), or set `max_searches` to sample it."
+            "is refused before anything runs; a narrower range (fewer "
+            "check-in dates or stay lengths) fits, and so does "
+            "`max_searches` set to sample it."
         )
     else:
         own_key = flights_allowance = hotels_allowance = ""
@@ -672,10 +680,10 @@ def _degraded_message(incomplete: int, reported: int, reason: str | None) -> str
         "The flight search did not complete, so this empty result is NOT a "
         "statement about flight availability. "
         f"{incomplete} of {reported} upstream searches failed to return a "
-        f"readable result{because}. There may well be flights on this route -- "
-        "do not tell the user that none exist, and do not suggest changing the "
-        "date or airport on the strength of this response. Running the same "
-        "search again usually succeeds."
+        f"readable result{because}. There may well be flights on this route: "
+        "this response is not evidence that none exist, or that another date "
+        "or airport would do better. Running the same search again usually "
+        "succeeds."
     )
 
 
@@ -1119,8 +1127,8 @@ def _effective_limit(limit: int, combinations: int) -> tuple[int, str | None]:
         f"`limit` was {limit}, fewer than the {combinations} date/destination "
         f"combinations this search covers, so it was raised to {raised} before "
         "the search ran. Below that, whole combinations -- searches that ran "
-        "and found flights -- would have had no row in `results`. Pass a "
-        "larger `limit` to see more than one fare per combination."
+        "and found flights -- would have had no row in `results`. A larger "
+        "`limit` returns more than one fare per combination."
     )
     return raised, note
 
@@ -1364,7 +1372,7 @@ def _compact_flights(
             f"{_sort_phrase(sort_by)} are in `results` (results_total says "
             "how many there were), with every destination still represented. "
             "Every destination's own cheapest fare is in `by_destination` "
-            "whether or not it fit. Pass `verbose: true` for the full list "
+            "whether or not it fit. `verbose: true` returns the full list "
             "and the full row shape.",
         )
     response.update(hoisted(rows))
@@ -1413,15 +1421,7 @@ def hotel_rows(body: Any) -> list[dict[str, Any]]:
 #: booking link, which is the actionable half, and drop the image URL, which
 #: no model can open. Full rows, image URLs included, are still returned for
 #: the one stay that won.
-_SUMMARY_DROPPED_FIELDS = (
-    "image_url",
-    "image",
-    "images",
-    "photo",
-    "photos",
-    "thumbnail",
-    "thumbnail_url",
-)
+_SUMMARY_DROPPED_FIELDS = IMAGE_FIELDS
 
 
 def _property_summary(row: dict[str, Any]) -> dict[str, Any]:
@@ -1658,6 +1658,54 @@ def build_stay_response(
     return response
 
 
+def _compact_hotels(
+    response: dict[str, Any],
+    *,
+    limit: int | None,
+    verbose: bool,
+    enabled: bool,
+    bound: bool = True,
+) -> None:
+    """Bound and slim the property rows of a built hotels response, in place.
+
+    Default: the first HOTEL_DEFAULT_LIMIT rows in the source's order with the
+    cheapest always kept, each in the compact shape (src/hotel_compact.py),
+    plus `results_total`; a note says so when rows were left out. The per-stay
+    summaries of a range get the same row shape. An explicit `limit` sets the
+    row count. `verbose: true` with no `limit` -- and `enabled=False`, which is
+    `RESULT_ROWS_MAX=0` -- leave the response exactly as it was before this
+    existed; `verbose: true` WITH a `limit` bounds the rows and leaves each one
+    untouched. `bound=False` (find_hotel_by_name, which has no `limit` and
+    answers with one property) slims the rows and never drops one.
+    """
+    rows = response.get("results")
+    if not enabled or not isinstance(rows, list) or (verbose and limit is None):
+        return
+    if bound:
+        kept = select_rows(rows, HOTEL_DEFAULT_LIMIT if limit is None else limit)
+    else:
+        kept = list(rows)
+    if not verbose:
+        kept = [compact_hotel_row(r) if isinstance(r, dict) else r for r in kept]
+        for stay in response.get("stays") or []:
+            if isinstance(stay, dict) and isinstance(stay.get("cheapest"), dict):
+                stay["cheapest"] = compact_hotel_row(stay["cheapest"])
+        overall = response.get("cheapest_overall")
+        if isinstance(overall, dict) and isinstance(overall.get("property"), dict):
+            overall["property"] = compact_hotel_row(overall["property"])
+    response["results"] = kept
+    response["result_count"] = len(kept)
+    response["results_total"] = len(rows)
+    if len(kept) < len(rows):
+        response["results_note"] = (
+            f"{len(rows)} properties were found"
+            + (" for this stay" if response.get("results_for_stay") else "")
+            + f"; `results` holds {len(kept)}: the first in the order "
+            "Booking.com returned them, with the cheapest always included. "
+            f"A `limit` up to {len(rows)} returns more."
+        )
+
+
 def _nights_between(checkin_date: str, checkout_date: str) -> int | None:
     """Nights between two ISO dates, or None when they are not readable.
 
@@ -1740,21 +1788,30 @@ def _usage_block(
 # both wrong values cost something real. `false` opts the caller out of the
 # backend's last-resort retry; `true` runs the fallback client inline on every
 # attempt, which is the path that hangs until the gateway cuts it off.
+#: `search_hotels` `limit`. In a Field, not the docstring, because the
+#: parameter also carries `ge=1` and document_params leaves Annotated alone.
+HOTEL_LIMIT_DESCRIPTION = (
+    "How many properties to return (default 10; a stay has about 25). They "
+    "come in the order Booking.com returned them, and the cheapest is always "
+    "included. results_total says how many there were."
+)
+
 VERBOSE_DESCRIPTION = (
-    "Return every field the upstream sends on each fare, and every fare that "
+    "Returns every field the upstream sends on each fare, and every fare that "
     "was selected, with no row bound. Off by default: a result carries the "
-    "best rows by your sort_by in a compact shape (dates, destination, "
+    "best rows by the requested sort_by in a compact shape (dates, destination, "
     "airline, stops, "
     "duration, price, trip length and the booking link), because a wide "
     "search over a month and several destinations otherwise produces a "
     "megabyte of JSON that some hosts refuse to put in the conversation at "
-    "all. Turn it on when you need the arrival times, the per-leg stop "
-    "counts, the raw stop details or more rows than results_returned; "
-    "results_total always says how many there were."
+    "all. When true, it adds the arrival times, the per-leg stop counts, the raw "
+    "stop details and every row past results_returned; results_total "
+    "always says how many there were."
 )
 
 USE_FALLBACK_DESCRIPTION = (
-    "Leave unset. Switches the search to a second, independent flight data "
+    "Default: unset. Switches the search to a second, independent flight "
+    "data "
     "source instead of the usual Google Flights page read. Unset already "
     "escalates to that source once, automatically, after a search's retries "
     "have failed. true forces it inline on every attempt -- much slower, and it "
@@ -1830,13 +1887,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # The month advice in the flights descriptions is true with a key. On the
     # free allowance a grid larger than what is left today is refused before
     # it runs (review #2, 2026-10-22; one-way added in review r2 #1), so the
-    # model is told to narrow it there instead.
+    # text says a larger grid is refused there instead.
     _MONTH_ALLOWANCE_LINE = (
         " That holds with the caller's own key. On the free sign-in "
         f"allowance ({settings.trial_day_cap} searches a day, one per "
         "combination) a grid larger than what is left today is refused "
-        "before anything runs: narrow it to fit and tell the user that the "
-        "whole month needs their own key."
+        "before anything runs; a grid within what is left runs, and a "
+        "whole-month scan needs the caller's own key."
         if trial_on
         else ""
     )
@@ -1845,9 +1902,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         " With the caller's own key the cap rises by itself to cover a "
         "month-sized range. On the free sign-in allowance "
         f"({settings.trial_day_cap} searches a day, one per stay) a range "
-        "larger than what is left today is refused before anything runs: "
-        "narrow it to fit and tell the user that a wider range needs their "
-        "own key."
+        "larger than what is left today is refused before anything runs; a "
+        "range within what is left runs, and a wider range needs the "
+        "caller's own key."
         if trial_on
         else ""
     )
@@ -3058,21 +3115,23 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- plus either "
             "one departure date or a date range. Returns each flight's price, "
             "airline, duration, stops, a bookable buy_link, and Google's "
-            "historical price range (price_insights_low / price_insights_high) "
-            "so you can say whether a fare is actually a good deal.\n\n"
-            "Use it for any one-way fare question, including open-ended ones. "
-            "For a flexible search make ONE call with a date range and/or "
-            "several destinations -- do NOT call it once per date. 'Cheapest "
-            "flight to Sri Lanka anywhere in October' is one call, not thirty."
+            "historical price range (price_insights_low / price_insights_high), "
+            "the band that shows whether a fare is actually a good deal.\n\n"
+            "Suited to any one-way fare question, including open-ended ones. "
+            "One call accepts a date range and several destinations and "
+            "searches every combination: 'Cheapest flight to Sri Lanka "
+            "anywhere in October' is one call, not thirty."
             + _MONTH_ALLOWANCE_LINE
             + "\n\n"
             "Each date/destination combination is one search; the count "
             "comes back in `api_usage`.\n\n"
-            "`by_destination` carries one entry per destination you asked for "
-            "-- empty ones included, each with a `reason` -- so read it before "
-            "telling a user a destination has no flights.\n\n"
-            "Fares go stale within minutes: when the user asks for a current "
-            "price, search again rather than reusing an earlier result."
+            "`by_destination` carries one entry per requested destination "
+            "-- empty ones included, each with a `reason` that separates a "
+            "destination with no flights from one that was not searched, "
+            "whose search failed, or whose fares did not fit in "
+            "`limit`.\n\n"
+            "Fares go stale within minutes: a current price comes from a new "
+            "search, not from an earlier result."
         ),
     )
     @document_params
@@ -3118,20 +3177,20 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             departure_date_from: First date of a departure range.
             departure_date_to: Last date of a departure range.
             max_stops: Maximum stops per flight. 0 means non-stop only.
-            airline_codes: Restrict to these airline codes, e.g. ["LY"].
-            exclude_airline_codes: Exclude these airline codes.
+            airline_codes: Restricts the search to these airline codes, e.g. ["LY"].
+            exclude_airline_codes: Airline codes left out of the results.
             departure_time_min: Earliest departure hour, 0-23.
             departure_time_max: Latest departure hour, 0-23.
             arrival_time_min: Earliest arrival hour, 0-23.
             arrival_time_max: Latest arrival hour, 0-23.
             currency: ISO currency code, default "usd".
-            max_price: Only return flights at or below this price.
+            max_price: Only flights at or below this price are returned.
             seat_type: 1 economy, 2 premium economy, 3 business, 4 first.
             passengers: One entry per traveller, not a count: 1 adult,
                 2 child (aged 2-11), 3 infant on lap, 4 infant in seat,
                 e.g. [1, 1, 2] for two adults and a child. At least one
                 adult, each infant on lap needs its own adult, at most 9.
-                Omit for one adult. A counts list [adults, children,
+                Left out, it means one adult. A counts list [adults, children,
                 infants], e.g. [2, 1, 0], or a bare [2] for two adults, is
                 recognised and converted to codes before the search; a
                 list that is valid as codes is searched as codes.
@@ -3140,15 +3199,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 across all results.
             limit: Maximum flights to return, after merging and sorting.
             max_searches: The searches this call may make, up or down.
-                Leave it out for the normal behaviour: with the caller's own
+                Unset is the normal behaviour: with the caller's own
                 key the cap covers the request when the request is reasonable
                 (a whole month at three trip lengths is 93 combinations and a
                 whole month x 3 nights
                 x 3 destinations is 279; both run in full) and anything
                 past it is sampled evenly across the range rather than cut
-                short. Set it lower to spend fewer searches on a wide
-                search, or higher -- to a hard maximum
-                of 300 -- for a grid wider than that.
+                short. A lower value spends fewer searches on a wide
+                search; a higher one -- to a hard maximum of 300 -- covers
+                a grid wider than that.
             verbose: Full upstream row fields and no row bound. See
                 VERBOSE_DESCRIPTION.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
@@ -3234,33 +3293,32 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "date or range, and either a return date or a trip length in "
             "nights. Returns the total price for both legs, per-leg airline, "
             "stops and duration, and a single bookable buy_link for the trip.\n\n"
-            "Use it for any return-trip fare question. For a flexible search "
-            "make ONE call: pass departure_date_from / departure_date_to for "
-            "the outbound range and `nights` instead of return_date to compare "
-            "trip lengths -- '5 to 7 nights in Rome sometime in May' is one "
+            "Suited to any return-trip fare question. A flexible search is ONE "
+            "call: departure_date_from / departure_date_to set the outbound "
+            "range and `nights`, in place of return_date, compares trip "
+            "lengths -- '5 to 7 nights in Rome sometime in May' is one "
             "call.\n\n"
             "A WHOLE MONTH is one call too. departure_date_from "
             "\"2026-10-01\", departure_date_to \"2026-10-31\" and "
             "nights [3, 4, 5] prices every departure day in October at three "
-            "trip lengths and tells you which combination is cheapest. That "
+            "trip lengths and shows which combination is cheapest. That "
             "is 93 date/night combinations and the cap rises to cover them "
-            "by itself -- do not narrow the question to make it fit, and do "
-            "not split it into several calls."
+            "by itself, so the whole grid runs in that one call."
             + _MONTH_ALLOWANCE_LINE
             + "\n\n"
             "Each date/night/destination combination is ONE search, so a "
             "month at three trip lengths is 93 of them and the same month "
-            "across two destinations is 186. Say that number before running "
-            "a search that large if the user has not asked for it in so many "
-            "words. A search that fails with a server error is retried once, "
-            "so with the caller's own key the figure to quote back is "
-            "`api_usage.hub_requests_billed` (retries included), not the "
-            "combination count.\n\n"
-            "`by_destination` carries one entry per destination you asked for "
-            "-- empty ones included, each with a `reason` -- so read it before "
-            "telling a user a destination has no flights.\n\n"
-            "Fares go stale within minutes: when the user asks for a current "
-            "price, search again rather than reusing an earlier result."
+            "across two destinations is 186. A search that fails with a "
+            "server error is retried once, so with the caller's own key the "
+            "figure the plan is charged is `api_usage.hub_requests_billed` "
+            "(retries included), not the combination count.\n\n"
+            "`by_destination` carries one entry per requested destination "
+            "-- empty ones included, each with a `reason` that separates a "
+            "destination with no flights from one that was not searched, "
+            "whose search failed, or whose fares did not fit in "
+            "`limit`.\n\n"
+            "Fares go stale within minutes: a current price comes from a new "
+            "search, not from an earlier result."
         ),
     )
     @document_params
@@ -3305,21 +3363,21 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             departure_date: Single outbound date, "YYYY-MM-DD".
             departure_date_from: First date of an outbound range.
             departure_date_to: Last date of an outbound range.
-            return_date: Fixed return date. Use this OR nights, not both.
+            return_date: Fixed return date. Mutually exclusive with `nights`.
             nights: Trip length in nights; a number, or a list like [5, 6, 7].
                 The return date is derived from each departure date.
             max_departure_stops: Maximum stops on the outbound leg.
             max_return_stops: Maximum stops on the return leg.
-            departure_airline_codes: Restrict the outbound leg to these airlines.
-            return_airline_codes: Restrict the return leg to these airlines.
+            departure_airline_codes: Restricts the outbound leg to these airlines.
+            return_airline_codes: Restricts the return leg to these airlines.
             currency: ISO currency code, default "usd".
-            max_price: Only return trips at or below this total price.
+            max_price: Only trips at or below this total price are returned.
             seat_type: 1 economy, 2 premium economy, 3 business, 4 first.
             passengers: One entry per traveller, not a count: 1 adult,
                 2 child (aged 2-11), 3 infant on lap, 4 infant in seat,
                 e.g. [1, 1, 2] for two adults and a child. At least one
                 adult, each infant on lap needs its own adult, at most 9.
-                Omit for one adult. A counts list [adults, children,
+                Left out, it means one adult. A counts list [adults, children,
                 infants], e.g. [2, 1, 0], or a bare [2] for two adults, is
                 recognised and converted to codes before the search; a
                 list that is valid as codes is searched as codes.
@@ -3334,15 +3392,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 requests. Not applied when results come from the fallback
                 source.
             max_searches: The searches this call may make, up or down.
-                Leave it out for the normal behaviour: with the caller's own
+                Unset is the normal behaviour: with the caller's own
                 key the cap covers the request when the request is reasonable
                 (a whole month at three trip lengths is 93 combinations and a
                 whole month x 3 nights
                 x 3 destinations is 279; both run in full) and anything
                 past it is sampled evenly across the range rather than cut
-                short. Set it lower to spend fewer searches on a wide
-                search, or higher -- to a hard maximum
-                of 300 -- for a grid wider than that.
+                short. A lower value spends fewer searches on a wide
+                search; a higher one -- to a hard maximum of 300 -- covers
+                a grid wider than that.
             verbose: Full upstream row fields and no row bound. See
                 VERBOSE_DESCRIPTION.
             use_fallback: See USE_FALLBACK_DESCRIPTION. That text, not this
@@ -3474,6 +3532,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         payload: dict[str, Any],
         *,
         tool: str,
+        limit: int | None = None,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """Shared body for the hotel tools: resolve key, call, shape result."""
         started = time.perf_counter()
@@ -3600,6 +3660,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             result["api_usage"] = allowance_usage(trial, 1)
         if isinstance(body, dict) and body.get("applied_filters"):
             result["applied_filters"] = body["applied_filters"]
+        _compact_hotels(
+            result,
+            limit=limit,
+            verbose=verbose,
+            enabled=settings.result_rows_max > 0,
+            bound=tool == "search_hotels",
+        )
         return result
 
     async def _hotels_stay_fanout(
@@ -3609,6 +3676,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         plan_builder,
         payload_builder,
         max_searches: int | None,
+        limit: int | None = None,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """Price every stay a check-in range expands to, under the cap.
 
@@ -3864,6 +3933,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
         if applied_filters:
             response["applied_filters"] = applied_filters[0]
+        _compact_hotels(
+            response,
+            limit=limit,
+            verbose=verbose,
+            enabled=settings.result_rows_max > 0,
+            bound=tool == "search_hotels",
+        )
         await log(results=response["result_count"], error=None)
         logger.info(
             "tool=%s duration_ms=%d stays=%d searched=%d failed=%d results=%d "
@@ -4071,20 +4147,22 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "FlightPowers hotel search: live Booking.com availability and "
             "nightly prices for a "
             "destination and date range. Input: a free-text destination the "
-            "way a person would say it (\"Rome\", \"Tokyo Shibuya\"), plus "
+            "way a person would write it (\"Rome\", \"Tokyo Shibuya\"), plus "
             "check-in and check-out dates. Returns each property's price, "
             "review score, room type, location, latitude/longitude and a "
-            "booking link.\n\n"
-            "Set price_as_seen_from to a two-letter country code to price the "
-            "same stay the way a shopper resident in that country would see "
-            "it. Gaps are real but "
-            "usually modest and property-dependent, and rates move between "
-            "calls, so hold one named property fixed, call each country a few "
-            "times, and never read one call per country as a gap.\n\n"
+            "booking link: 10 properties by default, the cheapest always "
+            "among them; limit asks for more or fewer, and verbose: true "
+            "returns the source's full rows.\n\n"
+            "price_as_seen_from, a two-letter country code, prices the same "
+            "stay the way a shopper resident in that country would see it. "
+            "Gaps are real but usually modest and property-dependent, and "
+            "rates move between calls, so one call per country is not "
+            "evidence of a gap; a parity check holds one named property fixed "
+            "and calls each country a few times.\n\n"
             "A date range and a nights value price several stays in one "
-            "call, like the flights tools: pass checkin_date_from, "
+            "call: checkin_date_from, "
             "checkin_date_to and nights (a number, or a list like [2, 3, 7]) "
-            "instead of a fixed checkin_date/checkout_date, and every "
+            "replace a fixed checkin_date/checkout_date, and every "
             "check-in date is priced separately. The answer is stays -- one "
             "entry per stay with its cheapest property, per-night price and "
             "median -- plus cheapest_overall, and the full property list for "
@@ -4094,8 +4172,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "search_coverage."
             + _RANGE_ALLOWANCE_LINE
             + "\n\n"
-            "Rates go stale within minutes: when the user asks for a current "
-            "price, search again rather than reusing an earlier result."
+            "Rates go stale within minutes: a current price comes from a new "
+            "search, not from an earlier result."
         ),
     )
     @document_params
@@ -4113,21 +4191,24 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         budget_per_night: int | None = None,
         price_as_seen_from: str | None = None,
         filters: list[str] | None = None,
+        limit: Annotated[
+            int | None, Field(ge=1, description=HOTEL_LIMIT_DESCRIPTION)
+        ] = None,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """
         Args:
             destination: Where to stay, in free text the way a person would
-                say it, e.g. "Rome" or "Tokyo Shibuya". A city, district,
+                write it, e.g. "Rome" or "Tokyo Shibuya". A city, district,
                 landmark or region all work; no internal location ID is needed.
-            checkin_date: First night of the stay, "YYYY-MM-DD". Give this
-                with checkout_date for one stay, or use checkin_date_from
-                plus checkin_date_to for a range of check-in dates.
+            checkin_date: First night of the stay, "YYYY-MM-DD". With
+                checkout_date it prices one stay; checkin_date_from plus
+                checkin_date_to price a range of check-in dates instead.
             checkout_date: Departure morning, "YYYY-MM-DD". Must be after
-                checkin_date. Give either this or nights, not both.
+                checkin_date. Mutually exclusive with `nights`.
             checkin_date_from: First check-in date of a range, "YYYY-MM-DD".
                 Needs checkin_date_to and nights, and prices one stay per
-                check-in date in the range -- the hotel equivalent of the
-                flights date range.
+                check-in date in the range.
             checkin_date_to: Last check-in date of the range, "YYYY-MM-DD".
             nights: How many nights to stay, as a number (3) or a list
                 ([2, 3, 7]) to price several lengths. Derives the check-out
@@ -4136,26 +4217,31 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             max_searches: The searches this call may make, up or down.
                 One stay is one request, so a 30-day range at two lengths is
                 60 and a month at three is 93 -- with the caller's own key
-                the cap rises to cover a request that size by itself. Set it
-                lower to spend less, or higher (hard maximum 200) for a wider grid; either way the
-                range is sampled evenly across the calendar rather than cut
-                short at the front.
+                the cap rises to cover a request that size by itself. A lower
+                value spends less and a higher one (hard maximum 200) covers
+                a wider grid; either way the range is sampled evenly across
+                the calendar rather than cut short at the front.
             adults: Number of adult guests. Defaults to the upstream default
                 when omitted.
             children: Number of children sharing the room.
             currency: ISO currency code for the prices returned, e.g. "usd".
-            budget_per_night: Only return properties at or below this nightly
-                price, in `currency`.
+            budget_per_night: Only properties at or below this nightly price,
+                in `currency`, are returned.
             price_as_seen_from: Two-letter country code, e.g. "de". Prices the
                 stay through a residential connection in that country, so the
-                result is what a shopper resident there would be quoted. For a
-                rate-parity check hold one named property fixed and call each
-                country a few times, because rates move between calls and one
-                call per country can show a gap that is not there. Omit it for
-                a neutral price.
+                result is what a shopper resident there would be quoted. A
+                rate-parity check holds one named property fixed and calls
+                each country a few times, because rates move between calls
+                and one call per country can show a gap that is not there.
+                Without it the price is neutral.
             filters: Property filters to apply, e.g. ["free_cancellation",
                 "breakfast_included"]. An unknown name is rejected with the
                 list of valid ones rather than being ignored.
+            verbose: Returns each property exactly as the source sent it,
+                image URLs and the full tracking link included, and every
+                property unless limit is set. Off by default: rows leave out
+                image URLs, the booking link keeps only its stay parameters,
+                and price_per_night is added.
         """
         bad = unknown_filters(filters)
         if bad:
@@ -4200,6 +4286,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 plan_builder=stay_plan,
                 payload_builder=stay_payload,
                 max_searches=max_searches,
+                limit=limit,
+                verbose=verbose,
             )
 
         if checkin_date is None or checkout_date is None:
@@ -4228,7 +4316,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # source `provider_unavailable`, and a parameter that offers it is a
         # promise this deployment cannot keep; `compare_hotel_rates` keeps
         # the multi-source path behind MCP_HOTEL_COMPARE.
-        return await _hotels_call("search", payload, tool="search_hotels")
+        return await _hotels_call(
+            "search", payload, tool="search_hotels", limit=limit, verbose=verbose
+        )
 
     @mcp.tool(
         name="find_hotel_by_name",
@@ -4247,14 +4337,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "availability and pricing for one named property. Input: the "
             "hotel name a person would type (adding the city helps when a "
             "chain has many properties) plus check-in and check-out dates -- "
-            "no internal property ID needed, the resolution is done for you. "
+            "no internal property ID needed, the server resolves the name. "
             "Returns the property's price, review score, room type, "
-            "latitude/longitude and a booking link. Use it to check one "
-            "specific hotel, or to track a "
-            "single property's price over time.\n\n"
+            "latitude/longitude and a booking link. It checks one specific "
+            "hotel, or tracks a single property's price over time.\n\n"
             "A date range and a nights value price several stays in one call, "
-            "like the flights tools: pass checkin_date_from, checkin_date_to "
-            "and nights (a number, or a list like [2, 3, 7]) instead of a "
+            "checkin_date_from, checkin_date_to "
+            "and nights (a number, or a list like [2, 3, 7]) replace a "
             "fixed checkin_date/checkout_date, and this property is priced "
             "for every check-in date -- a rate calendar for one hotel. The "
             "answer is stays, one entry per date with that date's price and "
@@ -4266,11 +4355,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             + "\n\n"
             "price_as_seen_from prices the stay as a shopper resident in that "
             "country would see it. Gaps are real but usually modest and "
-            "property-dependent, and rates move between calls, so call each "
-            "country a few times on this same property before reporting a "
-            "gap.\n\n"
-            "Rates go stale within minutes: when the user asks for a current "
-            "price, search again rather than reusing an earlier result."
+            "property-dependent, and rates move between calls, so a gap holds "
+            "only when it repeats over a few calls per country on this same "
+            "property.\n\n"
+            "Rates go stale within minutes: a current price comes from a new "
+            "search, not from an earlier result."
         ),
     )
     @document_params
@@ -4286,17 +4375,18 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         children: int | None = None,
         currency: str | None = None,
         price_as_seen_from: str | None = None,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """
         Args:
             hotel_name: The property name a person would type, e.g. "Hotel
                 Artemide". Adding the city ("Hotel Artemide Rome") disambiguates
                 a chain with many properties. No internal property ID is needed.
-            checkin_date: First night of the stay, "YYYY-MM-DD". Give this
-                with checkout_date for one stay, or use checkin_date_from
-                plus checkin_date_to for a rate calendar.
+            checkin_date: First night of the stay, "YYYY-MM-DD". With
+                checkout_date it prices one stay; checkin_date_from plus
+                checkin_date_to give a rate calendar instead.
             checkout_date: Departure morning, "YYYY-MM-DD". Must be after
-                checkin_date. Give either this or nights, not both.
+                checkin_date. Mutually exclusive with `nights`.
             checkin_date_from: First check-in date of a range, "YYYY-MM-DD".
                 Needs checkin_date_to and nights, and prices this property on
                 every check-in date in the range -- one call, a rate calendar.
@@ -4314,10 +4404,14 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             children: Number of children sharing the room.
             currency: ISO currency code for the prices returned, e.g. "usd".
             price_as_seen_from: Two-letter country code, e.g. "de". Prices the
-                stay as a shopper resident in that country would see it. Call
-                each country a few times on this same property before
-                reporting a gap, because rates move between calls and gaps are
-                usually modest and property-dependent.
+                stay as a shopper resident in that country would see it.
+                Rates move between calls and gaps are usually modest and
+                property-dependent, so a gap holds only when it repeats over
+                a few calls per country on this same property.
+            verbose: Returns the property exactly as the source sent it, image
+                URL and the full tracking link included. Off by default: the
+                row leaves out the image URL, the booking link keeps only its
+                stay parameters, and price_per_night is added.
         """
         ranged = (
             checkin_date_from is not None
@@ -4353,6 +4447,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 plan_builder=stay_plan,
                 payload_builder=stay_payload,
                 max_searches=max_searches,
+                verbose=verbose,
             )
 
         if checkin_date is None or checkout_date is None:
@@ -4376,7 +4471,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             proxy_country=price_as_seen_from,
         )
         return await _hotels_call(
-            "hotel_by_name", payload, tool="find_hotel_by_name"
+            "hotel_by_name", payload, tool="find_hotel_by_name", verbose=verbose
         )
 
     @mcp.tool(
@@ -4397,21 +4492,21 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         ),
         description=described_hotels(
             "FlightPowers cross-source comparison: prices one stay on every "
-            "source you have a key for. Input: a "
-            "free-text destination the way a person would say it (\"Rome\", "
+            "source the caller has a key for. Input: a "
+            "free-text destination the way a person would write it (\"Rome\", "
             "\"Tokyo Shibuya\"), check-in and check-out dates, and how many "
             "adults. Returns one row per source: the cheapest and the median "
             "stay total, how many places were found, the currency and when it "
             "was read.\n\n"
-            "Read the caveats on every row before you say one source is cheaper. "
-            "rating_scale is 10 on Booking and 5 on Airbnb. taxes_included is "
+            "Every row carries the caveats that decide whether one source is "
+            "cheaper. rating_scale is 10 on Booking and 5 on Airbnb. taxes_included is "
             "true on Booking, where excluded taxes are folded into the price, and "
             "null on Airbnb, where we have not established the tax treatment of "
-            "the display total; a null is not a no. A source you have no key for "
+            "the display total; a null is not a no. A source the caller has no key for "
             "is listed in providers_skipped and is not counted anywhere in the "
             "comparison.\n\n"
-            "Rates go stale within minutes: when the user asks for a current "
-            "price, compare again rather than reusing an earlier result."
+            "Rates go stale within minutes: a current comparison comes from a "
+            "new call, not from an earlier result."
         ),
     )
     @document_params
@@ -4426,7 +4521,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """
         Args:
-            destination: Where to stay, in free text the way a person would say
+            destination: Where to stay, in free text the way a person would write
                 it, e.g. "Rome" or "Tokyo Shibuya". A city, district, landmark or
                 region all work; no internal location ID is needed.
             checkin_date: First night of the stay, "YYYY-MM-DD".
@@ -4440,8 +4535,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 that came back in a different one says so in its own currency
                 field and is not converted.
             providers: Which sources to price, e.g. ["booking", "airbnb"].
-                Defaults to both. A source you have no RapidAPI key for is not
-                called and appears in providers_skipped.
+                Defaults to both. A source the caller has no RapidAPI key for
+                is not called and appears in providers_skipped.
         """
         try:
             names = ota.normalise_providers(

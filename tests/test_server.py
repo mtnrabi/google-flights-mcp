@@ -861,7 +861,7 @@ class TestSearchStatusIsBelieved:
         assert "blocked_page" in out["message"]
 
     @pytest.mark.asyncio
-    async def test_the_degraded_message_tells_the_model_what_not_to_say(self):
+    async def test_the_degraded_message_says_an_empty_list_is_no_evidence(self):
         """The only consumer of this field is a language model, and it will act
         on it. Naming the wrong action is worth the words."""
         mcp = build_with_upstream(
@@ -876,7 +876,7 @@ class TestSearchStatusIsBelieved:
         )
         assert result.is_error
         out = result.structured_content
-        assert "do not tell the user that none exist" in out["message"].lower()
+        assert "not evidence that none exist" in out["message"].lower()
 
     @pytest.mark.asyncio
     async def test_a_genuine_empty_still_says_no_flights(self):
@@ -1100,7 +1100,7 @@ class TestFallbackDefault:
         for name in ("search_oneway_flights", "search_roundtrip_flights"):
             text = tools[name].inputSchema["properties"]["use_fallback"]["description"]
             assert "Wait longer" not in text
-            assert "Leave unset" in text
+            assert "Default: unset." in text
             assert "can time out" in text
 
     @pytest.mark.asyncio

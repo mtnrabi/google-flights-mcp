@@ -318,11 +318,11 @@ def key_howto_tail(api_name: str, connect_url: str = "") -> str:
     empty on a deployment without /connect."""
     if connect_url:
         return (
-            f"Connect your own RapidAPI key once at {connect_url} to run "
-            "searches on your own plan."
+            f"A RapidAPI key connected once at {connect_url} runs searches "
+            "on the caller's own plan."
         )
     return (
-        f"Searches run on your own RapidAPI key for the {api_name}; a search "
+        f"Searches run on the caller's own RapidAPI key for the {api_name}; a search "
         "without one answers with the steps to get and pass one."
     )
 

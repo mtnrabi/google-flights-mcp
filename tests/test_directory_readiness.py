@@ -140,7 +140,7 @@ class TestParameterDescriptions:
         text = tool["inputSchema"]["properties"]["passengers"]["description"]
         for fragment in ("One entry per traveller", "not a count", "1 adult",
                          "2 child", "3 infant on lap", "4 infant in seat",
-                         "[1, 1, 2]", "At least one adult", "Omit for one adult"):
+                         "[1, 1, 2]", "At least one adult", "it means one adult"):
             assert fragment in text, (fragment, text)
         assert "counts as" not in text
 

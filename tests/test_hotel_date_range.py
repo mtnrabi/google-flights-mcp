@@ -387,10 +387,12 @@ class TestOneCallManyStays:
         }
         assert [r["name"] for r in out["results"]] == ["A 2026-05-02", "B 2026-05-02"]
         assert out["result_count"] == 2
-        # The winner's rows are the upstream's, untouched.
-        assert "image_url" in out["results"][0]
-        # The repeated per-stay summaries are not: an image CDN URL is the
-        # half of those bytes no model can open.
+        # Since 2026-10-22 the winner's rows are compact too (no image URL,
+        # the link cut to its stay parameters); `verbose: true` gives them
+        # back untouched -- see tests/test_hotel_compact.py.
+        assert "image_url" not in out["results"][0]
+        # The repeated per-stay summaries never carried one: an image CDN URL
+        # is the half of those bytes no model can open.
         for stay in out["stays"]:
             assert "image_url" not in stay["cheapest"]
             assert stay["cheapest"]["link"].startswith("https://www.booking.com/")
@@ -725,9 +727,13 @@ class TestTheRateCalendarForOneProperty:
 
 
 class TestTheOldShapeIsUntouched:
-    """A caller who passes no range parameter must get the response they got
-    before this existed -- key for key, value for value. Every hotel caller on
-    the server today is that caller."""
+    """A caller who passes no range parameter and `verbose: true` gets the
+    response every single-stay caller got before ranges existed -- key for
+    key, value for value.
+
+    Since 2026-10-22 (compact hotel rows, directory policy 5.B) the default
+    row is compact, so the old response is what `verbose: true` returns; the
+    default shape is pinned in tests/test_hotel_compact.py."""
 
     HANDLER_JSON = {"properties": [room("Kremlin Palace", 2434.0)]}
 
@@ -750,6 +756,7 @@ class TestTheOldShapeIsUntouched:
             destination="Antalya",
             checkin_date="2026-05-01",
             checkout_date="2026-05-10",
+            verbose=True,
         )
         assert out == {
             "results": self.HANDLER_JSON["properties"],
@@ -787,6 +794,7 @@ class TestTheOldShapeIsUntouched:
             hotel_name="Kremlin Palace",
             checkin_date="2026-05-01",
             checkout_date="2026-05-10",
+            verbose=True,
         )
         assert out == {
             "results": [room("Kremlin Palace", 2434.0)],

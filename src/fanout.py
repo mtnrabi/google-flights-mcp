@@ -358,8 +358,8 @@ class SearchPlan:
                 "before this call reached its time limit; the rest were "
                 "never sent and nothing was billed for them. The fares below "
                 "are real and paid for, but they do not cover the whole "
-                "range. Ask again for the dates that are missing, or narrow "
-                "the range so the whole of it fits in one call."
+                "range. A request for the dates that are missing, or a "
+                "narrower range, fits in one call."
             )
         elif self.truncated:
             # Wording differs from the free server's planner on purpose: there
@@ -372,8 +372,9 @@ class SearchPlan:
                 f"{self.executed_combinations} searches were run, spread evenly "
                 "across the requested range rather than taken from the start, so "
                 "the sample is representative but not exhaustive. Each search is "
-                "one request billed to your plan. Narrow the date range or "
-                "destination list, or raise max_searches, for fuller coverage."
+                "one request billed to your plan. A narrower date range or "
+                "destination list, or a higher max_searches, gives fuller "
+                "coverage."
             )
         if self.degraded_reason:
             summary["degraded"] = self.degraded_reason
@@ -409,8 +410,9 @@ class SearchPlan:
                 f"This request expanded to {self.requested_combinations} "
                 f"stays and {self.executed_combinations} of them were priced "
                 "before this call reached its time limit; the rest were "
-                "never sent and nothing was billed for them. Ask again for "
-                "the check-in dates that are missing, or narrow the range."
+                "never sent and nothing was billed for them. A request for "
+                "the check-in dates that are missing, or a narrower range, "
+                "covers the rest."
             )
         elif self.truncated:
             summary["note"] = (
@@ -419,8 +421,8 @@ class SearchPlan:
                 f"{self.executed_combinations} stays were priced, spread evenly "
                 "across the requested check-in range rather than taken from the "
                 "start, so the sample is representative but not exhaustive. Each "
-                "stay is one request billed to your plan. Narrow the check-in "
-                "range or the nights list, or raise max_searches, for fuller "
+                "stay is one request billed to your plan. A narrower check-in "
+                "range or nights list, or a higher max_searches, gives fuller "
                 "coverage."
             )
         if self.degraded_reason:

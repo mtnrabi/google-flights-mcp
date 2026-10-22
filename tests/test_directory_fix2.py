@@ -138,7 +138,7 @@ class TestNoPriceBeforeAWall:
         )
         _no_price(text, f"{products} instructions")
         assert "10 free searches a day after sign-in" in text
-        assert f"connect your own RapidAPI key at {CONNECT} for more" in text
+        assert f"with the caller's own RapidAPI key, connected at {CONNECT}, searches run on their RapidAPI plan" in text
 
     def test_the_note_on_every_result_is_the_counter_and_connect(self):
         note = trial_note(_state(), CONNECT, DEFAULT_SIGNUP_URLS["flights"])

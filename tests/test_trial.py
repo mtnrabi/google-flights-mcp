@@ -809,7 +809,7 @@ class TestWhatTheToolsSay:
         # The allowance names /connect, and the instructions carry no price,
         # no listing URL and no header / query-key how-to (2026-10-22): those
         # wait for a wall.
-        assert "connect your own RapidAPI key at" in listed.text
+        assert "caller's own RapidAPI key, connected at" in listed.text
         assert "rapidapi.com" not in listed.text
         assert "x-rapidapi-key" not in listed.text
         assert "$" not in listed.text

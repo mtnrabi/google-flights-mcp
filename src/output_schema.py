@@ -95,9 +95,10 @@ SEARCH_STATUS_DESCRIPTION = (
     "happen and an empty list means nothing; this case is also flagged with "
     "isError: true and is safe to retry. 'trial_exhausted': the free "
     "signed-in allowance on this server is spent for today, so nothing was "
-    "searched and nothing was billed; it renews at 00:00 UTC and connecting "
-    "your own RapidAPI key removes the cap. Retrying does not help. "
-    "'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan."
+    "searched and nothing was billed; it renews at 00:00 UTC and the "
+    "caller's own RapidAPI key, once connected, removes the cap. Retrying "
+    "does not help. "
+    "'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help; a request with fewer dates or nights, or a larger plan, does."
 )
 
 _RESULT_ROWS: dict[str, Any] = {
@@ -117,8 +118,8 @@ _FLIGHT_RESULT_ROWS: dict[str, Any] = {
     "description": (
         "The fares found, already sorted and deduplicated. An empty array is "
         "only meaningful when search_status is 'empty'.\n\n"
-        "This is the TOP results_returned of results_total rows by the sort "
-        "you asked for -- cheapest first by default, shortest first on "
+        "This is the TOP results_returned of results_total rows by the "
+        "requested sort -- cheapest first by default, shortest first on "
         "sort_by 'duration' -- with every destination that has fares still "
         "represented. Each row is in "
         "a compact shape: destination, the date or dates, trip length in "
@@ -139,17 +140,22 @@ _FLIGHT_RESULT_ROWS: dict[str, Any] = {
 _HOTEL_RESULT_ROWS: dict[str, Any] = {
     **_RESULT_ROWS,
     "description": (
-        "The properties found, already sorted and deduplicated. An empty "
-        "array is only meaningful when search_status is 'empty'. Each row is "
-        "the source's own object, passed through. latitude and longitude are "
-        "the property's WGS84 coordinates in decimal degrees, from "
-        "Booking.com, null when it publishes none."
+        "The properties found, in the order Booking.com returned them. An "
+        "empty array is only meaningful when search_status is 'empty'. By "
+        "default at most `limit` rows (10), the cheapest always included, "
+        "each the source's own object without image URLs, with the booking "
+        "link cut to its stay parameters and price_per_night (the stay total "
+        "divided by its nights) added; `verbose: true` returns the source's "
+        "rows untouched. latitude and longitude are the property's WGS84 "
+        "coordinates in decimal degrees, from Booking.com, null when it "
+        "publishes none."
     ),
     "items": {
         "type": "object",
         "properties": {
             "latitude": {"anyOf": [{"type": "number"}, {"type": "null"}]},
             "longitude": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+            "price_per_night": {"anyOf": [{"type": "number"}, {"type": "null"}]},
         },
         "additionalProperties": True,
     },
@@ -195,7 +201,7 @@ _API_USAGE: dict[str, Any] = {
         "free_searches_remaining_today": {"type": "integer", "minimum": 0},
         "note": {
             "type": "string",
-            "description": "The same figures as a sentence, for the model to relay.",
+            "description": "The same figures as one plain sentence.",
         },
     },
     "additionalProperties": True,
@@ -205,7 +211,7 @@ _FLIGHT_COVERAGE: dict[str, Any] = {
     "type": "object",
     "description": (
         "What was actually searched. Present whether or not the request was "
-        "truncated, so a model can state honestly what its answer rests on."
+        "truncated, so the answer's basis is on the record either way."
     ),
     "properties": {
         "requested_combinations": {"type": "integer", "minimum": 0},
@@ -233,7 +239,7 @@ _FLIGHT_COVERAGE: dict[str, Any] = {
                 "Present when something other than the cap ended the "
                 "fan-out. 'deadline': the call reached its time limit and "
                 "the remaining combinations were never sent or billed, so "
-                "the results are real but do not cover the whole range."
+                "the results are real but cover only part of the range."
             ),
         },
         "departure_dates_searched": {"type": "array", "items": {"type": "string"}},
@@ -249,7 +255,7 @@ _ACCOUNT_PROPERTIES: dict[str, Any] = {
         "description": (
             "True when no usable RapidAPI key arrived with the call, or the "
             "upstream rejected the one that did. No search was run and nothing "
-            "was billed; signup_url and message say how to fix it."
+            "was billed; signup_url and message describe the fix."
         ),
     },
     "quota_exhausted": {
@@ -287,12 +293,12 @@ _BY_DESTINATION: dict[str, Any] = {
         "search errored, so nothing is known), 'not_in_limit' (searched, found "
         "flights, none fitted in `limit`) or 'not_searched' (never searched -- "
         "the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\n"
-        "Read this rather than inferring coverage from `results`: a "
+        "Coverage comes from here, not from `results`: a "
         "destination missing from `results` looks identical to one that has "
         "no flights, and they are not the same answer. `row_count` is how "
         "many of this destination's fares were selected; the fares "
         "themselves are in `results` and are not repeated here. `verbose: "
-        "true` restores the `rows` array for callers that read it."
+        "true` restores the `rows` array for callers that consume it."
     ),
     "additionalProperties": {
         "type": "object",
@@ -382,8 +388,8 @@ FLIGHTS_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "title": "Flight search result",
     "description": (
-        "A completed flight search. Read search_status before reading results: "
-        "an empty array means 'no flights' only when search_status is 'empty'."
+        "A completed flight search. An empty `results` array means 'no "
+        "flights' only when search_status is 'empty'."
     ),
     "properties": {
         "results": _FLIGHT_RESULT_ROWS,
@@ -440,9 +446,9 @@ FLIGHTS_OUTPUT_SCHEMA: dict[str, Any] = {
         "message": {
             "type": "string",
             "description": (
-                "Present when there is something the model must relay to the "
-                "user rather than silently absorb -- no results, a degraded "
-                "search, a missing key or a spent quota."
+                "Present when the result carries a statement for the person "
+                "who asked -- no results, a degraded search, a missing key or "
+                "a spent quota."
             ),
         },
         **_ACCOUNT_PROPERTIES,
@@ -487,7 +493,7 @@ _PROVIDER_ROW: dict[str, Any] = {
         "search_reason": {"type": "string"},
         "detail": {
             "type": "string",
-            "description": "Plain text for the model to relay to a human.",
+            "description": "Plain text explaining this row's outcome, written for a person.",
         },
         "count": {
             "description": (
@@ -511,7 +517,8 @@ _PROVIDER_ROW: dict[str, Any] = {
         "rating_scale": {
             "description": (
                 "What a review score from this source is out of: 10 on "
-                "Booking, 5 on Airbnb. Read it before comparing two scores."
+                "Booking, 5 on Airbnb, so two raw scores from different "
+                "sources are not on the same scale."
             ),
             "anyOf": [{"type": "integer"}, {"type": "null"}],
         },
@@ -572,9 +579,8 @@ _PROVIDERS_SKIPPED: dict[str, Any] = {
 _CAVEATS: dict[str, Any] = {
     "type": "array",
     "description": (
-        "Sentences that must be read before one source is called cheaper than "
-        "another -- differing rating scales, differing tax treatment, "
-        "differing currencies, a source that did not answer."
+        "Sentences on what makes the sources' totals differ -- rating "
+        "scales, tax treatment, currencies, a source that did not answer."
     ),
     "items": {"type": "string"},
 }
@@ -595,8 +601,8 @@ _STAY_PROPERTY: dict[str, Any] = {
     "description": (
         "The cheapest priced property for this stay, or null when it has "
         "none. The same row the upstream returned, minus its image URL: on a "
-        "measured search 73% of the payload was URLs, and an image CDN link "
-        "is the half no model can open. The booking link is kept."
+        "measured search 73% of the payload was URLs, so image URLs are "
+        "dropped to keep the payload small. The booking link is kept."
     ),
     "anyOf": [
         {"type": "object", "additionalProperties": True},
@@ -611,7 +617,7 @@ _STAYS: dict[str, Any] = {
         "whether or not that stay was priced. Only on a date-range search "
         "(checkin_date_from / checkin_date_to / nights); a single stay does "
         "not carry it.\n\n"
-        "Read this rather than inferring coverage from `results`: `results` "
+        "Coverage comes from here, not from `results`: `results` "
         "holds the full property list for the CHEAPEST stay only, so a stay "
         "missing from it looks identical to a stay that had nothing. `reason` "
         "says which kind of hole an unpriced stay is: 'no_availability' "
@@ -697,8 +703,8 @@ _STAY_COVERAGE: dict[str, Any] = {
     "type": "object",
     "description": (
         "What was actually priced on a date-range search. Present whether or "
-        "not the request was truncated, so a model can state honestly what "
-        "its answer rests on."
+        "not the request was truncated, so the answer's basis is on the "
+        "record either way."
     ),
     "properties": {
         "requested_combinations": {"type": "integer", "minimum": 0},
@@ -718,7 +724,7 @@ _STAY_COVERAGE: dict[str, Any] = {
                 "Present when something other than the cap ended the "
                 "fan-out. 'deadline': the call reached its time limit and "
                 "the remaining combinations were never sent or billed, so "
-                "the results are real but do not cover the whole range."
+                "the results are real but cover only part of the range."
             ),
         },
         "stays_searched": {
@@ -755,13 +761,28 @@ HOTELS_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "results": _HOTEL_RESULT_ROWS,
         "result_count": {"type": "integer", "minimum": 0},
+        "results_total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "How many properties the source returned for the stay in "
+                "`results`, before `limit`. Absent with `verbose: true` and "
+                "no `limit`, where every row is in `results`."
+            ),
+        },
+        "results_note": {
+            "type": "string",
+            "description": (
+                "Present when `limit` left properties out: how many were "
+                "found and how to see more."
+            ),
+        },
         "stays": _STAYS,
         "results_for_stay": {
             "description": (
                 "Which stay `results` belongs to on a date-range search, or "
-                "null when nothing was priced. Without it the rows read as "
-                "'the search's results' and get quoted against the wrong "
-                "dates."
+                "null when nothing was priced. `results` holds this stay's "
+                "properties only, not the whole range's."
             ),
             "anyOf": [
                 {"type": "object", "additionalProperties": True},
@@ -787,9 +808,9 @@ HOTELS_OUTPUT_SCHEMA: dict[str, Any] = {
                 "'degraded': every stay errored, so nothing is known; safe to "
                 "retry. 'trial_exhausted': the free signed-in allowance on "
                 "this server is spent for today, so nothing was searched and "
-                "nothing was billed; it renews at 00:00 UTC and connecting "
-                "your own RapidAPI key removes the cap. Retrying does not "
-                "help. " + "'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan."
+                "nothing was billed; it renews at 00:00 UTC and the caller's "
+                "own RapidAPI key, once connected, removes the cap. Retrying "
+                "does not help. " + "'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help; a request with fewer dates or nights, or a larger plan, does."
             ),
         },
         "search_coverage": _STAY_COVERAGE,
@@ -823,9 +844,9 @@ COMPARE_OUTPUT_SCHEMA: dict[str, Any] = {
     "title": "Cross-source hotel rate comparison",
     "description": (
         "One stay priced on every source the caller has a key for, one row "
-        "per source. Read `caveats` and each row's `search_status`, "
-        "`rating_scale` and `currency` before saying one source is cheaper "
-        "than another: a degraded source has no count and no prices, and a "
+        "per source. Whether one source is cheaper than another depends on "
+        "`caveats` and each row's `search_status`, `rating_scale` and "
+        "`currency`: a degraded source has no count and no prices, and a "
         "skipped source is counted nowhere."
     ),
     "properties": {

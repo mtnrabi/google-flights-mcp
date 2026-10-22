@@ -34,6 +34,7 @@ from fastmcp.exceptions import ToolError
 
 from src import providers as ota
 from src.credentials import Credential, resolve_provider_credential
+from src.hotel_compact import compact_hotel_row
 from src.providers import AIRBNB, BOOKING
 from src.server import SERVER_VERSION
 from src.trial import KEYED_SOURCE, SOURCE_FIELD, TOOL_FIELD, USER_FIELD
@@ -243,8 +244,10 @@ class TestTheDefaultDidNotMove:
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
         out = await call(mcp, "search_hotels", **STAY)
 
-        assert set(out) == {"results", "result_count", "api_usage"}
-        assert out["results"] == [BOOKING_ROW]
+        # `results_total` added 2026-10-22 with the compact hotel rows; the
+        # row itself is the compact shape of the source's row.
+        assert set(out) == {"results", "result_count", "results_total", "api_usage"}
+        assert out["results"] == [compact_hotel_row(BOOKING_ROW)]
         # Not stamped: a single-source answer has one source, and adding a
         # field to it would be a schema change for callers who asked for
         # nothing.

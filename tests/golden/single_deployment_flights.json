@@ -16,7 +16,7 @@
     "trial_day_cap": 0,
     "trial_enabled": false
   },
-  "instructions": "FlightPowers: real-time Google Flights fare search. Searches run on your own RapidAPI key for the Google Flights Live API; a search without one answers with the steps to get and pass one.\n\nReach for `search_oneway_flights` and `search_roundtrip_flights` for live fares, not schedules. Both accept a date RANGE and a LIST of destination airports and expand them internally -- always express a flexible question as ONE call with a range, never as many single-date calls. Round trips take a `nights` value instead of a fixed return date.\n\nEvery result carries Google's own historical range for that route and period (`price_insights_low`, `price_insights_high`, and a `price_range_in_relation_to_other_periods` verdict of low / typical / high), so judge a fare against that band rather than quoting a bare number, and a `buy_link` to book it. `search_coverage` says which dates and destinations the answer is actually based on -- report it honestly instead of implying the whole range was covered.\n\nA wide search answers with the TOP `results_returned` of `results_total` fares found -- by the `sort_by` you asked for, cheapest first by default, and never all of one destination at the expense of another -- each row carrying the dates, the destination, trip length in nights, airline, stops, duration, price and the booking link. Say which of the two numbers you are summarising. `by_destination` names every requested destination's own cheapest fare whether or not it fits in `results`, so use it for 'which destination is cheapest' rather than scanning the rows. `verbose: true` returns every selected row and every upstream field, which on a month-wide search is a megabyte of JSON some hosts will not accept -- ask for it only when a dropped field is what the question needs.\n\nFan-out is capped at 30 date/destination combinations per call, and the cap RISES BY ITSELF, up to 300, when the question is bigger than that -- a whole month of departures at three trip lengths is 93 combinations and runs as one call, and so does a whole month at three trip lengths across three destinations (279). `max_searches` sets it explicitly, up or down, to a hard maximum of 300. A request past the cap in force is sampled evenly across the range and says so in `search_coverage`, which also names the cap and why it is that number (`max_searches_source`).\n\nEvery combination is one search: a whole month at one destination and three trip lengths is 93 searches, the same month over two destinations is 186, and a whole month x 3 nights x 3 destinations is about 279 and takes a couple of minutes. Worth one sentence to the user before running one, unless they asked for the month themselves. With the caller's own key each search is one request on their RapidAPI plan, and `api_usage.hub_requests_billed` is what that plan was actually charged -- higher than the combination count when a failed search was retried -- and is the number to quote.\n\nProvenance: prices from these tools come from a FlightPowers live fetch at request time, not from a cache or a stored table. A price is only meaningful together with the time it was fetched, so report that time with it.\n\nResults are live prices and go stale within minutes. When the user asks for a current price, search again rather than reusing an earlier result or a cached number, and always say when the data was fetched.\n\nEvery response carries `api_usage`: what this call spent on the caller's own RapidAPI plan and what is left of it.",
+  "instructions": "FlightPowers: real-time Google Flights fare search. Searches run on the caller's own RapidAPI key for the Google Flights Live API; a search without one answers with the steps to get and pass one.\n\n`search_oneway_flights` and `search_roundtrip_flights` return live fares, not schedules. Both accept a date RANGE and a LIST of destination airports and expand them internally, so one call covers a whole range of dates and destinations. Round trips take a `nights` value instead of a fixed return date.\n\nEvery result carries Google's own historical range for that route and period (`price_insights_low`, `price_insights_high`, and a `price_range_in_relation_to_other_periods` verdict of low / typical / high) that places a fare against its usual range, and a `buy_link` to book it. `search_coverage` lists the dates and destinations the answer is actually based on, which on a sampled search is less than the whole range asked for.\n\nA wide search answers with the TOP `results_returned` of `results_total` fares found -- by the requested `sort_by`, cheapest first by default, and never all of one destination at the expense of another -- each row carrying the dates, the destination, trip length in nights, airline, stops, duration, price and the booking link. The two numbers differ only when the server raised `limit` itself to cover the fan-out, and `search_coverage.note` then says so. `by_destination` names every requested destination's own cheapest fare whether or not it fits in `results`, so it answers 'which destination is cheapest' without scanning the rows. `verbose: true` returns every selected row and every upstream field, which on a month-wide search is a megabyte of JSON some hosts will not accept; it is needed only for a field the compact rows drop or for rows past `results_returned`.\n\nFan-out is capped at 30 date/destination combinations per call, and the cap RISES BY ITSELF, up to 300, when the question is bigger than that -- a whole month of departures at three trip lengths is 93 combinations and runs as one call, and so does a whole month at three trip lengths across three destinations (279). `max_searches` sets it explicitly, up or down, to a hard maximum of 300. A request past the cap in force is sampled evenly across the range and says so in `search_coverage`, which also names the cap and why it is that number (`max_searches_source`).\n\nEvery combination is one search: a whole month at one destination and three trip lengths is 93 searches, the same month over two destinations is 186, and a whole month x 3 nights x 3 destinations is about 279 and takes a couple of minutes. With the caller's own key each search is one request on their RapidAPI plan, and `api_usage.hub_requests_billed` is what that plan was actually charged -- higher than the combination count when a failed search was retried.\n\nProvenance: prices from these tools come from a FlightPowers live fetch at request time, not from a cache or a stored table. A price is only meaningful together with the time it was fetched.\n\nResults are live prices and go stale within minutes: a current price comes from a new search, not from an earlier result or a cached number, and each price belongs with the time it was fetched.\n\nEvery response carries `api_usage`: what this call spent on the caller's own RapidAPI plan and what is left of it.",
   "serverInfo": {
     "name": "google-flights-mcp",
     "version": "1.0.0",
@@ -43,7 +43,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: search one-way flights"
       },
-      "description": "FlightPowers one-way fare search: live prices read from Google Flights. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- plus either one departure date or a date range. Returns each flight's price, airline, duration, stops, a bookable buy_link, and Google's historical price range (price_insights_low / price_insights_high) so you can say whether a fare is actually a good deal.\n\nUse it for any one-way fare question, including open-ended ones. For a flexible search make ONE call with a date range and/or several destinations -- do NOT call it once per date. 'Cheapest flight to Sri Lanka anywhere in October' is one call, not thirty.\n\nEach date/destination combination is one search; the count comes back in `api_usage`.\n\n`by_destination` carries one entry per destination you asked for -- empty ones included, each with a `reason` -- so read it before telling a user a destination has no flights.\n\nFares go stale within minutes: when the user asks for a current price, search again rather than reusing an earlier result.",
+      "description": "FlightPowers one-way fare search: live prices read from Google Flights. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- plus either one departure date or a date range. Returns each flight's price, airline, duration, stops, a bookable buy_link, and Google's historical price range (price_insights_low / price_insights_high), the band that shows whether a fare is actually a good deal.\n\nSuited to any one-way fare question, including open-ended ones. One call accepts a date range and several destinations and searches every combination: 'Cheapest flight to Sri Lanka anywhere in October' is one call, not thirty.\n\nEach date/destination combination is one search; the count comes back in `api_usage`.\n\n`by_destination` carries one entry per requested destination -- empty ones included, each with a `reason` that separates a destination with no flights from one that was not searched, whose search failed, or whose fares did not fit in `limit`.\n\nFares go stale within minutes: a current price comes from a new search, not from an earlier result.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -60,7 +60,7 @@
               }
             ],
             "default": null,
-            "description": "Restrict to these airline codes, e.g. [\"LY\"]."
+            "description": "Restricts the search to these airline codes, e.g. [\"LY\"]."
           },
           "arrival_time_max": {
             "anyOf": [
@@ -164,7 +164,7 @@
               }
             ],
             "default": null,
-            "description": "Exclude these airline codes."
+            "description": "Airline codes left out of the results."
           },
           "from_airport": {
             "description": "Origin IATA code, e.g. \"TLV\". One origin per search; a second one is refused rather than searched.",
@@ -185,7 +185,7 @@
               }
             ],
             "default": null,
-            "description": "Only return flights at or below this price."
+            "description": "Only flights at or below this price are returned."
           },
           "max_searches": {
             "anyOf": [
@@ -197,7 +197,7 @@
               }
             ],
             "default": null,
-            "description": "The searches this call may make, up or down. Leave it out for the normal behaviour: with the caller's own key the cap covers the request when the request is reasonable (a whole month at three trip lengths is 93 combinations and a whole month x 3 nights x 3 destinations is 279; both run in full) and anything past it is sampled evenly across the range rather than cut short. Set it lower to spend fewer searches on a wide search, or higher -- to a hard maximum of 300 -- for a grid wider than that."
+            "description": "The searches this call may make, up or down. Unset is the normal behaviour: with the caller's own key the cap covers the request when the request is reasonable (a whole month at three trip lengths is 93 combinations and a whole month x 3 nights x 3 destinations is 279; both run in full) and anything past it is sampled evenly across the range rather than cut short. A lower value spends fewer searches on a wide search; a higher one -- to a hard maximum of 300 -- covers a grid wider than that."
           },
           "max_stops": {
             "anyOf": [
@@ -224,7 +224,7 @@
               }
             ],
             "default": null,
-            "description": "One entry per traveller, not a count: 1 adult, 2 child (aged 2-11), 3 infant on lap, 4 infant in seat, e.g. [1, 1, 2] for two adults and a child. At least one adult, each infant on lap needs its own adult, at most 9. Omit for one adult. A counts list [adults, children, infants], e.g. [2, 1, 0], or a bare [2] for two adults, is recognised and converted to codes before the search; a list that is valid as codes is searched as codes."
+            "description": "One entry per traveller, not a count: 1 adult, 2 child (aged 2-11), 3 infant on lap, 4 infant in seat, e.g. [1, 1, 2] for two adults and a child. At least one adult, each infant on lap needs its own adult, at most 9. Left out, it means one adult. A counts list [adults, children, infants], e.g. [2, 1, 0], or a bare [2] for two adults, is recognised and converted to codes before the search; a list that is valid as codes is searched as codes."
           },
           "seat_type": {
             "anyOf": [
@@ -267,11 +267,11 @@
               }
             ],
             "default": null,
-            "description": "Leave unset. Switches the search to a second, independent flight data source instead of the usual Google Flights page read. Unset already escalates to that source once, automatically, after a search's retries have failed. true forces it inline on every attempt -- much slower, and it can time out. false disables it entirely, that automatic retry included."
+            "description": "Default: unset. Switches the search to a second, independent flight data source instead of the usual Google Flights page read. Unset already escalates to that source once, automatically, after a search's retries have failed. true forces it inline on every attempt -- much slower, and it can time out. false disables it entirely, that automatic retry included."
           },
           "verbose": {
             "default": false,
-            "description": "Return every field the upstream sends on each fare, and every fare that was selected, with no row bound. Off by default: a result carries the best rows by your sort_by in a compact shape (dates, destination, airline, stops, duration, price, trip length and the booking link), because a wide search over a month and several destinations otherwise produces a megabyte of JSON that some hosts refuse to put in the conversation at all. Turn it on when you need the arrival times, the per-leg stop counts, the raw stop details or more rows than results_returned; results_total always says how many there were.",
+            "description": "Returns every field the upstream sends on each fare, and every fare that was selected, with no row bound. Off by default: a result carries the best rows by the requested sort_by in a compact shape (dates, destination, airline, stops, duration, price, trip length and the booking link), because a wide search over a month and several destinations otherwise produces a megabyte of JSON that some hosts refuse to put in the conversation at all. When true, it adds the arrival times, the per-leg stop counts, the raw stop details and every row past results_returned; results_total always says how many there were.",
             "type": "boolean"
           }
         },
@@ -284,7 +284,7 @@
       "name": "search_oneway_flights",
       "outputSchema": {
         "additionalProperties": true,
-        "description": "A completed flight search. Read search_status before reading results: an empty array means 'no flights' only when search_status is 'empty'.",
+        "description": "A completed flight search. An empty `results` array means 'no flights' only when search_status is 'empty'.",
         "properties": {
           "api_usage": {
             "additionalProperties": true,
@@ -308,7 +308,7 @@
                 "type": "integer"
               },
               "note": {
-                "description": "The same figures as a sentence, for the model to relay.",
+                "description": "The same figures as one plain sentence.",
                 "type": "string"
               },
               "plan_requests_limit": {
@@ -413,7 +413,7 @@
               ],
               "type": "object"
             },
-            "description": "One entry per destination the REQUEST asked for, in request order, present whether or not that destination has any flights in `results`. A destination with an empty `rows` array is a hole in the answer, and `reason` says which kind of hole: 'no_flights' (searched, answered, Google has nothing), 'search_failed' (searched and the search errored, so nothing is known), 'not_in_limit' (searched, found flights, none fitted in `limit`) or 'not_searched' (never searched -- the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\nRead this rather than inferring coverage from `results`: a destination missing from `results` looks identical to one that has no flights, and they are not the same answer. `row_count` is how many of this destination's fares were selected; the fares themselves are in `results` and are not repeated here. `verbose: true` restores the `rows` array for callers that read it.",
+            "description": "One entry per destination the REQUEST asked for, in request order, present whether or not that destination has any flights in `results`. A destination with an empty `rows` array is a hole in the answer, and `reason` says which kind of hole: 'no_flights' (searched, answered, Google has nothing), 'search_failed' (searched and the search errored, so nothing is known), 'not_in_limit' (searched, found flights, none fitted in `limit`) or 'not_searched' (never searched -- the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\nCoverage comes from here, not from `results`: a destination missing from `results` looks identical to one that has no flights, and they are not the same answer. `row_count` is how many of this destination's fares were selected; the fares themselves are in `results` and are not repeated here. `verbose: true` restores the `rows` array for callers that consume it.",
             "type": "object"
           },
           "from_airport": {
@@ -421,11 +421,11 @@
             "type": "string"
           },
           "message": {
-            "description": "Present when there is something the model must relay to the user rather than silently absorb -- no results, a degraded search, a missing key or a spent quota.",
+            "description": "Present when the result carries a statement for the person who asked -- no results, a degraded search, a missing key or a spent quota.",
             "type": "string"
           },
           "needs_api_key": {
-            "description": "True when no usable RapidAPI key arrived with the call, or the upstream rejected the one that did. No search was run and nothing was billed; signup_url and message say how to fix it.",
+            "description": "True when no usable RapidAPI key arrived with the call, or the upstream rejected the one that did. No search was run and nothing was billed; signup_url and message describe the fix.",
             "type": "boolean"
           },
           "partial": {
@@ -442,7 +442,7 @@
             "type": "integer"
           },
           "results": {
-            "description": "The fares found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.\n\nThis is the TOP results_returned of results_total rows by the sort you asked for -- cheapest first by default, shortest first on sort_by 'duration' -- with every destination that has fares still represented. Each row is in a compact shape: destination, the date or dates, trip length in nights on a round trip, airline (both legs on a round trip), stops, duration, the price as a string and a number, Google's price band with its verdict, and the booking link. The origin is on the response as from_airport rather than repeated on every row. Arrival descriptions, per-leg stop counts, raw stop details and the duration in seconds are dropped; `verbose: true` returns them, and every row that was selected, on that call.",
+            "description": "The fares found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.\n\nThis is the TOP results_returned of results_total rows by the requested sort -- cheapest first by default, shortest first on sort_by 'duration' -- with every destination that has fares still represented. Each row is in a compact shape: destination, the date or dates, trip length in nights on a round trip, airline (both legs on a round trip), stops, duration, the price as a string and a number, Google's price band with its verdict, and the booking link. The origin is on the response as from_airport rather than repeated on every row. Arrival descriptions, per-leg stop counts, raw stop details and the duration in seconds are dropped; `verbose: true` returns them, and every row that was selected, on that call.",
             "items": {
               "additionalProperties": true,
               "type": "object"
@@ -461,7 +461,7 @@
           },
           "search_coverage": {
             "additionalProperties": true,
-            "description": "What was actually searched. Present whether or not the request was truncated, so a model can state honestly what its answer rests on.",
+            "description": "What was actually searched. Present whether or not the request was truncated, so the answer's basis is on the record either way.",
             "properties": {
               "departure_dates_searched": {
                 "items": {
@@ -496,7 +496,7 @@
                 "type": "integer"
               },
               "stopped_early": {
-                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but do not cover the whole range.",
+                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but cover only part of the range.",
                 "type": "string"
               },
               "truncated": {
@@ -507,7 +507,7 @@
             "type": "object"
           },
           "search_status": {
-            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan.",
+            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and the caller's own RapidAPI key, once connected, removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help; a request with fewer dates or nights, or a larger plan, does.",
             "enum": [
               "ok",
               "empty",
@@ -551,7 +551,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: search round-trip flights"
       },
-      "description": "FlightPowers round-trip fare search: live prices read from Google Flights, priced as paired legs rather than two separate one-ways. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure date or range, and either a return date or a trip length in nights. Returns the total price for both legs, per-leg airline, stops and duration, and a single bookable buy_link for the trip.\n\nUse it for any return-trip fare question. For a flexible search make ONE call: pass departure_date_from / departure_date_to for the outbound range and `nights` instead of return_date to compare trip lengths -- '5 to 7 nights in Rome sometime in May' is one call.\n\nA WHOLE MONTH is one call too. departure_date_from \"2026-10-01\", departure_date_to \"2026-10-31\" and nights [3, 4, 5] prices every departure day in October at three trip lengths and tells you which combination is cheapest. That is 93 date/night combinations and the cap rises to cover them by itself -- do not narrow the question to make it fit, and do not split it into several calls.\n\nEach date/night/destination combination is ONE search, so a month at three trip lengths is 93 of them and the same month across two destinations is 186. Say that number before running a search that large if the user has not asked for it in so many words. A search that fails with a server error is retried once, so with the caller's own key the figure to quote back is `api_usage.hub_requests_billed` (retries included), not the combination count.\n\n`by_destination` carries one entry per destination you asked for -- empty ones included, each with a `reason` -- so read it before telling a user a destination has no flights.\n\nFares go stale within minutes: when the user asks for a current price, search again rather than reusing an earlier result.",
+      "description": "FlightPowers round-trip fare search: live prices read from Google Flights, priced as paired legs rather than two separate one-ways. Input: origin and destination IATA codes -- the destination may be several codes, as \"BCN,LIS,ATH\" or [\"BCN\",\"LIS\",\"ATH\"] -- a departure date or range, and either a return date or a trip length in nights. Returns the total price for both legs, per-leg airline, stops and duration, and a single bookable buy_link for the trip.\n\nSuited to any return-trip fare question. A flexible search is ONE call: departure_date_from / departure_date_to set the outbound range and `nights`, in place of return_date, compares trip lengths -- '5 to 7 nights in Rome sometime in May' is one call.\n\nA WHOLE MONTH is one call too. departure_date_from \"2026-10-01\", departure_date_to \"2026-10-31\" and nights [3, 4, 5] prices every departure day in October at three trip lengths and shows which combination is cheapest. That is 93 date/night combinations and the cap rises to cover them by itself, so the whole grid runs in that one call.\n\nEach date/night/destination combination is ONE search, so a month at three trip lengths is 93 of them and the same month across two destinations is 186. A search that fails with a server error is retried once, so with the caller's own key the figure the plan is charged is `api_usage.hub_requests_billed` (retries included), not the combination count.\n\n`by_destination` carries one entry per requested destination -- empty ones included, each with a `reason` that separates a destination with no flights from one that was not searched, whose search failed, or whose fares did not fit in `limit`.\n\nFares go stale within minutes: a current price comes from a new search, not from an earlier result.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -573,7 +573,7 @@
               }
             ],
             "default": null,
-            "description": "Restrict the outbound leg to these airlines."
+            "description": "Restricts the outbound leg to these airlines."
           },
           "departure_date": {
             "anyOf": [
@@ -642,7 +642,7 @@
               }
             ],
             "default": null,
-            "description": "Only return trips at or below this total price."
+            "description": "Only trips at or below this total price are returned."
           },
           "max_return_stops": {
             "anyOf": [
@@ -666,7 +666,7 @@
               }
             ],
             "default": null,
-            "description": "The searches this call may make, up or down. Leave it out for the normal behaviour: with the caller's own key the cap covers the request when the request is reasonable (a whole month at three trip lengths is 93 combinations and a whole month x 3 nights x 3 destinations is 279; both run in full) and anything past it is sampled evenly across the range rather than cut short. Set it lower to spend fewer searches on a wide search, or higher -- to a hard maximum of 300 -- for a grid wider than that."
+            "description": "The searches this call may make, up or down. Unset is the normal behaviour: with the caller's own key the cap covers the request when the request is reasonable (a whole month at three trip lengths is 93 combinations and a whole month x 3 nights x 3 destinations is 279; both run in full) and anything past it is sampled evenly across the range rather than cut short. A lower value spends fewer searches on a wide search; a higher one -- to a hard maximum of 300 -- covers a grid wider than that."
           },
           "nights": {
             "anyOf": [
@@ -699,7 +699,7 @@
               }
             ],
             "default": null,
-            "description": "One entry per traveller, not a count: 1 adult, 2 child (aged 2-11), 3 infant on lap, 4 infant in seat, e.g. [1, 1, 2] for two adults and a child. At least one adult, each infant on lap needs its own adult, at most 9. Omit for one adult. A counts list [adults, children, infants], e.g. [2, 1, 0], or a bare [2] for two adults, is recognised and converted to codes before the search; a list that is valid as codes is searched as codes."
+            "description": "One entry per traveller, not a count: 1 adult, 2 child (aged 2-11), 3 infant on lap, 4 infant in seat, e.g. [1, 1, 2] for two adults and a child. At least one adult, each infant on lap needs its own adult, at most 9. Left out, it means one adult. A counts list [adults, children, infants], e.g. [2, 1, 0], or a bare [2] for two adults, is recognised and converted to codes before the search; a list that is valid as codes is searched as codes."
           },
           "return_airline_codes": {
             "anyOf": [
@@ -714,7 +714,7 @@
               }
             ],
             "default": null,
-            "description": "Restrict the return leg to these airlines."
+            "description": "Restricts the return leg to these airlines."
           },
           "return_date": {
             "anyOf": [
@@ -726,7 +726,7 @@
               }
             ],
             "default": null,
-            "description": "Fixed return date. Use this OR nights, not both."
+            "description": "Fixed return date. Mutually exclusive with `nights`."
           },
           "returns_per_outbound": {
             "anyOf": [
@@ -781,11 +781,11 @@
               }
             ],
             "default": null,
-            "description": "Leave unset. Switches the search to a second, independent flight data source instead of the usual Google Flights page read. Unset already escalates to that source once, automatically, after a search's retries have failed. true forces it inline on every attempt -- much slower, and it can time out. false disables it entirely, that automatic retry included."
+            "description": "Default: unset. Switches the search to a second, independent flight data source instead of the usual Google Flights page read. Unset already escalates to that source once, automatically, after a search's retries have failed. true forces it inline on every attempt -- much slower, and it can time out. false disables it entirely, that automatic retry included."
           },
           "verbose": {
             "default": false,
-            "description": "Return every field the upstream sends on each fare, and every fare that was selected, with no row bound. Off by default: a result carries the best rows by your sort_by in a compact shape (dates, destination, airline, stops, duration, price, trip length and the booking link), because a wide search over a month and several destinations otherwise produces a megabyte of JSON that some hosts refuse to put in the conversation at all. Turn it on when you need the arrival times, the per-leg stop counts, the raw stop details or more rows than results_returned; results_total always says how many there were.",
+            "description": "Returns every field the upstream sends on each fare, and every fare that was selected, with no row bound. Off by default: a result carries the best rows by the requested sort_by in a compact shape (dates, destination, airline, stops, duration, price, trip length and the booking link), because a wide search over a month and several destinations otherwise produces a megabyte of JSON that some hosts refuse to put in the conversation at all. When true, it adds the arrival times, the per-leg stop counts, the raw stop details and every row past results_returned; results_total always says how many there were.",
             "type": "boolean"
           }
         },
@@ -798,7 +798,7 @@
       "name": "search_roundtrip_flights",
       "outputSchema": {
         "additionalProperties": true,
-        "description": "A completed flight search. Read search_status before reading results: an empty array means 'no flights' only when search_status is 'empty'.",
+        "description": "A completed flight search. An empty `results` array means 'no flights' only when search_status is 'empty'.",
         "properties": {
           "api_usage": {
             "additionalProperties": true,
@@ -822,7 +822,7 @@
                 "type": "integer"
               },
               "note": {
-                "description": "The same figures as a sentence, for the model to relay.",
+                "description": "The same figures as one plain sentence.",
                 "type": "string"
               },
               "plan_requests_limit": {
@@ -927,7 +927,7 @@
               ],
               "type": "object"
             },
-            "description": "One entry per destination the REQUEST asked for, in request order, present whether or not that destination has any flights in `results`. A destination with an empty `rows` array is a hole in the answer, and `reason` says which kind of hole: 'no_flights' (searched, answered, Google has nothing), 'search_failed' (searched and the search errored, so nothing is known), 'not_in_limit' (searched, found flights, none fitted in `limit`) or 'not_searched' (never searched -- the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\nRead this rather than inferring coverage from `results`: a destination missing from `results` looks identical to one that has no flights, and they are not the same answer. `row_count` is how many of this destination's fares were selected; the fares themselves are in `results` and are not repeated here. `verbose: true` restores the `rows` array for callers that read it.",
+            "description": "One entry per destination the REQUEST asked for, in request order, present whether or not that destination has any flights in `results`. A destination with an empty `rows` array is a hole in the answer, and `reason` says which kind of hole: 'no_flights' (searched, answered, Google has nothing), 'search_failed' (searched and the search errored, so nothing is known), 'not_in_limit' (searched, found flights, none fitted in `limit`) or 'not_searched' (never searched -- the per-call fan-out cap sampled it away). 'ok' means it has rows.\n\nCoverage comes from here, not from `results`: a destination missing from `results` looks identical to one that has no flights, and they are not the same answer. `row_count` is how many of this destination's fares were selected; the fares themselves are in `results` and are not repeated here. `verbose: true` restores the `rows` array for callers that consume it.",
             "type": "object"
           },
           "from_airport": {
@@ -935,11 +935,11 @@
             "type": "string"
           },
           "message": {
-            "description": "Present when there is something the model must relay to the user rather than silently absorb -- no results, a degraded search, a missing key or a spent quota.",
+            "description": "Present when the result carries a statement for the person who asked -- no results, a degraded search, a missing key or a spent quota.",
             "type": "string"
           },
           "needs_api_key": {
-            "description": "True when no usable RapidAPI key arrived with the call, or the upstream rejected the one that did. No search was run and nothing was billed; signup_url and message say how to fix it.",
+            "description": "True when no usable RapidAPI key arrived with the call, or the upstream rejected the one that did. No search was run and nothing was billed; signup_url and message describe the fix.",
             "type": "boolean"
           },
           "partial": {
@@ -956,7 +956,7 @@
             "type": "integer"
           },
           "results": {
-            "description": "The fares found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.\n\nThis is the TOP results_returned of results_total rows by the sort you asked for -- cheapest first by default, shortest first on sort_by 'duration' -- with every destination that has fares still represented. Each row is in a compact shape: destination, the date or dates, trip length in nights on a round trip, airline (both legs on a round trip), stops, duration, the price as a string and a number, Google's price band with its verdict, and the booking link. The origin is on the response as from_airport rather than repeated on every row. Arrival descriptions, per-leg stop counts, raw stop details and the duration in seconds are dropped; `verbose: true` returns them, and every row that was selected, on that call.",
+            "description": "The fares found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'.\n\nThis is the TOP results_returned of results_total rows by the requested sort -- cheapest first by default, shortest first on sort_by 'duration' -- with every destination that has fares still represented. Each row is in a compact shape: destination, the date or dates, trip length in nights on a round trip, airline (both legs on a round trip), stops, duration, the price as a string and a number, Google's price band with its verdict, and the booking link. The origin is on the response as from_airport rather than repeated on every row. Arrival descriptions, per-leg stop counts, raw stop details and the duration in seconds are dropped; `verbose: true` returns them, and every row that was selected, on that call.",
             "items": {
               "additionalProperties": true,
               "type": "object"
@@ -975,7 +975,7 @@
           },
           "search_coverage": {
             "additionalProperties": true,
-            "description": "What was actually searched. Present whether or not the request was truncated, so a model can state honestly what its answer rests on.",
+            "description": "What was actually searched. Present whether or not the request was truncated, so the answer's basis is on the record either way.",
             "properties": {
               "departure_dates_searched": {
                 "items": {
@@ -1010,7 +1010,7 @@
                 "type": "integer"
               },
               "stopped_early": {
-                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but do not cover the whole range.",
+                "description": "Present when something other than the cap ended the fan-out. 'deadline': the call reached its time limit and the remaining combinations were never sent or billed, so the results are real but cover only part of the range.",
                 "type": "string"
               },
               "truncated": {
@@ -1021,7 +1021,7 @@
             "type": "object"
           },
           "search_status": {
-            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and connecting your own RapidAPI key removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help -- ask for fewer dates or nights, or move to a larger plan.",
+            "description": "Whether the underlying search actually completed, read from the backend's X-Search-Status header. 'ok': every combination searched returned results. 'empty': the search completed and Google genuinely has no itineraries for it -- a real answer, not a failure. 'partial': some combinations returned results and some failed, so the list is incomplete. 'degraded': every combination failed, so the search did not happen and an empty list means nothing; this case is also flagged with isError: true and is safe to retry. 'trial_exhausted': the free signed-in allowance on this server is spent for today, so nothing was searched and nothing was billed; it renews at 00:00 UTC and the caller's own RapidAPI key, once connected, removes the cap. Retrying does not help. 'quota_exceeded': the search was refused because the caller's remaining allowance or plan quota cannot cover the number of combinations asked for; combos_requested and combos_allowed_now carry the two numbers. Nothing was searched beyond what it cost to read the quota. Retrying the same search does not help; a request with fewer dates or nights, or a larger plan, does.",
             "enum": [
               "ok",
               "empty",

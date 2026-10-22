@@ -77,7 +77,7 @@ class TestDegradedReadsAsAlarming:
         )
         assert _first_line(result) == DEGRADED_FIRST_LINE
         assert _first_line(result).startswith("WARNING: this search did not complete.")
-        assert "do not tell the user whether flights exist" in _first_line(result)
+        assert "says nothing about whether flights exist" in _first_line(result)
 
     @pytest.mark.asyncio
     async def test_the_degraded_line_contains_no_digits(self):

@@ -122,11 +122,11 @@ class TestInstructionsCarryNoKeyHowto:
     def test_the_allowance_and_connect_stay(self, products):
         text = _instructions(products, with_trial=True)
         assert "10 free searches a day after sign-in with Google" in text
-        assert f"connect your own RapidAPI key at {CONNECT} for more" in text
+        assert f"with the caller's own RapidAPI key, connected at {CONNECT}, searches run on their RapidAPI plan" in text
         # Said once: the allowance sentence already names /connect.
         assert text.count(CONNECT) == 1
 
     @pytest.mark.parametrize("products", ["hotels", "both", "flights"])
     def test_without_the_allowance_connect_is_still_named(self, products):
         text = _instructions(products, with_trial=False)
-        assert f"Connect your own RapidAPI key once at {CONNECT}" in text
+        assert f"A RapidAPI key connected once at {CONNECT}" in text

@@ -127,10 +127,10 @@ def trial_quota_refusal(
             f"searched and nothing was spent. {pro_line(signup_url)} "
             f"({pricing_url(signup_url)}); subscribe there and connect your "
             f"key once at {connect_url}, and this allowance stops applying. "
-            "Or ask for "
-            f"{_shrink_hint(requested, remaining_today)}. Tell the user this "
-            "rather than reporting a plain failure, and do not retry the same "
-            "search."
+            "Or a search of "
+            f"{_shrink_hint(requested, remaining_today)} needs fewer of "
+            "today's free searches. Retrying the same "
+            "search will not help."
         ),
         "trial": {
             "day_cap": day_cap,
@@ -177,8 +177,8 @@ def plan_quota_refusal(
         else (
             f" The {len(rows)} fare(s) below came from that one search and "
             "are real, but they cover a single date out of the range you "
-            "asked about -- say so rather than presenting them as the "
-            "cheapest of the whole range."
+            "asked about, so whether they are the cheapest of the whole range "
+            "is unknown."
         )
     )
     return {
@@ -196,11 +196,10 @@ def plan_quota_refusal(
             f"{remaining_month:,} left this month{plan_bit}. It was stopped "
             f"after {spent_probing} request, which is what it cost to read "
             "the remaining quota, so the rest of the plan's balance is "
-            f"untouched.{kept} Ask for "
-            f"{_shrink_hint(requested, remaining_month)}, "
-            f"or move to a larger plan at {pricing_url(signup_url)}. "
-            "Tell the user this rather than reporting a plain failure, and "
-            "do not retry the same search."
+            f"untouched.{kept} A search of "
+            f"{_shrink_hint(requested, remaining_month)} needs fewer "
+            f"requests; a larger plan is at {pricing_url(signup_url)}. "
+            "Retrying the same search will not help."
         ),
         "signup_url": signup_url,
     }

@@ -317,9 +317,7 @@ def trial_exhausted_result(
             f"({pricing_url(signup_url)}). Subscribe there and connect your "
             f"key once at "
             f"{connect_url} -- nothing to change in this client, searches "
-            "start working immediately and are billed to your own plan. "
-            "Tell the user this rather than "
-            "reporting a plain failure."
+            "start working immediately and are billed to your own plan."
         ),
         "trial": {
             "used_today": state.used_today,
@@ -386,8 +384,9 @@ def trial_tail(day_cap: int, connect_url: str) -> str:
     """
     return (
         f"{day_cap} free searches a day after sign-in with Google, shared by "
-        "FlightPowers' flights and hotels servers, nothing to paste; connect "
-        f"your own RapidAPI key at {connect_url} for more."
+        "FlightPowers' flights and hotels servers, nothing to paste; with the "
+        f"caller's own RapidAPI key, connected at {connect_url}, searches run "
+        "on their RapidAPI plan instead of this allowance."
     )
 
 

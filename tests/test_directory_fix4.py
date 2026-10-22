@@ -342,7 +342,8 @@ class TestFreeUserText:
         assert "invoice" not in text
         assert "billed to the caller's own plan" not in text
         assert "nothing is billed to the user" in text
-        assert "narrow a wide" in text
+        assert "a narrower question" in text
+        assert "a wider grid needs the caller's own key" in text
         assert "free-search counter" in text
 
     def test_instructions_without_the_allowance_say_nothing_of_it(self):
@@ -358,13 +359,13 @@ class TestFreeUserText:
             "description"
         ]
         assert "That holds with the caller's own key." in desc
-        assert "narrow it to fit" in desc
-        assert "whole month needs their own key" in desc
+        assert "refused before anything runs" in desc
+        assert "a whole-month scan needs the caller's own key" in desc
 
     async def test_no_allowance_line_without_the_allowance(self):
         desc = (await _plain_tools())["search_roundtrip_flights"]["description"]
         assert "free sign-in" not in desc
-        assert "do not narrow the question to make it fit" in desc
+        assert "so the whole grid runs in that one call" in desc
 
     def test_api_usage_schema_names_both_cases(self):
         from src.output_schema import _API_USAGE

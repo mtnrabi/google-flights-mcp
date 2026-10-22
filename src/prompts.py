@@ -33,8 +33,8 @@ def register_prompts(mcp: FastMCP) -> None:
         name="cheapest_dates",
         title="Find the cheapest dates to fly",
         description=(
-            "Scan a whole month (or any date range) for the lowest fare on a "
-            "route and say whether the winner is actually a good price."
+            "Scans a whole month (or any date range) for the lowest fare on a "
+            "route and reports whether the winner is actually a good price."
         ),
     )
     @document_params
@@ -70,8 +70,8 @@ def register_prompts(mcp: FastMCP) -> None:
         name="compare_destinations",
         title="Compare destinations on price",
         description=(
-            "Price several destinations from one origin over the same dates and "
-            "rank them, to answer 'where can I go cheaply'."
+            "Prices several destinations from one origin over the same dates and "
+            "ranks them, to answer 'where can I go cheaply'."
         ),
     )
     @document_params
@@ -102,7 +102,7 @@ def register_prompts(mcp: FastMCP) -> None:
         name="plan_trip",
         title="Plan a round trip on a budget",
         description=(
-            "Find round-trip options for a destination across flexible trip "
+            "Finds round-trip options for a destination across flexible trip "
             "lengths, priced as paired legs, within a budget."
         ),
     )
@@ -141,8 +141,8 @@ def register_prompts(mcp: FastMCP) -> None:
         name="is_this_fare_good",
         title="Is this fare a good deal?",
         description=(
-            "Check a specific route and date against Google's historical price "
-            "band and answer book-now or wait."
+            "Checks a specific route and date against Google's historical price "
+            "band and answers book-now or wait."
         ),
     )
     @document_params
@@ -207,7 +207,7 @@ def register_hotel_prompts(mcp: FastMCP) -> None:
         name="hotel_price_two_dates",
         title="Compare a hotel's price on two sets of dates",
         description=(
-            "Price one named hotel for two different stays and say which is "
+            "Prices one named hotel for two different stays and shows which is "
             "cheaper, total and per night."
         ),
     )
@@ -240,7 +240,7 @@ def register_hotel_prompts(mcp: FastMCP) -> None:
         name="find_hotel",
         title="Find a hotel by name for my dates",
         description=(
-            "Look up one named hotel for given dates: live availability, "
+            "Looks up one named hotel for given dates: live availability, "
             "price and a booking link."
         ),
     )
@@ -272,7 +272,7 @@ def register_hotel_prompts(mcp: FastMCP) -> None:
         name="hotel_rate_by_country",
         title="Compare a hotel's rate as seen from two countries",
         description=(
-            "Price the same stay at one hotel as a shopper in two different "
+            "Prices the same stay at one hotel as a shopper in two different "
             "countries would see it."
         ),
     )

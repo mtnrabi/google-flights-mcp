@@ -65,14 +65,14 @@ class TestToolText:
             "description"
         ]
         assert "not thirty. That holds with the caller's own key." in desc
-        assert "whole month needs their own key" in desc
+        assert "a whole-month scan needs the caller's own key" in desc
 
     async def test_hotel_ranges_carry_the_allowance_line(self, hotels):
         tools = await _trial_tools(hotels)
         for name in ("search_hotels", "find_hotel_by_name"):
             desc = tools[name]["description"]
             assert "On the free sign-in allowance (10 searches a day" in desc, name
-            assert "a wider range needs their own key" in desc, name
+            assert "a wider range needs the caller's own key" in desc, name
 
     async def test_no_allowance_line_without_the_allowance(self):
         tools = await _plain_tools()
@@ -118,14 +118,16 @@ class TestStaleness:
             desc = tool["description"] or ""
             assert "never reuse" not in desc.lower(), name
             if "stale within minutes" in desc:
-                assert "when the user asks for a current price" in desc, name
+                assert "a current price comes from a new search" in desc or (
+                    "a current comparison comes from a new call" in desc
+                ), name
 
     @pytest.mark.parametrize("products", ["flights", "hotels"])
     def test_instructions(self, products):
         text = build_instructions(make_settings(products=products))
         assert "Never reuse" not in text
-        assert "When the user asks for a current price, search again" in text
-        assert "always say when the data was fetched" in text
+        assert "a current price comes from a new search" in text
+        assert "each price belongs with the time it was fetched" in text
 
 
 # ── 3. the refusal card says searches to a free user ─────────────────────
