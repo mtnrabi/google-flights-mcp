@@ -806,11 +806,12 @@ class TestWhatTheToolsSay:
             )
         assert listed.status_code == 200
         assert "3 free searches a day after sign-in with Google" in listed.text
-        # The allowance first, then the key -- and no price anywhere in
-        # instructions (2026-10-22): the price waits for a wall.
-        assert listed.text.index("3 free searches a day after sign-in") < (
-            listed.text.index("With your own RapidAPI key")
-        )
+        # The allowance names /connect, and the instructions carry no price,
+        # no listing URL and no header / query-key how-to (2026-10-22): those
+        # wait for a wall.
+        assert "connect your own RapidAPI key at" in listed.text
+        assert "rapidapi.com" not in listed.text
+        assert "x-rapidapi-key" not in listed.text
         assert "$" not in listed.text
         assert "/pricing" not in listed.text
 
@@ -1126,21 +1127,6 @@ class TestTheMultiSourcePathsAskForTheirOwnKey:
         )
         assert f"{ORIGIN}/connect" in reply["message"]
         # Nothing was billed to us, and nothing was billed to them.
-        assert trial_hotels.upstream.keys_seen == []
-        assert await trial_hotels.trial_store.usage(SUB, utc_day()) == 0
-
-    async def test_multi_provider_search_hotels_is_refused(self, trial_hotels):
-        async with Session(trial_hotels) as session:
-            token = await _bearer(session.http)
-            reply = await call_tool(
-                session.http,
-                "/mcp",
-                {**self.COMPARE_ARGS, "providers": ["booking", "airbnb"]},
-                {"authorization": f"Bearer {token}"},
-                tool="search_hotels",
-            )
-        assert reply["needs_api_key"] is True
-        assert "single-source searches only" in reply["message"]
         assert trial_hotels.upstream.keys_seen == []
         assert await trial_hotels.trial_store.usage(SUB, utc_day()) == 0
 

@@ -651,11 +651,13 @@ class TestTheHonestContractPerStay:
         assert seen == []
 
     @pytest.mark.asyncio
-    async def test_a_range_on_two_sources_is_refused_rather_than_guessed(self):
+    async def test_a_range_naming_providers_is_refused_before_a_request(self):
+        # `search_hotels` has no `providers` argument since 2026-10-22, so a
+        # caller still sending one is refused before anything is spent.
         handler, seen = recording_handler(lambda ci, _co: [])
         mcp = build_with_upstream(handler, fallback_rapidapi_key=KEY)
         async with Client(mcp) as client:
-            with pytest.raises(ToolError, match="one source at a time"):
+            with pytest.raises(ToolError):
                 await client.call_tool(
                     "search_hotels",
                     {

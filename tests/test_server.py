@@ -1204,10 +1204,13 @@ class TestServerInstructions:
         assert "stale" in text
 
     @pytest.mark.parametrize("products", ("flights", "hotels", "both"))
-    def test_every_deployment_explains_how_to_pass_a_key(self, products):
+    def test_no_deployment_carries_the_key_howto(self, products):
+        # 2026-10-22: the listing URL and the header / query-key how-to left
+        # `instructions` (a directory reads them before any wall); the
+        # missing-key refusal, the 401 body and /connect still carry them.
         text = self._instructions(products)
-        assert "x-rapidapi-key" in text
-        assert self.SIGNUP[products] in text
+        assert "x-rapidapi-key" not in text
+        assert self.SIGNUP[products] not in text
 
     @pytest.mark.asyncio
     async def test_the_string_reaches_the_client_over_the_wire(self):

@@ -13,9 +13,13 @@ So the same three steps now ride in four places, and this file is what keeps
 them from drifting apart the way the flights/hotels copy did before (see
 test_product_copy.py's docstring for that history):
 
-1. `credentials.key_howto_steps` / `key_howto_block` / `key_howto_tail` --
-   the single source the other three read from.
-2. The server `instructions` string (`build_server`/`build_instructions`).
+1. `credentials.key_howto_steps` / `key_howto_block` -- the single source
+   the refusals read from.
+2. (until 2026-10-22) the server `instructions` string. Now the opposite is
+   asserted: `key_howto_tail` names /connect (or says a search without a key
+   answers with the steps) and carries no listing URL and no header /
+   `?rapidapi_key=` how-to, because a directory reviewer reads instructions
+   and the server is submitted as OAuth.
 3. (until 2026-10-22) the tail of every tool description -- now the
    opposite is asserted: no description carries a listing or a price.
 4. The `how_to_get_a_key` object on a missing-key or invalid-key tool result,
@@ -74,11 +78,19 @@ class TestKeyHowtoSteps:
         assert block["signup_url"] == "https://rapidapi.test/x"
         assert block["how"] == key_howto_steps("https://rapidapi.test/x", "Example API")
 
-    def test_tail_is_the_short_version_of_the_same_facts(self):
-        tail = key_howto_tail("https://rapidapi.test/x", "Example API")
-        assert isinstance(tail, str)
-        assert_carries_the_three_steps(tail, "https://rapidapi.test/x")
+    def test_tail_names_connect_and_no_passing_method(self):
+        tail = key_howto_tail("Example API", "https://srv.test/connect")
+        assert "https://srv.test/connect" in tail
+        for way in THREE_WAYS:
+            assert way not in tail
+        assert "rapidapi.com" not in tail
+
+    def test_tail_without_connect_points_at_the_refusal(self):
+        tail = key_howto_tail("Example API")
         assert "Example API" in tail
+        assert "steps" in tail
+        for way in THREE_WAYS:
+            assert way not in tail
 
 
 class TestMissingKeyMessageStillHoldsAllThree:
@@ -91,28 +103,18 @@ class TestMissingKeyMessageStillHoldsAllThree:
         assert_carries_the_three_steps(text, "https://rapidapi.test/x")
 
 
-class TestInstructionsCarryTheTail:
-    @pytest.mark.parametrize("products", ("flights", "hotels"))
-    def test_single_product_instructions(self, products):
+class TestInstructionsCarryNoKeyHowto:
+    @pytest.mark.parametrize("products", ("flights", "hotels", "both"))
+    def test_no_listing_url_and_no_passing_method(self, products):
         settings = make_settings(
             products=products, signup_url=DEFAULT_SIGNUP_URLS[products]
         )
         text = build_instructions(settings)
-        assert_carries_the_three_steps(text, DEFAULT_SIGNUP_URLS[products])
-
-    def test_combined_deployment_instructions(self):
-        settings = make_settings(
-            products="both", signup_url=DEFAULT_SIGNUP_URLS["both"]
-        )
-        text = build_instructions(settings)
-        # "both" concatenates two listings into the one signup slot; the
-        # shared invariant (three ways, api_usage) still has to hold, and
-        # both listings must be reachable in the text.
         for way in THREE_WAYS:
-            assert way in text
+            assert way not in text
+        assert "rapidapi.com" not in text
+        # What a call spent is still said, in `_SPEND`.
         assert "api_usage" in text
-        assert DEFAULT_SIGNUP_URLS["flights"] in text
-        assert DEFAULT_SIGNUP_URLS["hotels"] in text
 
 
 def listed_tools(products: str) -> list[dict]:

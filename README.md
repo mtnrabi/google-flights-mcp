@@ -1,4 +1,4 @@
-# Google Flights MCP: real-time fares your agent can search across a whole date range, ad-free
+# Google Flights MCP: real-time fares your agent can search across a whole date range
 
 An MCP server for live flight prices and hotel rates: Claude, Claude Code, Cursor, Cline and any other MCP client get
 real-time Google Flights fares and Booking.com room rates as tools. One call searches a date range and a list of destination
@@ -7,7 +7,7 @@ request (both legs, one total, one booking link). Hosted at `https://flights.fli
 `https://hotels.flightpowers.com/mcp`), nothing to install. It finds and prices, it does not book.
 
 Built by [FlightPowers](https://flightpowers.com), a travel data API for developers and AI agents: REST, MCP servers and an
-n8n node on one RapidAPI key. Sign in with Google and your first 10 searches each day are free and ad-free.
+n8n node on one RapidAPI key. Sign in with Google and your first 10 searches each day are free.
 
 **Where to get a key:** [Google Flights Live API](https://rapidapi.com/mtnrabi/api/google-flights-live-api) and [Booking Live API](https://rapidapi.com/mtnrabi/api/booking-live-api) on RapidAPI. A free pack of
 10 searches a month, then PRO is $10 for 2,500 flight searches, about a sixth of SerpApi's price per search (their cheapest
@@ -20,7 +20,7 @@ claude mcp add --transport http google-flights https://flights.flightpowers.com/
 ```
 
 In a client that supports MCP authorization, a **Sign in** button appears: you sign in with
-Google, and **your first 10 searches each day are free and ad-free on our key, with nothing to
+Google, and **your first 10 searches each day are free on our key, with nothing to
 paste**. Paste your own RapidAPI key once on the `/connect` page when you want that cap gone, and
 nothing goes in your client config either way. In a client that shows no Sign in button, bring
 the key yourself:
@@ -39,7 +39,7 @@ Hosted. Nothing to clone, nothing to build. Listed in the official MCP Registry 
 [`/health`](https://google-flights-mcp.flightpowers.com/health).
 
 **No key yet?** You do not need one to start. Add the URL above, sign in with Google, and the
-first 10 searches each UTC day run on our key, ad-free, with nothing to paste. The exact unit
+first 10 searches each UTC day run on our key, with nothing to paste. The exact unit
 counted is in [Try it with no key](#try-it-with-no-key-sign-in-with-google).
 
 **Need a key?** Subscribe to the Google Flights Live API on RapidAPI, free tier available,
@@ -73,12 +73,12 @@ Two tools that answer a *fare question*, not a *date lookup*.
 - **Know what it searched.** Every response carries `search_coverage`, so the model can say
   honestly which dates and destinations the answer is based on.
 
-Results are live fares. **They go stale within minutes: never cache a fare or reuse an earlier
-result; search again and state when the data was fetched.**
+Results are live fares. **They go stale within minutes: when you need a current price, search
+again rather than reusing an earlier result, and state when the data was fetched.**
 
 ## Try it with no key: sign in with Google
 
-A signed-in account gets **10 free searches per UTC day** on our key, ad-free, with nothing to
+A signed-in account gets **10 free searches per UTC day** on our key, with nothing to
 paste into your client. Sign in the way your client offers it, or at
 `https://flights.flightpowers.com/connect`, and ask for a fare. Ten is what the hosted
 deployment runs today; `/health` reports the live values as `trial_enabled` and `trial_day_cap`
@@ -93,8 +93,11 @@ result carries a `trial` block with the count and the cap. Past the cap the tool
 `search_status: "trial_exhausted"` and no results -- never an error, and retrying does not help;
 the allowance renews at 00:00 UTC.
 
-Comparing several sources in one call (`compare_hotel_rates`, or `search_hotels` with more than
-one `providers` entry) is not part of the allowance and asks for your own key.
+A free search is capped by what is left of the day: a range or grid larger than that (a whole
+month at three trip lengths is 93 searches) is refused before anything runs, with the counts and a
+smaller question to ask instead. With your own key the cap rises by itself to cover a month-sized
+request. Comparing several sources in one call (`compare_hotel_rates`, on a deployment that
+enables it) is not part of the allowance and asks for your own key.
 
 Connecting your own RapidAPI key removes the cap entirely. That is the next section.
 
@@ -492,7 +495,7 @@ before.
 | `search_oneway_flights` | Real-time one-way fares. Input: origin IATA, destination IATA **or a list**, and either one departure date or a date range. Returns price, airline, duration, stops, `buy_link`, and Google's historical price range so you can judge the fare. Use for any one-way question, including open-ended ones: one call with a range, never one call per date. |
 | `search_roundtrip_flights` | Real-time round-trip fares priced as **paired legs**, not two one-ways. Input: origin, destination(s), a departure date or range, and either a `return_date` or a trip length in `nights` (a number or a list like `[5,6,7]`). Returns total price, per-leg airline/stops/duration, and one `buy_link` for the trip. |
 
-The hotels deployment serves `search_hotels`, `find_hotel_by_name` and `compare_hotel_rates` instead; see [Hotels: `providers` and `compare_hotel_rates`](#hotels-providers-and-compare_hotel_rates).
+The hotels deployment serves `search_hotels` and `find_hotel_by_name` instead, both Booking.com only; `compare_hotel_rates` is registered only where `MCP_HOTEL_COMPARE=on` (off on the public deployments), see [Hotels: `compare_hotel_rates` (off by default)](#hotels-compare_hotel_rates-off-by-default).
 
 ### `search_oneway_flights`
 
@@ -725,36 +728,27 @@ Counts are `null` rather than `0` on the last two: zero reads as "nothing there"
 knows that. Top-level `search_status` is `ok` / `partial` / `empty` / `degraded` over the stays;
 every stay failing raises instead of answering with an empty list.
 
-Two deliberate refusals: a check-in range with `providers` naming more than one source (a fan-out
-times a per-source fan-out, billed to two subscriptions, that neither `search_coverage` nor
-`api_usage` can describe honestly today), and `max_searches` on a single stay, which would silently
-do nothing.
+One deliberate refusal: `max_searches` on a single stay, which would silently do nothing.
 
 **A single stay is byte-identical to what it was before this existed** -- same request body, same
 response keys, no `stays`, no `search_coverage`, no `search_status`. Asserted in
 `tests/test_hotel_date_range.py::TestTheOldShapeIsUntouched` against a frozen expectation captured
 from the previous code.
 
-## Hotels: `providers` and `compare_hotel_rates`
+## Hotels: `compare_hotel_rates` (off by default)
 
-The hotels deployment (`hotels.flightpowers.com`, the same code selected by the `Host` header)
-serves three tools. `search_hotels` and `find_hotel_by_name` also take a check-in range (above);
-`search_hotels` gained one optional argument for sources and there is one new tool.
+`search_hotels` and `find_hotel_by_name` price **Booking.com only** and take no `providers`
+argument. A caller that still sends `providers` (an earlier schema had it, though it never returned
+anything but Booking.com rows to a caller) now gets a validation error and spends nothing; drop the
+argument. Asserted in `tests/test_providers.py::TestTheDefaultDidNotMove`.
 
-| Tool | What it does |
-|---|---|
-| `search_hotels` | Live rates for a destination and dates, or for every stay a check-in range expands to. `providers` names the sources to price on: `["booking"]` (the default), `["airbnb"]`, or both. |
-| `find_hotel_by_name` | One named property, Booking.com only. Airbnb's room page carries no price, so a name lookup there would resolve to something that cannot be priced. |
-| `compare_hotel_rates` | The same stay priced on every source you have a key for, one row per source: cheapest total, median total, how many places were priced, currency, and when the rows were read. |
+`compare_hotel_rates` -- the same stay priced on every source you have a key for, one row per
+source: cheapest total, median total, how many places were priced, currency, and when the rows were
+read -- is registered only when `MCP_HOTEL_COMPARE=on`. It is **off on the public deployments**, so
+the hosted hotels server lists two tools, and the instructions name the tool only where it is
+served. The rest of this section describes that tool for a deployment that turns it on.
 
-### The default did not move
-
-`search_hotels` with no `providers` argument sends the same upstream request it always sent, to the
-same host, and answers with the same keys. So does `providers: ["booking"]`. Both are asserted in
-`tests/test_providers.py::TestTheDefaultDidNotMove`, upstream request body included -- a default is
-only a default if keeping it costs nothing.
-
-Naming a second source changes the response shape, and only then:
+Its response:
 
 ```jsonc
 {
@@ -779,7 +773,7 @@ Naming a second source changes the response shape, and only then:
   with `API_FRONT_BASE_URL` for a preview front; it holds no credential.
 
 **The Airbnb listing does not exist on RapidAPI yet, and the front ships with the provider off**, so
-today a real `providers: ["airbnb"]` call comes back as a `degraded` row saying so. That is the
+today a real `compare_hotel_rates` call with `providers: ["airbnb"]` comes back as a `degraded` row saying so. That is the
 designed answer, not a bug: an unmetered source reachable by anyone with any valid key is a gateway
 we pay for.
 
@@ -814,10 +808,10 @@ The order is the one `src/credentials.py` already documents -- source-scoped nam
 unscoped specific names, then the config blob, then generic names last and skipped entirely when a
 `config` parameter is present, because a gateway's own key under a generic name is not ours.
 
-### `filters` and `price_as_seen_from` are Booking-only
+### `filters` and `price_as_seen_from` are Booking-only in a compare
 
-On a mixed search they are sent to Booking and not to the front. On an Airbnb-only search they are
-**refused**, not dropped: a silently discarded filter returns more properties than you asked for and
+In `compare_hotel_rates` they are sent to Booking and not to the front. On an Airbnb-only compare
+they are **refused**, not dropped: a silently discarded filter returns more properties than you asked for and
 nothing says so.
 
 ## Structured output (`outputSchema`, `structuredContent`, `isError`)

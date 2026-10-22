@@ -116,24 +116,20 @@ class TestModelFacingCopy:
         )
         assert_no_foreign_product(text, products, "instructions")
         assert OWN_API[products] in text
-        assert DEFAULT_SIGNUP_URLS[products] in text
+        # No listing URL in instructions since 2026-10-22: the refusals, the
+        # 401 body and /connect carry it (test_directory_fix3.py).
+        assert DEFAULT_SIGNUP_URLS[products] not in text
 
-    def test_the_combined_deployment_names_both_listings(self):
-        """"both" sells two subscriptions, so quoting one URL for two named
-        APIs sends whichever half the caller wanted second to the wrong
-        Subscribe page."""
-        settings = make_settings(products="both")
-        text = build_instructions(settings)
-        # SIGNUP_URL is this deployment's own listing and still wins for the
-        # product it covers; the hotels half gets the listing it needs.
-        assert settings.signup_url in text
-        assert DEFAULT_SIGNUP_URLS["hotels"] in text
-
-        default = build_instructions(
-            make_settings(products="both", signup_url=DEFAULT_SIGNUP_URLS["both"])
-        )
-        assert DEFAULT_SIGNUP_URLS["flights"] in default
-        assert DEFAULT_SIGNUP_URLS["hotels"] in default
+    def test_the_combined_deployment_names_no_listing_url(self):
+        """"both" once quoted two listing URLs here; since 2026-10-22 the
+        instructions quote none, so neither half can be sent to the wrong
+        Subscribe page from this string."""
+        for signup in (None, DEFAULT_SIGNUP_URLS["both"]):
+            overrides = {"signup_url": signup} if signup else {}
+            text = build_instructions(make_settings(products="both", **overrides))
+            assert DEFAULT_SIGNUP_URLS["flights"] not in text
+            assert DEFAULT_SIGNUP_URLS["hotels"] not in text
+            assert "rapidapi.com" not in text
 
     @pytest.mark.parametrize("products", ("flights", "hotels"))
     def test_tool_descriptions_and_titles_stay_in_product(self, products):

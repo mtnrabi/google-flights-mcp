@@ -81,8 +81,8 @@ class TestCompareIsOffByDefault:
         )
         assert "compare_hotel_rates" not in off
         assert "compare_hotel_rates" in on
-        # The providers paragraph still reads on its own without it.
-        assert "`providers` on `search_hotels` prices a normal search" in off
+        # `search_hotels` lost `providers` on 2026-10-22 (test_directory_fix3).
+        assert "`providers` on `search_hotels`" not in off
 
 
 class TestPolicyPagesSayWhatIsKept:
@@ -138,7 +138,7 @@ class TestNoPriceBeforeAWall:
         )
         _no_price(text, f"{products} instructions")
         assert "10 free searches a day after sign-in" in text
-        assert f"connect a key at {CONNECT} for more" in text
+        assert f"connect your own RapidAPI key at {CONNECT} for more" in text
 
     def test_the_note_on_every_result_is_the_counter_and_connect(self):
         note = trial_note(_state(), CONNECT, DEFAULT_SIGNUP_URLS["flights"])

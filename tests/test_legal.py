@@ -121,7 +121,7 @@ class TestRenderedDocuments:
         assert "not affiliated" in render_document(name).lower()
 
     def test_support_page_gives_a_contact(self):
-        assert "matan@flightpowers.com" in support_html()
+        assert "app@flightpowers.com" in support_html()
         assert "not affiliated" in support_html().lower()
 
 

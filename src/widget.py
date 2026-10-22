@@ -176,7 +176,7 @@ A search the caller's free allowance or plan cannot pay for is refused
 outright rather than sampled down (src/quota_gate.py). It arrives here with
 no rows, a `search_status` of `quota_exceeded` and the two numbers that
 explain it, so the card draws a SMALL block -- "93 requests needed / 10
-left" and the message, which already names the two ways forward -- and never
+left" ("searches" on a free, no-key refusal) and the message, which already names the two ways forward -- and never
 a table. Rendering the usual empty table over a refusal is exactly the
 misreading the refusal exists to prevent.
 """
@@ -995,6 +995,14 @@ _FRAME_SOURCE = r"""<!doctype html>
   function footerOf(sc) {
     var u = (sc && typeof sc.api_usage === "object" && sc.api_usage) || {};
     var bits = [];
+    /* A free signed-in search ran on FlightPowers' key: its quota is not the
+       user's plan. Show the allowance counter only. */
+    var tr = (sc && typeof sc.trial === "object" && sc.trial) || null;
+    if (tr && tr.key_connected === false) {
+      var tu = num(tr.used_today), tc = num(tr.day_cap);
+      if (tu === null || tc === null) return null;
+      return el("div", "fp-ft", tu + " of " + tc + " free searches used today · renews at 00:00 UTC");
+    }
     var used = num(u.requests_used_by_this_call);
     if (used !== null) bits.push(used === 1 ? "1 request billed" : used + " requests billed");
     var left = num(u.plan_requests_remaining);
@@ -1018,9 +1026,12 @@ _FRAME_SOURCE = r"""<!doctype html>
     /* A refusal: two numbers, then the message. See the docstring. */
     if (status === "quota_exceeded") {
       var need = num(sc.combos_requested), got = num(sc.combos_allowed_now);
+      /* A free (no-key) caller counts searches, not plan requests. */
+      var unit = (sc.trial && sc.trial.key_connected === false)
+        ? " searches needed · " : " requests needed · ";
       if (need !== null && got !== null) {
         root.appendChild(el("div", "fp-quota",
-          need.toLocaleString("en-US") + " requests needed · "
+          need.toLocaleString("en-US") + unit
           + got.toLocaleString("en-US") + " left"));
       }
     }

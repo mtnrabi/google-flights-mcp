@@ -1,5 +1,7 @@
 """
-Two sources on one hotels server: `providers`, and `compare_hotel_rates`.
+Two sources on one hotels server: `compare_hotel_rates` (off unless
+MCP_HOTEL_COMPARE=on). `search_hotels` lost `providers` on 2026-10-22 and is
+Booking.com only.
 
 The four things that can go wrong here are all invisible from a green
 response, so each one has a test named after it:
@@ -267,55 +269,35 @@ class TestTheDefaultDidNotMove:
         assert json.loads(sent.content)[SOURCE_FIELD] == KEYED_SOURCE
 
     @pytest.mark.asyncio
-    async def test_naming_booking_explicitly_is_the_same_path(self):
-        recorder = Recorder()
-        mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        default = await call(mcp, "search_hotels", **STAY)
-        explicit = await call(mcp, "search_hotels", providers=["booking"], **STAY)
-        assert explicit == default
-        assert [_searched(r) for r in recorder.requests] == [STAY, STAY]
-        assert [json.loads(r.content)[SOURCE_FIELD] for r in recorder.requests] \
-            == [KEYED_SOURCE, KEYED_SOURCE]
-
-    @pytest.mark.asyncio
-    async def test_find_hotel_by_name_gained_no_providers_argument(self):
-        """It stays Booking-only: Airbnb's room page carries no price, so a
-        name lookup there would resolve to something that cannot be priced."""
+    async def test_neither_hotel_search_tool_takes_providers(self):
+        """2026-10-22: `search_hotels` lost `providers`. The api front answers
+        Airbnb `provider_unavailable`, so a parameter offering it promised a
+        source this deployment does not serve. `find_hotel_by_name` never had
+        it: Airbnb's room page carries no price."""
         mcp = build_with_upstream(Recorder(), fallback_rapidapi_key=KEY)
         async with Client(mcp) as client:
             tools = {t.name: t for t in await client.list_tools()}
         assert "providers" not in tools["find_hotel_by_name"].inputSchema["properties"]
-        assert "providers" in tools["search_hotels"].inputSchema["properties"]
+        assert "providers" not in tools["search_hotels"].inputSchema["properties"]
+
+    @pytest.mark.asyncio
+    async def test_a_caller_still_sending_providers_spends_nothing(self):
+        recorder = Recorder()
+        mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
+        with pytest.raises(ToolError):
+            await call(mcp, "search_hotels", providers=["airbnb"], **STAY)
+        assert recorder.to("flightpowers.com") == []
 
 
-# ── 4. both sources ─────────────────────────────────────────────────────
+# ── 4. both sources (compare_hotel_rates, behind MCP_HOTEL_COMPARE) ─────
 
 
 class TestBothSources:
     @pytest.mark.asyncio
-    async def test_rows_are_merged_and_each_row_says_where_it_came_from(self):
-        recorder = Recorder()
-        mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        out = await call(
-            mcp, "search_hotels", providers=["booking", "airbnb"], **STAY
-        )
-
-        assert out["result_count"] == 3
-        assert [r["provider"] for r in out["results"]] == [
-            BOOKING,
-            AIRBNB,
-            AIRBNB,
-        ]
-        # The scale rides on the row, because an 8.4 and a 4.86 are not
-        # comparable numbers and nothing else on the row says so.
-        assert out["results"][0]["rating_scale"] == 10
-        assert out["results"][1]["rating_scale"] == 5
-
-    @pytest.mark.asyncio
     async def test_airbnb_goes_to_the_api_front_with_the_provider_field(self):
         recorder = Recorder()
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        await call(mcp, "search_hotels", providers=["airbnb"], **STAY)
+        await call(mcp, "compare_hotel_rates", providers=["airbnb"], **STAY)
 
         front = recorder.to("flightpowers.com")
         assert len(front) == 1
@@ -332,26 +314,18 @@ class TestBothSources:
         and a 200 proves nothing about attribution."""
         recorder = Recorder()
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        await call(mcp, "search_hotels", providers=["airbnb"], **STAY)
+        await call(mcp, "compare_hotel_rates", providers=["airbnb"], **STAY)
 
         sent = recorder.to("flightpowers.com")[0]
         assert sent.headers["x-fp-client"] == f"mcp-hotels/{SERVER_VERSION}"
         assert sent.headers["x-rapidapi-key"] == KEY
 
     @pytest.mark.asyncio
-    async def test_a_single_source_answer_carries_no_comparison_caveats(self):
-        recorder = Recorder()
-        mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        out = await call(mcp, "search_hotels", providers=["airbnb"], **STAY)
-        assert out["caveats"] == []
-        assert [r["provider"] for r in out["providers"]] == [AIRBNB]
-
-    @pytest.mark.asyncio
     async def test_the_billing_note_does_not_claim_one_request(self):
         recorder = Recorder()
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
         out = await call(
-            mcp, "search_hotels", providers=["booking", "airbnb"], **STAY
+            mcp, "compare_hotel_rates", providers=["booking", "airbnb"], **STAY
         )
         assert out["api_usage"]["requests_used_by_this_call"] == 2
         assert "own" in out["api_usage"]["note"]
@@ -370,17 +344,15 @@ class TestSkipped:
         )
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
         out = await call(
-            mcp, "search_hotels", providers=["booking", "airbnb"], **STAY
+            mcp, "compare_hotel_rates", providers=["booking", "airbnb"], **STAY
         )
 
+        # The other source still answered.
         assert [r["provider"] for r in out["providers"]] == [BOOKING]
         skipped = out["providers_skipped"]
         assert [r["provider"] for r in skipped] == [AIRBNB]
         assert skipped[0]["reason"] == "not_subscribed"
         assert skipped[0]["subscribe_url"] == ota.SUBSCRIBE_URLS[AIRBNB]
-        # The other source still answered.
-        assert out["result_count"] == 1
-        assert out["results"][0]["provider"] == BOOKING
 
     @pytest.mark.asyncio
     async def test_a_refused_source_is_never_retried_on_our_own_key(self):
@@ -388,7 +360,7 @@ class TestSkipped:
             airbnb=lambda _r: httpx.Response(403, json={"message": "not subscribed"})
         )
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        await call(mcp, "search_hotels", providers=["airbnb"], **STAY)
+        await call(mcp, "compare_hotel_rates", providers=["airbnb"], **STAY)
         # One attempt, one key, and that key is the caller's.
         assert len(recorder.to("flightpowers.com")) == 1
         assert recorder.keys_sent == {KEY}
@@ -400,7 +372,7 @@ class TestSkipped:
         )
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
         out = await call(
-            mcp, "search_hotels", providers=["booking", "airbnb"], **STAY
+            mcp, "compare_hotel_rates", providers=["booking", "airbnb"], **STAY
         )
         assert any("airbnb was not searched" in c for c in out["caveats"])
 
@@ -409,7 +381,7 @@ class TestSkipped:
         recorder = Recorder()
         mcp = build_with_upstream(recorder, fallback_rapidapi_key="")
         out = await call(
-            mcp, "search_hotels", providers=["booking", "airbnb"], **STAY
+            mcp, "compare_hotel_rates", providers=["booking", "airbnb"], **STAY
         )
         assert out["needs_api_key"] is True
         assert recorder.requests == []
@@ -439,7 +411,7 @@ class TestDegraded:
         )
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
         out = await call(
-            mcp, "search_hotels", providers=["booking", "airbnb"], **STAY
+            mcp, "compare_hotel_rates", providers=["booking", "airbnb"], **STAY
         )
 
         rows = {r["provider"]: r for r in out["providers"]}
@@ -449,7 +421,7 @@ class TestDegraded:
         # nothing there.
         assert rows[AIRBNB]["count"] is None
         # The other source still returned its rows.
-        assert out["result_count"] == 1
+        assert rows[BOOKING]["count"] == 1
         assert any("could not answer" in c or "did not answer" in c
                    for c in out["caveats"])
 
@@ -467,7 +439,7 @@ class TestDegraded:
             )
         )
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        out = await call(mcp, "search_hotels", providers=["airbnb"], **STAY)
+        out = await call(mcp, "compare_hotel_rates", providers=["airbnb"], **STAY)
         row = out["providers"][0]
         assert row["search_status"] == "degraded"
         assert row["search_reason"] == "page_unreadable"
@@ -482,12 +454,12 @@ class TestDegraded:
         recorder = Recorder(airbnb=airbnb)
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
         out = await call(
-            mcp, "search_hotels", providers=["booking", "airbnb"], **STAY
+            mcp, "compare_hotel_rates", providers=["booking", "airbnb"], **STAY
         )
         rows = {r["provider"]: r for r in out["providers"]}
         assert rows[AIRBNB]["search_status"] == "degraded"
         assert rows[AIRBNB]["search_reason"] == "timeout"
-        assert out["result_count"] == 1
+        assert rows[BOOKING]["count"] == 1
 
     @pytest.mark.asyncio
     async def test_an_empty_source_is_an_answer_and_says_so(self):
@@ -495,77 +467,22 @@ class TestDegraded:
             airbnb=lambda _r: httpx.Response(200, json={"properties": []})
         )
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        out = await call(mcp, "search_hotels", providers=["airbnb"], **STAY)
+        out = await call(mcp, "compare_hotel_rates", providers=["airbnb"], **STAY)
         row = out["providers"][0]
         assert row["search_status"] == "empty"
         assert row["count"] == 0
 
 
-# ── 7. booking-only arguments ───────────────────────────────────────────
+# ── 7. an unknown source ────────────────────────────────────────────────
 
 
-class TestBookingOnlyArguments:
-    @pytest.mark.asyncio
-    async def test_filters_on_an_airbnb_only_search_are_refused_not_dropped(self):
-        mcp = build_with_upstream(Recorder(), fallback_rapidapi_key=KEY)
-        with pytest.raises(ToolError) as exc:
-            await call(
-                mcp,
-                "search_hotels",
-                providers=["airbnb"],
-                filters=["free_cancellation"],
-                **STAY,
-            )
-        assert "booking" in str(exc.value)
-
-    @pytest.mark.asyncio
-    async def test_price_as_seen_from_on_an_airbnb_only_search_is_refused(self):
-        mcp = build_with_upstream(Recorder(), fallback_rapidapi_key=KEY)
-        with pytest.raises(ToolError):
-            await call(
-                mcp,
-                "search_hotels",
-                providers=["airbnb"],
-                price_as_seen_from="de",
-                **STAY,
-            )
-
-    @pytest.mark.asyncio
-    async def test_they_reach_booking_and_not_the_front_on_a_mixed_search(self):
-        recorder = Recorder()
-        mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        await call(
-            mcp,
-            "search_hotels",
-            providers=["booking", "airbnb"],
-            filters=["gym"],
-            price_as_seen_from="de",
-            **STAY,
-        )
-        booking_body = recorder.body("rapidapi.com")
-        assert booking_body["filters"] == ["gym"]
-        assert booking_body["proxy_country"] == "de"
-        front_body = recorder.body("flightpowers.com")
-        assert "filters" not in front_body
-        assert "proxy_country" not in front_body
-
-    @pytest.mark.asyncio
-    async def test_budget_per_night_is_forwarded_for_the_front_to_translate(self):
-        """The front maps it onto Airbnb's `price_max` and reports the rewrite.
-        Mapping it here as well would apply the ceiling twice."""
-        recorder = Recorder()
-        mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
-        await call(
-            mcp, "search_hotels", providers=["airbnb"], budget_per_night=120, **STAY
-        )
-        assert recorder.body("flightpowers.com")["budget_per_night"] == 120
-
+class TestUnknownProvider:
     @pytest.mark.asyncio
     async def test_an_unknown_provider_is_rejected_before_a_request_is_spent(self):
         recorder = Recorder()
         mcp = build_with_upstream(recorder, fallback_rapidapi_key=KEY)
         with pytest.raises(ToolError):
-            await call(mcp, "search_hotels", providers=["expedia"], **STAY)
+            await call(mcp, "compare_hotel_rates", providers=["expedia"], **STAY)
         assert recorder.requests == []
 
 

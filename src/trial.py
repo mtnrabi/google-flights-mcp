@@ -239,6 +239,36 @@ def trial_note(state: TrialState, connect_url: str, signup_url: str) -> dict[str
     }
 
 
+def allowance_usage(state: TrialState, searches: int) -> dict[str, Any]:
+    """The `api_usage` block on a result served from the allowance.
+
+    REPLACES the keyed block, never merges into it. The keyed block quotes the
+    RapidAPI quota headers, and on this path those headers describe OUR key's
+    plan: on 2026-10-22 a free signed-in search answered "This search used 1 of
+    your RapidAPI plan's requests; 44475 of 50000 remain" and the card footer
+    read "44,475 left on your plan" -- our quota, shown to a user who has no
+    plan, and to any directory reviewer. A free caller gets the allowance
+    counter and nothing about a plan, an invoice or billing.
+
+    `searches` is what the allowance was charged for this call (the
+    reservation minus what was handed back), which is also the number of
+    searches that reached the upstream.
+    """
+    searches = max(0, int(searches))
+    return {
+        "requests_used_by_this_call": searches,
+        "free_searches_used_today": state.used_today,
+        "free_searches_day_cap": state.day_cap,
+        "free_searches_remaining_today": state.remaining,
+        "note": (
+            f"This search used {searches} of the free searches; "
+            f"{state.used_today:,} of {state.day_cap:,} used today"
+            f"{_who(state)}, {state.remaining:,} left. The allowance renews "
+            "at 00:00 UTC."
+        ),
+    }
+
+
 #: `reason` on `trial_exhausted_result`. Two different true sentences.
 #: `SPENT` is the ordinary case: this account has used its allowance.
 #: `UNAVAILABLE` is the reservation losing a race with the account's own other
@@ -357,7 +387,7 @@ def trial_tail(day_cap: int, connect_url: str) -> str:
     return (
         f"{day_cap} free searches a day after sign-in with Google, shared by "
         "FlightPowers' flights and hotels servers, nothing to paste; connect "
-        f"a key at {connect_url} for more."
+        f"your own RapidAPI key at {connect_url} for more."
     )
 
 

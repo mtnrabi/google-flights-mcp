@@ -270,8 +270,8 @@ def key_howto_steps(signup_url: str, api_name: str) -> list[str]:
     One function so the same three sentences cannot drift apart the way
     `missing_key_message` once did across products (see its docstring) --
     `missing_key_message` and `key_howto_block` (the structured error field)
-    build on this; `key_howto_tail` (the instructions sentence) is a separate,
-    price-free short form.
+    build on this; `key_howto_tail` (the instructions sentence) is a separate
+    short form with no price, no URL and no passing methods.
     """
     return [
         f"1. Subscribe to the {api_name} at {pricing_url(signup_url)}: "
@@ -303,33 +303,27 @@ def key_howto_block(signup_url: str, api_name: str) -> dict[str, Any]:
     }
 
 
-def key_howto_tail(signup_url: str, api_name: str, connect_url: str = "") -> str:
+def key_howto_tail(api_name: str, connect_url: str = "") -> str:
     """The short version, for the server `instructions` string -- the place a
-    client reads before it has called anything. A model that only learns how
-    to pass a key from inside a refusal has already failed the user's first
-    request.
+    client reads before it has called anything.
 
-    No price and no plan name (2026-10-22). `instructions` is served at
-    `initialize` to every client before anyone has hit a limit, and both
-    directories read it: Anthropic's policy rejects promotion beyond what the
-    tool does, and OpenAI's bans displaying plans or promoting upgrades (it
-    allows a link to an informational page, which is all the listing URL
-    here is). The price and the listing's pricing tab are said where a user
-    hits a wall instead: the cap, a quota refusal, a missing-key refusal, the
-    401 body and /connect. `connect_url` is empty on a deployment without
-    /connect."""
-    where = (
-        f"connect it once at {connect_url}, or pass it"
-        if connect_url
-        else "pass it"
-    )
+    No price, no plan name, no listing URL and no header / `?rapidapi_key=`
+    how-to (2026-10-22). `instructions` is served at `initialize` to every
+    client before anyone has hit a limit, and both directories read it: a
+    sales link in model context reads as promotion, and naming the header and
+    query-string options on a server submitted as OAuth invites a user to
+    paste a key into a chat or a URL. The full how-to -- listing, price, the
+    three ways to pass a key -- is said where a user hits a wall instead: a
+    missing-key refusal, the cap, the 401 body and /connect. `connect_url` is
+    empty on a deployment without /connect."""
+    if connect_url:
+        return (
+            f"Connect your own RapidAPI key once at {connect_url} to run "
+            "searches on your own plan."
+        )
     return (
-        f"With your own RapidAPI key for the {api_name} ({signup_url}), "
-        f"searches run on your own RapidAPI plan: {where} as an "
-        "`x-rapidapi-key` header (preferred), a `?rapidapi_key=` query "
-        "parameter on the server URL, or your client's own API key field -- "
-        "first non-empty wins. Every response reports what it spent and what "
-        "is left in `api_usage`."
+        f"Searches run on your own RapidAPI key for the {api_name}; a search "
+        "without one answers with the steps to get and pass one."
     )
 
 

@@ -2,7 +2,7 @@
   "health": {
     "ads": false,
     "connect_enabled": false,
-    "contact_email": "matan@flightpowers.com",
+    "contact_email": "app@flightpowers.com",
     "mcp_endpoint": "https://hotels.golden.test/mcp",
     "oauth_enabled": false,
     "oauth_mcp_endpoint": null,
@@ -16,7 +16,7 @@
     "trial_day_cap": 0,
     "trial_enabled": false
   },
-  "instructions": "FlightPowers: real-time Booking.com hotel availability and nightly pricing, ad-free. With your own RapidAPI key for the Booking Live API (https://rapidapi.com/mtnrabi/api/booking-live-api), searches run on your own RapidAPI plan: pass it as an `x-rapidapi-key` header (preferred), a `?rapidapi_key=` query parameter on the server URL, or your client's own API key field -- first non-empty wins. Every response reports what it spent and what is left in `api_usage`.\n\nReach for `search_hotels` and `find_hotel_by_name` whenever a question needs a CURRENT room rate rather than a description of a property: what a stay costs, what is available on given dates, how properties compare right now, or how a price moves over time.\n\n`search_hotels` takes a free-text destination the way a person says it (\"Rome\", \"Tokyo Shibuya\") plus check-in and check-out dates, and returns the bookable properties with price, review score and count, room type, location and a booking link. Narrow it with `budget_per_night` and `filters` -- 24 Booking.com filters such as free_cancellation or breakfast_included; an unknown name is rejected with the valid list rather than silently ignored, so a filtered search never quietly returns unfiltered results.\n\n`providers` on `search_hotels` prices a normal search on more than one source: [\"booking\"] is the default and every existing call keeps it, and naming a second source merges its rows in with a `provider` field on each one. Each source is its own RapidAPI subscription.\n\n`find_hotel_by_name` prices ONE named property. Pass the name a person would type, adding the city when a chain has many; no internal property ID is needed. Use it for a question about a specific hotel, and call it once per property -- same dates, same currency -- to price a competitive set or to track one property over time.\n\n`price_as_seen_from` is what this server can do that a general hotel lookup cannot. Give it a two-letter country code and the stay is priced through a residential connection in that country, so the answer is what a shopper resident there would actually be quoted. Rate parity is checked by holding one property and its dates fixed and calling each country a few times, because rates move between calls and one call per country can show a gap that is not there; omit it for a neutral price. Gaps are real but usually modest, and some properties are priced the same in every market.\n\n`search_hotels` and `find_hotel_by_name` also take a check-in RANGE (`checkin_date_from`, `checkin_date_to`) and a `nights` value (a number, or a list like [2, 3, 7]) instead of a fixed check-out date, and price every stay that expands to in ONE call. Reach for it whenever the dates are open -- \"cheapest week in May\", \"is the 12th cheaper than the 19th\" -- rather than picking one date and calling its price the cheapest. The answer is `stays`, one entry per stay with its cheapest property, its per-night price and its median, plus `cheapest_overall`; `results` holds the full property list for the cheapest stay only. `search_coverage` names the exact stays priced, a stay the cap sampled away says `not_searched` rather than going missing, and a stay whose search errored says `degraded`, which is not \"no rooms\".\n\nThat range is the only fan-out here: every other call is exactly one request against the caller's plan, so pricing a five-property set costs five, and a range costs one request per stay. `max_searches` caps it.\n\nProvenance: prices from these tools come from a FlightPowers live fetch at request time, not from a cache or a stored table. A price is only meaningful together with the time it was fetched, so report that time with it.\n\nResults are live prices and go stale within minutes. Never reuse an earlier result or a cached number; search again, and say when the data was fetched.\n\nEvery response carries `api_usage`: what this call spent on the caller's own RapidAPI plan and what is left of it.",
+  "instructions": "FlightPowers: real-time Booking.com hotel availability and nightly pricing. Searches run on your own RapidAPI key for the Booking Live API; a search without one answers with the steps to get and pass one.\n\nReach for `search_hotels` and `find_hotel_by_name` whenever a question needs a CURRENT room rate rather than a description of a property: what a stay costs, what is available on given dates, how properties compare right now, or how a price moves over time.\n\n`search_hotels` takes a free-text destination the way a person says it (\"Rome\", \"Tokyo Shibuya\") plus check-in and check-out dates, and returns the bookable properties with price, review score and count, room type, location and a booking link. Narrow it with `budget_per_night` and `filters` -- 24 Booking.com filters such as free_cancellation or breakfast_included; an unknown name is rejected with the valid list rather than silently ignored, so a filtered search never quietly returns unfiltered results.\n\n`find_hotel_by_name` prices ONE named property. Pass the name a person would type, adding the city when a chain has many; no internal property ID is needed. Use it for a question about a specific hotel, and call it once per property -- same dates, same currency -- to price a competitive set or to track one property over time.\n\n`price_as_seen_from` takes a two-letter country code, and the stay is priced through a residential connection in that country, so the answer is what a shopper resident there would actually be quoted. Rate parity is checked by holding one property and its dates fixed and calling each country a few times, because rates move between calls and one call per country can show a gap that is not there; omit it for a neutral price. Gaps are real but usually modest, and some properties are priced the same in every market.\n\n`search_hotels` and `find_hotel_by_name` also take a check-in RANGE (`checkin_date_from`, `checkin_date_to`) and a `nights` value (a number, or a list like [2, 3, 7]) instead of a fixed check-out date, and price every stay that expands to in ONE call. Reach for it whenever the dates are open -- \"cheapest week in May\", \"is the 12th cheaper than the 19th\" -- rather than picking one date and calling its price the cheapest. The answer is `stays`, one entry per stay with its cheapest property, its per-night price and its median, plus `cheapest_overall`; `results` holds the full property list for the cheapest stay only. `search_coverage` names the exact stays priced, a stay the cap sampled away says `not_searched` rather than going missing, and a stay whose search errored says `degraded`, which is not \"no rooms\".\n\nThat range is the only fan-out here: every other call is exactly one search, so pricing a five-property set costs five, and a range costs one search per stay. `max_searches` caps it.\n\nProvenance: prices from these tools come from a FlightPowers live fetch at request time, not from a cache or a stored table. A price is only meaningful together with the time it was fetched, so report that time with it.\n\nResults are live prices and go stale within minutes. When the user asks for a current price, search again rather than reusing an earlier result or a cached number, and always say when the data was fetched.\n\nEvery response carries `api_usage`: what this call spent on the caller's own RapidAPI plan and what is left of it.",
   "serverInfo": {
     "name": "booking-hotels-mcp",
     "version": "1.0.0",
@@ -36,7 +36,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: search hotels"
       },
-      "description": "FlightPowers hotel search: live Booking.com availability and nightly prices for a destination and date range. Input: a free-text destination the way a person would say it (\"Rome\", \"Tokyo Shibuya\"), plus check-in and check-out dates. Returns each property's price, review score, room type, location, latitude/longitude and a booking link.\n\nSet price_as_seen_from to a two-letter country code to price the same stay the way a shopper resident in that country would see it, which no other travel tool here can do. Gaps are real but usually modest and property-dependent, and rates move between calls, so hold one named property fixed, call each country a few times, and never read one call per country as a gap.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and every check-in date is priced separately. The answer is stays -- one entry per stay with its cheapest property, per-night price and median -- plus cheapest_overall, and the full property list for the cheapest stay only. Each stay is one search; max_searches caps it, and a request that expands past the cap is sampled evenly across the range and says so in search_coverage.\n\nSet providers to price the same stay on more than one source in one call: [\"booking\"] (the default), [\"airbnb\"], or both. Booking rows rate out of 10 and Airbnb rows out of 5, so read rating_scale on every row before comparing two of them. A source you have no RapidAPI key for is not called and is named in providers_skipped, never quietly dropped.\n\nRates go stale within minutes: never reuse an earlier result, search again.",
+      "description": "FlightPowers hotel search: live Booking.com availability and nightly prices for a destination and date range. Input: a free-text destination the way a person would say it (\"Rome\", \"Tokyo Shibuya\"), plus check-in and check-out dates. Returns each property's price, review score, room type, location, latitude/longitude and a booking link.\n\nSet price_as_seen_from to a two-letter country code to price the same stay the way a shopper resident in that country would see it. Gaps are real but usually modest and property-dependent, and rates move between calls, so hold one named property fixed, call each country a few times, and never read one call per country as a gap.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and every check-in date is priced separately. The answer is stays -- one entry per stay with its cheapest property, per-night price and median -- plus cheapest_overall, and the full property list for the cheapest stay only. Each stay is one search; max_searches caps it, and a request that expands past the cap is sampled evenly across the range and says so in search_coverage.\n\nRates go stale within minutes: when the user asks for a current price, search again rather than reusing an earlier result.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -165,7 +165,7 @@
               }
             ],
             "default": null,
-            "description": "The billed requests this call may make, up or down. One stay is one request, so a 30-day range at two lengths is 60 and a month at three is 93 -- the cap rises to cover a request that size by itself. Set it lower to spend less, or higher (hard maximum 200) for a wider grid; either way the range is sampled evenly across the calendar rather than cut short at the front."
+            "description": "The searches this call may make, up or down. One stay is one request, so a 30-day range at two lengths is 60 and a month at three is 93 -- with the caller's own key the cap rises to cover a request that size by itself. Set it lower to spend less, or higher (hard maximum 200) for a wider grid; either way the range is sampled evenly across the calendar rather than cut short at the front."
           },
           "nights": {
             "anyOf": [
@@ -196,21 +196,6 @@
             ],
             "default": null,
             "description": "Two-letter country code, e.g. \"de\". Prices the stay through a residential connection in that country, so the result is what a shopper resident there would be quoted. For a rate-parity check hold one named property fixed and call each country a few times, because rates move between calls and one call per country can show a gap that is not there. Omit it for a neutral price."
-          },
-          "providers": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Which sources to price this stay on, e.g. [\"booking\"], [\"airbnb\"] or [\"booking\", \"airbnb\"]. Defaults to [\"booking\"]. Each source is a separate RapidAPI subscription, so a source you have no key for is not called; it comes back named in providers_skipped with the reason and where to subscribe, rather than silently missing. filters and price_as_seen_from apply to booking only; airbnb takes price_min, price_max and room_types instead, and rows from it carry rating_scale 5 where booking's carry 10."
           }
         },
         "required": [
@@ -225,10 +210,22 @@
         "properties": {
           "api_usage": {
             "additionalProperties": true,
-            "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
+            "description": "With the caller's own key: what this call cost their RapidAPI plan, and what remains on it. On a free signed-in search (`trial` present): the day's free-search counter instead, and no plan figures -- the search ran on FlightPowers' key and nothing is billed to the user. Present on every response that reached the upstream, including a degraded one.",
             "properties": {
+              "free_searches_day_cap": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "free_searches_remaining_today": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "free_searches_used_today": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "hub_requests_billed": {
-                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. This is the figure the invoice will show.",
+                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. With the caller's own key this is the figure their RapidAPI plan is charged. Absent on a free search.",
                 "minimum": 0,
                 "type": "integer"
               },
@@ -252,13 +249,6 @@
           },
           "applied_filters": {
             "description": "Which of the requested filters the upstream actually applied. Untyped: the shape is the upstream's, echoed through."
-          },
-          "caveats": {
-            "description": "Sentences that must be read before one source is called cheaper than another -- differing rating scales, differing tax treatment, differing currencies, a source that did not answer.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           },
           "cheapest_overall": {
             "anyOf": [
@@ -336,173 +326,6 @@
             "description": "Present when some stays failed but others were priced. Plain text saying how much of the request the answer covers.",
             "type": "string"
           },
-          "providers": {
-            "description": "One entry per source that was called, in the order they were requested. Only present when `providers` named more than the default source.",
-            "items": {
-              "additionalProperties": true,
-              "description": "What one accommodation source answered. Present for every source that was CALLED, whether or not it answered: a source with search_status 'degraded' carries a reason, a null count and no prices, which is not the same answer as a source that found nothing.",
-              "properties": {
-                "cheapest_link": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "cheapest_name": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "cheapest_total": {
-                  "anyOf": [
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "count": {
-                  "anyOf": [
-                    {
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "How many properties from this source carried a price. Null when the source did not answer -- zero would read as 'nothing there', which a failed search does not know."
-                },
-                "currency": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "The currency THIS row's totals are in. Rows in different currencies are not comparable and nothing is converted."
-                },
-                "detail": {
-                  "description": "Plain text for the model to relay to a human.",
-                  "type": "string"
-                },
-                "median_total": {
-                  "anyOf": [
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "provider": {
-                  "description": "Which source this row is about, e.g. 'booking'.",
-                  "type": "string"
-                },
-                "rating_scale": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "What a review score from this source is out of: 10 on Booking, 5 on Airbnb. Read it before comparing two scores."
-                },
-                "retrieved_at": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "When these rows were read, taken from the rows themselves rather than from when this answer was assembled."
-                },
-                "search_reason": {
-                  "type": "string"
-                },
-                "search_status": {
-                  "description": "'ok': the source answered with priced results. 'empty': it answered and had nothing for that stay -- a real answer. 'degraded': it was asked and could not answer, so count is null and an empty list from it means nothing.",
-                  "enum": [
-                    "ok",
-                    "empty",
-                    "degraded",
-                    "skipped"
-                  ],
-                  "type": "string"
-                },
-                "taxes_included": {
-                  "anyOf": [
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Whether this source's totals include tax. Null means it has not been established for that source, not that tax is excluded."
-                },
-                "top": {
-                  "description": "The cheapest few priced rows from this source.",
-                  "items": {
-                    "additionalProperties": true,
-                    "type": "object"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "provider",
-                "search_status"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "providers_skipped": {
-            "description": "Sources that were NOT called, each named with why and where to subscribe. A source here contributed nothing to results and is counted nowhere. It is listed rather than dropped because a silently missing source is indistinguishable from a source that had nothing.",
-            "items": {
-              "additionalProperties": true,
-              "properties": {
-                "detail": {
-                  "type": "string"
-                },
-                "provider": {
-                  "type": "string"
-                },
-                "reason": {
-                  "description": "'no_key': no RapidAPI key for that source's listing arrived with the call. 'not_subscribed': the key supplied is not subscribed to that listing. 'key_rejected': the key was refused outright.",
-                  "type": "string"
-                },
-                "subscribe_url": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "provider",
-                "reason"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
           "quota_exhausted": {
             "description": "True when the caller's RapidAPI plan has no requests left for the current period.",
             "type": "boolean"
@@ -512,7 +335,7 @@
             "type": "integer"
           },
           "results": {
-            "description": "The properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'. Each row is the source's own object, passed through. latitude and longitude are the property's WGS84 coordinates in decimal degrees, from the source that answered (Booking.com on Booking rows, Airbnb on Airbnb rows), null when the source publishes none.",
+            "description": "The properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'. Each row is the source's own object, passed through. latitude and longitude are the property's WGS84 coordinates in decimal degrees, from Booking.com, null when it publishes none.",
             "items": {
               "additionalProperties": true,
               "properties": {
@@ -772,7 +595,7 @@
         "readOnlyHint": true,
         "title": "FlightPowers: find one hotel by name"
       },
-      "description": "FlightPowers single-property lookup: live Booking.com availability and pricing for one named property. Input: the hotel name a person would type (adding the city helps when a chain has many properties) plus check-in and check-out dates -- no internal property ID needed, the resolution is done for you. Returns the property's price, review score, room type, latitude/longitude and a booking link. Use it to check one specific hotel, or to track a single property's price over time.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and this property is priced for every check-in date -- a rate calendar for one hotel. The answer is stays, one entry per date with that date's price and per-night rate, plus cheapest_overall. Each stay is one search; max_searches caps it, and a range that expands past the cap is sampled evenly across the calendar and says so in search_coverage.\n\nprice_as_seen_from prices the stay as a shopper resident in that country would see it. Gaps are real but usually modest and property-dependent, and rates move between calls, so call each country a few times on this same property before reporting a gap.\n\nRates go stale within minutes: never reuse an earlier result.",
+      "description": "FlightPowers single-property lookup: live Booking.com availability and pricing for one named property. Input: the hotel name a person would type (adding the city helps when a chain has many properties) plus check-in and check-out dates -- no internal property ID needed, the resolution is done for you. Returns the property's price, review score, room type, latitude/longitude and a booking link. Use it to check one specific hotel, or to track a single property's price over time.\n\nA date range and a nights value price several stays in one call, like the flights tools: pass checkin_date_from, checkin_date_to and nights (a number, or a list like [2, 3, 7]) instead of a fixed checkin_date/checkout_date, and this property is priced for every check-in date -- a rate calendar for one hotel. The answer is stays, one entry per date with that date's price and per-night rate, plus cheapest_overall. Each stay is one search; max_searches caps it, and a range that expands past the cap is sampled evenly across the calendar and says so in search_coverage.\n\nprice_as_seen_from prices the stay as a shopper resident in that country would see it. Gaps are real but usually modest and property-dependent, and rates move between calls, so call each country a few times on this same property before reporting a gap.\n\nRates go stale within minutes: when the user asks for a current price, search again rather than reusing an earlier result.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -874,7 +697,7 @@
               }
             ],
             "default": null,
-            "description": "The billed requests this call may make, up or down. One stay is one request; the cap rises by itself to cover a month-sized request, and anything past the cap in force is sampled evenly across the calendar rather than cut short at the front."
+            "description": "The searches this call may make, up or down. One stay is one request; with the caller's own key the cap rises by itself to cover a month-sized request, and anything past the cap in force is sampled evenly across the calendar rather than cut short at the front."
           },
           "nights": {
             "anyOf": [
@@ -919,10 +742,22 @@
         "properties": {
           "api_usage": {
             "additionalProperties": true,
-            "description": "What this call cost the caller's own RapidAPI plan, and what remains on it. Present on every response that reached the upstream, including a degraded one -- a search that failed was still billed.",
+            "description": "With the caller's own key: what this call cost their RapidAPI plan, and what remains on it. On a free signed-in search (`trial` present): the day's free-search counter instead, and no plan figures -- the search ran on FlightPowers' key and nothing is billed to the user. Present on every response that reached the upstream, including a degraded one.",
             "properties": {
+              "free_searches_day_cap": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "free_searches_remaining_today": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "free_searches_used_today": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "hub_requests_billed": {
-                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. This is the figure the invoice will show.",
+                "description": "How many HTTP requests RapidAPI actually billed. Larger than requests_used_by_this_call when a search failed with a server error and was retried, because the retry is billed too. With the caller's own key this is the figure their RapidAPI plan is charged. Absent on a free search.",
                 "minimum": 0,
                 "type": "integer"
               },
@@ -946,13 +781,6 @@
           },
           "applied_filters": {
             "description": "Which of the requested filters the upstream actually applied. Untyped: the shape is the upstream's, echoed through."
-          },
-          "caveats": {
-            "description": "Sentences that must be read before one source is called cheaper than another -- differing rating scales, differing tax treatment, differing currencies, a source that did not answer.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           },
           "cheapest_overall": {
             "anyOf": [
@@ -1030,173 +858,6 @@
             "description": "Present when some stays failed but others were priced. Plain text saying how much of the request the answer covers.",
             "type": "string"
           },
-          "providers": {
-            "description": "One entry per source that was called, in the order they were requested. Only present when `providers` named more than the default source.",
-            "items": {
-              "additionalProperties": true,
-              "description": "What one accommodation source answered. Present for every source that was CALLED, whether or not it answered: a source with search_status 'degraded' carries a reason, a null count and no prices, which is not the same answer as a source that found nothing.",
-              "properties": {
-                "cheapest_link": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "cheapest_name": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "cheapest_total": {
-                  "anyOf": [
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "count": {
-                  "anyOf": [
-                    {
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "How many properties from this source carried a price. Null when the source did not answer -- zero would read as 'nothing there', which a failed search does not know."
-                },
-                "currency": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "The currency THIS row's totals are in. Rows in different currencies are not comparable and nothing is converted."
-                },
-                "detail": {
-                  "description": "Plain text for the model to relay to a human.",
-                  "type": "string"
-                },
-                "median_total": {
-                  "anyOf": [
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "provider": {
-                  "description": "Which source this row is about, e.g. 'booking'.",
-                  "type": "string"
-                },
-                "rating_scale": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "What a review score from this source is out of: 10 on Booking, 5 on Airbnb. Read it before comparing two scores."
-                },
-                "retrieved_at": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "When these rows were read, taken from the rows themselves rather than from when this answer was assembled."
-                },
-                "search_reason": {
-                  "type": "string"
-                },
-                "search_status": {
-                  "description": "'ok': the source answered with priced results. 'empty': it answered and had nothing for that stay -- a real answer. 'degraded': it was asked and could not answer, so count is null and an empty list from it means nothing.",
-                  "enum": [
-                    "ok",
-                    "empty",
-                    "degraded",
-                    "skipped"
-                  ],
-                  "type": "string"
-                },
-                "taxes_included": {
-                  "anyOf": [
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Whether this source's totals include tax. Null means it has not been established for that source, not that tax is excluded."
-                },
-                "top": {
-                  "description": "The cheapest few priced rows from this source.",
-                  "items": {
-                    "additionalProperties": true,
-                    "type": "object"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "provider",
-                "search_status"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "providers_skipped": {
-            "description": "Sources that were NOT called, each named with why and where to subscribe. A source here contributed nothing to results and is counted nowhere. It is listed rather than dropped because a silently missing source is indistinguishable from a source that had nothing.",
-            "items": {
-              "additionalProperties": true,
-              "properties": {
-                "detail": {
-                  "type": "string"
-                },
-                "provider": {
-                  "type": "string"
-                },
-                "reason": {
-                  "description": "'no_key': no RapidAPI key for that source's listing arrived with the call. 'not_subscribed': the key supplied is not subscribed to that listing. 'key_rejected': the key was refused outright.",
-                  "type": "string"
-                },
-                "subscribe_url": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "provider",
-                "reason"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
           "quota_exhausted": {
             "description": "True when the caller's RapidAPI plan has no requests left for the current period.",
             "type": "boolean"
@@ -1206,7 +867,7 @@
             "type": "integer"
           },
           "results": {
-            "description": "The properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'. Each row is the source's own object, passed through. latitude and longitude are the property's WGS84 coordinates in decimal degrees, from the source that answered (Booking.com on Booking rows, Airbnb on Airbnb rows), null when the source publishes none.",
+            "description": "The properties found, already sorted and deduplicated. An empty array is only meaningful when search_status is 'empty'. Each row is the source's own object, passed through. latitude and longitude are the property's WGS84 coordinates in decimal degrees, from Booking.com, null when it publishes none.",
             "items": {
               "additionalProperties": true,
               "properties": {

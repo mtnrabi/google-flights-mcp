@@ -142,9 +142,8 @@ _HOTEL_RESULT_ROWS: dict[str, Any] = {
         "The properties found, already sorted and deduplicated. An empty "
         "array is only meaningful when search_status is 'empty'. Each row is "
         "the source's own object, passed through. latitude and longitude are "
-        "the property's WGS84 coordinates in decimal degrees, from the "
-        "source that answered (Booking.com on Booking rows, Airbnb on Airbnb "
-        "rows), null when the source publishes none."
+        "the property's WGS84 coordinates in decimal degrees, from "
+        "Booking.com, null when it publishes none."
     ),
     "items": {
         "type": "object",
@@ -162,9 +161,12 @@ _HOTEL_RESULT_ROWS: dict[str, Any] = {
 _API_USAGE: dict[str, Any] = {
     "type": "object",
     "description": (
-        "What this call cost the caller's own RapidAPI plan, and what remains "
-        "on it. Present on every response that reached the upstream, including "
-        "a degraded one -- a search that failed was still billed."
+        "With the caller's own key: what this call cost their RapidAPI plan, "
+        "and what remains on it. On a free signed-in search (`trial` present): "
+        "the day's free-search counter instead, and no plan figures -- the "
+        "search ran on FlightPowers' key and nothing is billed to the user. "
+        "Present on every response that reached the upstream, including a "
+        "degraded one."
     ),
     "properties": {
         "requests_used_by_this_call": {
@@ -182,11 +184,15 @@ _API_USAGE: dict[str, Any] = {
                 "How many HTTP requests RapidAPI actually billed. Larger "
                 "than requests_used_by_this_call when a search failed with "
                 "a server error and was retried, because the retry is "
-                "billed too. This is the figure the invoice will show."
+                "billed too. With the caller's own key this is the figure "
+                "their RapidAPI plan is charged. Absent on a free search."
             ),
         },
         "plan_requests_remaining": {"type": "integer"},
         "plan_requests_limit": {"type": "integer"},
+        "free_searches_used_today": {"type": "integer", "minimum": 0},
+        "free_searches_day_cap": {"type": "integer", "minimum": 0},
+        "free_searches_remaining_today": {"type": "integer", "minimum": 0},
         "note": {
             "type": "string",
             "description": "The same figures as a sentence, for the model to relay.",
@@ -802,20 +808,10 @@ HOTELS_OUTPUT_SCHEMA: dict[str, Any] = {
             )
         },
         "message": {"type": "string"},
-        # Present only when more than the default source was asked for. A
-        # single-source search is unchanged, field for field, which is what
-        # makes `providers` safe to add to a tool that already has callers.
-        "providers": {
-            "type": "array",
-            "description": (
-                "One entry per source that was called, in the order they were "
-                "requested. Only present when `providers` named more than the "
-                "default source."
-            ),
-            "items": _PROVIDER_ROW,
-        },
-        "providers_skipped": _PROVIDERS_SKIPPED,
-        "caveats": _CAVEATS,
+        # No `providers` / `providers_skipped` / `caveats` (2026-10-22):
+        # `search_hotels` lost its `providers` argument, so these hotel tools
+        # answer from Booking.com only and never return them; the
+        # multi-source fields live on COMPARE_OUTPUT_SCHEMA.
         **_ACCOUNT_PROPERTIES,
     },
     "required": ["results"],
