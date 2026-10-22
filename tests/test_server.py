@@ -133,7 +133,7 @@ class TestToolRegistration:
                 assert tool.name.startswith(("search_", "find_", "compare_"))
 
     @pytest.mark.asyncio
-    async def test_descriptions_state_inputs_outputs_and_the_key(self):
+    async def test_descriptions_state_inputs_outputs_and_staleness(self):
         mcp = build_with_upstream(lambda _r: httpx.Response(200, json=[]))
         async with Client(mcp) as client:
             for tool in await client.list_tools():
@@ -142,8 +142,10 @@ class TestToolRegistration:
                 assert "Returns" in text
                 # Every tool has to say the result goes stale, because a model
                 # reusing a cached fare or rate is the failure mode that makes
-                # the whole product look wrong.
-                assert "stale" in text or "RapidAPI key" in text
+                # the whole product look wrong. (Until 2026-10-22 the
+                # get-a-key tail could stand in for this; the tail is gone
+                # from descriptions, so every tool says "stale" itself.)
+                assert "stale" in text
 
     @pytest.mark.asyncio
     async def test_no_ad_machinery_is_registered(self):
@@ -725,22 +727,77 @@ class TestProductSelection:
         }
 
     @pytest.mark.asyncio
-    async def test_hotels_only_registers_no_prompts(self):
-        """All four prompts are flight questions -- on a hotels deployment
-        they would be dead entries in the client's prompt picker."""
+    async def test_hotels_only_registers_the_hotel_prompts(self):
+        """The four flight prompts would be dead entries in a hotels
+        deployment's prompt picker; it gets its own three instead."""
+        from src.prompts import HOTEL_PROMPT_TITLES
+
         mcp = build_with_upstream(
             lambda _r: httpx.Response(200, json=[]), products="hotels"
         )
         async with Client(mcp) as client:
-            assert await client.list_prompts() == []
+            prompts = await client.list_prompts()
+        assert {p.name for p in prompts} == {
+            "hotel_price_two_dates",
+            "find_hotel",
+            "hotel_rate_by_country",
+        }
+        # The sign-in pages quote these titles; they must be the real ones.
+        assert tuple(p.title for p in prompts) == HOTEL_PROMPT_TITLES
+        for p in prompts:
+            assert p.description
+
+    @pytest.mark.asyncio
+    async def test_hotel_prompts_use_the_hotel_tools(self):
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(200, json=[]), products="hotels"
+        )
+        async with Client(mcp) as client:
+            two = await client.get_prompt(
+                "hotel_price_two_dates",
+                {
+                    "hotel_name": "The Hoxton, Amsterdam",
+                    "first_stay": "2026-03-10 to 2026-03-14",
+                    "second_stay": "2026-03-17 to 2026-03-21",
+                },
+            )
+            one = await client.get_prompt(
+                "find_hotel",
+                {
+                    "hotel_name": "The Hoxton, Amsterdam",
+                    "checkin_date": "2026-03-10",
+                    "checkout_date": "2026-03-14",
+                },
+            )
+            geo = await client.get_prompt(
+                "hotel_rate_by_country",
+                {
+                    "hotel_name": "Park Hyatt Tokyo",
+                    "checkin_date": "2026-03-10",
+                    "checkout_date": "2026-03-14",
+                    "countries": "DE, JP",
+                },
+            )
+        texts = [r.messages[0].content.text for r in (two, one, geo)]
+        for text in texts:
+            assert "find_hotel_by_name" in text
+            assert "The Hoxton" in text or "Park Hyatt" in text
+        assert "2026-03-17 to 2026-03-21" in texts[0]
+        # Rate parity needs repeat sampling, never one call per country.
+        assert "price_as_seen_from" in texts[2]
+        assert "two or three times" in texts[2]
 
     @pytest.mark.asyncio
     async def test_flights_keeps_its_prompts(self):
         mcp = build_with_upstream(
             lambda _r: httpx.Response(200, json=[]), products="flights"
         )
+        from src.prompts import FLIGHT_PROMPT_TITLES
+
         async with Client(mcp) as client:
-            assert len(await client.list_prompts()) == 4
+            prompts = await client.list_prompts()
+        assert len(prompts) == 4
+        assert tuple(p.title for p in prompts) == FLIGHT_PROMPT_TITLES
 
     def test_a_typo_is_rejected_rather_than_failing_open(self):
         """"hotel" quietly serving both products is the failure nobody

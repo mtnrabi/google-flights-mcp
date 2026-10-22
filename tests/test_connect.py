@@ -229,7 +229,14 @@ class TestConfiguredDeployment:
         assert "/connect/start" in page.text
         assert "google-flights-live-api" in page.text
         assert "booking-live-api" in page.text
-        assert "BASIC is free" in page.text
+        # PRO leads, with each listing's own quota and its pricing tab;
+        # BASIC is a footnote (2026-10-22).
+        assert "PRO is $10 a month for 2,500 searches" in page.text
+        assert "PRO is $10 a month for 2,000 searches" in page.text
+        assert "google-flights-live-api/pricing" in page.text
+        assert "booking-live-api/pricing" in page.text
+        assert "BASIC is free" not in page.text
+        assert "only 10 searches a month" in page.text
 
     @pytest.mark.asyncio
     async def test_start_redirects_to_google_with_pkce(self, connected):

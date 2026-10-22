@@ -119,8 +119,13 @@ def _build_trial(
     cap: int = 3,
     trial_key: str = TRIAL_KEY,
     products: str = "flights",
+    compare: bool = True,
 ):
     """One built process with OAuth on and the allowance configured.
+
+    `compare` sets MCP_HOTEL_COMPARE: on by default here so the refusal of
+    the multi-source tool on the allowance stays under test for the day a
+    second hotel source is live; the deployed default is off.
 
     Deliberately a local copy of `tests/test_oauth._build` rather than a
     parameter added to it: this file needs two extra env vars and a store
@@ -146,6 +151,7 @@ def _build_trial(
     monkeypatch.setenv("MCP_KEY_MASTER", MASTER_B64)
     monkeypatch.setenv("DATABASE_URL", "postgres://unused-in-tests/db")
     monkeypatch.setenv("PAID_TRIAL_DAY_CAP", str(cap))
+    monkeypatch.setenv("MCP_HOTEL_COMPARE", "on" if compare else "off")
     if trial_key:
         monkeypatch.setenv("PAID_TRIAL_RAPIDAPI_KEY", trial_key)
     else:
@@ -292,7 +298,7 @@ class TestWhatCounts:
         assert reply["combos_requested"] == 10
         assert reply["combos_allowed_now"] == 1
         assert reply["remaining_today"] == 1
-        assert "needs 10 requests" in reply["message"]
+        assert "needs 10 searches" in reply["message"]
         assert "1 left today" in reply["message"]
 
     async def test_a_request_the_allowance_covers_still_runs(self, trial):
@@ -680,7 +686,9 @@ class TestTheCopy:
         assert note["remaining_today"] == 9
         assert "1 of 10 free searches" in note["human"]
         assert "https://mcp.test/connect" in note["note"]
-        assert "https://rapid.test" in note["note"]
+        # The note rides on EVERY allowance result: the counter and the
+        # /connect link only, no listing link and no price (2026-10-22).
+        assert "https://rapid.test" not in note["note"]
 
     def test_the_refusal_says_retrying_will_not_help(self):
         reply = trial_exhausted_result(
@@ -741,6 +749,36 @@ class TestTheConnectPage:
         assert "Free allowance" not in page.text
 
 
+class TestTheConsentPageOnTheAllowance:
+    """Critic 2026-10-22, finding 1, through the real route: a keyless user
+    with the allowance on is told they can search, with the deployment's own
+    cap, and never the red "connect one first" line."""
+
+    async def _consent_page(self, deployment) -> str:
+        from tests.test_oauth import authorize_query, register_client, sign_in
+
+        async with Session(deployment) as session:
+            _, registered = await register_client(session.http)
+            await sign_in(session.http)
+            page = await session.http.get(
+                f"/connect/authorize?{authorize_query(registered['client_id'])}"
+            )
+        assert page.status_code == 200, page.text[:300]
+        return page.text
+
+    async def test_keyless_with_the_allowance_reads_neutral(self, trial):
+        text = await self._consent_page(trial)
+        assert "You can search right away: 3 searches a day on this sign-in," in (
+            text
+        )
+        assert "You have not connected a RapidAPI key yet" not in text
+
+    async def test_keyless_without_the_allowance_keeps_the_red_line(self, no_trial):
+        text = await self._consent_page(no_trial)
+        assert "You have not connected a RapidAPI key yet" in text
+        assert "You can search right away" not in text
+
+
 # ── 10. the descriptions a client reads before it calls anything ─────────
 
 
@@ -767,7 +805,14 @@ class TestWhatTheToolsSay:
                 },
             )
         assert listed.status_code == 200
-        assert "first 3 searches each day are free" in listed.text
+        assert "3 free searches a day after sign-in with Google" in listed.text
+        # The allowance first, then the key -- and no price anywhere in
+        # instructions (2026-10-22): the price waits for a wall.
+        assert listed.text.index("3 free searches a day after sign-in") < (
+            listed.text.index("With your own RapidAPI key")
+        )
+        assert "$" not in listed.text
+        assert "/pricing" not in listed.text
 
     async def test_a_deployment_without_it_promises_nothing(self, no_trial):
         async with Session(no_trial) as session:
@@ -1114,3 +1159,90 @@ class TestTheMultiSourcePathsAskForTheirOwnKey:
         assert "needs_api_key" not in reply
         assert trial_hotels.upstream.keys_seen == [TRIAL_KEY]
         assert reply["trial"]["used_today"] == 1
+
+
+# ── 11. the cap path leads with PRO, never "a free key is enough" ─────────
+
+
+class TestCapPathLeadsWithPro:
+    """2026-10-22: at the cap the reader is told what removes it -- PRO at
+    $10 a month, that listing's quota, its pricing tab -- and what that buys in
+    month-wide scans. The free BASIC plan (10 a month, less than one scan) is
+    a footnote at most, never the suggestion."""
+
+    FLIGHTS = "https://rapidapi.com/mtnrabi/api/google-flights-live-api"
+    HOTELS = "https://rapidapi.com/mtnrabi/api/booking-live-api"
+    STALE = ("free tier", "enough to start", "a free key", "free RapidAPI key")
+
+    def _state(self):
+        from src.trial import TrialState
+
+        return TrialState(user_sub="s", email="a@b.c", used_today=10, day_cap=10)
+
+    def _no_stale_offer(self, text: str) -> None:
+        for phrase in self.STALE:
+            assert phrase not in text, phrase
+
+    @pytest.mark.parametrize(
+        "signup, searches, scans",
+        [(FLIGHTS, "2,500", 26), (HOTELS, "2,000", 21)],
+    )
+    def test_exhausted_result(self, signup, searches, scans):
+        import json as _json
+
+        from src.trial import trial_exhausted_result
+
+        # 2,500 // 93 = 26 and 2,000 // 93 = 21: the sentence is arithmetic
+        # on the real quotas, not a rounded marketing number.
+        from src.quota_gate import MONTH_SCAN_SEARCHES, PRO_SEARCHES
+
+        assert MONTH_SCAN_SEARCHES == 93
+        assert PRO_SEARCHES["flights"] // MONTH_SCAN_SEARCHES == 26
+        assert PRO_SEARCHES["hotels"] // MONTH_SCAN_SEARCHES == 21
+        result = trial_exhausted_result(
+            self._state(), "https://x.test/connect", signup, "Some API"
+        )
+        message = result["message"]
+        assert f"PRO is $10 a month for {searches} searches" in message
+        assert f"{signup}/pricing" in message
+        # No value pitch in a tool result (review 2026-10-22): the price and
+        # the pricing tab, nothing about how many scans it buys.
+        assert "PRO covers about" not in message
+        self._no_stale_offer(_json.dumps(result))
+        step1 = result["how_to_get_a_key"]["how"][0]
+        assert step1.startswith("1. Subscribe to the Some API")
+        assert "BASIC" not in step1
+
+    def test_note_on_every_allowance_result(self):
+        from src.trial import trial_note
+
+        note = trial_note(self._state(), "https://x.test/connect", self.FLIGHTS)
+        # Every allowance result carries the counter and /connect, never the
+        # price: that is said where the user hits the cap (2026-10-22).
+        assert "$" not in note["note"]
+        assert "PRO" not in note["note"]
+        assert "pricing" not in note["note"]
+        assert "https://x.test/connect" in note["note"]
+        self._no_stale_offer(note["note"])
+
+    def test_quota_refusal(self):
+        from src.quota_gate import trial_quota_refusal
+
+        result = trial_quota_refusal(
+            requested=93,
+            remaining_today=4,
+            day_cap=10,
+            connect_url="https://x.test/connect",
+            signup_url=self.HOTELS,
+        )
+        assert "PRO is $10 a month for 2,000 searches" in result["message"]
+        assert result["pricing_url"] == f"{self.HOTELS}/pricing"
+        assert "PRO covers about" not in result["message"]
+        self._no_stale_offer(result["message"])
+
+    def test_compare_message(self):
+        from src.trial import compare_needs_own_key_message
+
+        text = compare_needs_own_key_message("https://x.test/connect", self.HOTELS)
+        assert "PRO is $10 a month for 2,000 searches" in text
+        self._no_stale_offer(text)

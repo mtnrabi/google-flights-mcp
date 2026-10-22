@@ -16,7 +16,8 @@ test_product_copy.py's docstring for that history):
 1. `credentials.key_howto_steps` / `key_howto_block` / `key_howto_tail` --
    the single source the other three read from.
 2. The server `instructions` string (`build_server`/`build_instructions`).
-3. The tail of every tool description.
+3. (until 2026-10-22) the tail of every tool description -- now the
+   opposite is asserted: no description carries a listing or a price.
 4. The `how_to_get_a_key` object on a missing-key or invalid-key tool result,
    structured so a model can act on it rather than re-parsing `message`.
 
@@ -26,6 +27,8 @@ for that and is untouched by this change.
 """
 
 from __future__ import annotations
+
+import re
 
 import anyio
 import httpx
@@ -127,42 +130,28 @@ def listed_tools(products: str) -> list[dict]:
     return [json.loads(t.to_mcp_tool().model_dump_json()) for t in anyio.run(_list)]
 
 
-class TestToolDescriptionsCarryTheTail:
-    @pytest.mark.parametrize("products", ("flights", "hotels"))
-    def test_every_tool_on_this_deployment_carries_it(self, products):
+class TestToolDescriptionsCarryNoPromotion:
+    """Since 2026-10-22 a tool description says what the tool does, its
+    inputs and its limits -- never a signup link, a price or the get-a-key
+    how-to. Claude's directory review reads those as promotion inside a tool
+    description; the how-to lives in `instructions` (above), the 401 body,
+    /connect and every refusal (below)."""
+
+    PRICE = re.compile(r"\$\s?\d")
+    BANNED = ("rapidapi.com", "free tier", "billed to", "/pricing", "PRO is")
+
+    @pytest.mark.parametrize("products", ("flights", "hotels", "both"))
+    def test_no_description_names_a_listing_or_a_price(self, products):
         tools = listed_tools(products)
         assert tools
-        expected_signup = DEFAULT_SIGNUP_URLS[products]
         for tool in tools:
             description = tool["description"]
-            assert_carries_the_three_steps(description, expected_signup)
-
-    def test_combined_deployment_each_tool_names_only_its_own_listing(self):
-        """A "both" deployment still routes each tool to its own product's
-        listing -- a flights tool must not carry the hotels URL and back,
-        matching the invariant test_product_copy.py enforces elsewhere for
-        this deployment shape."""
-        tools = {t["name"]: t for t in listed_tools("both")}
-        flights_tools = ("search_oneway_flights", "search_roundtrip_flights")
-        hotels_tools = (
-            "search_hotels",
-            "find_hotel_by_name",
-            "compare_hotel_rates",
-        )
-
-        for name in flights_tools:
-            description = tools[name]["description"]
-            assert_carries_the_three_steps(
-                description, DEFAULT_SIGNUP_URLS["flights"]
-            )
-            assert DEFAULT_SIGNUP_URLS["hotels"] not in description
-
-        for name in hotels_tools:
-            description = tools[name]["description"]
-            assert_carries_the_three_steps(
-                description, DEFAULT_SIGNUP_URLS["hotels"]
-            )
-            assert DEFAULT_SIGNUP_URLS["flights"] not in description
+            for banned in self.BANNED:
+                assert banned not in description, (tool["name"], banned)
+            assert not self.PRICE.search(description), tool["name"]
+            # ...and the descriptions still describe the tool.
+            assert "Returns" in description
+            assert len(description) > 100
 
 
 class TestHowToGetAKeyOnMissingOrInvalidKey:

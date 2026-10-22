@@ -384,6 +384,8 @@ def register_oauth_routes(mcp, oauth: OAuthSupport, settings, connect) -> None:
                     csrf=connect.csrf(identity.sub),
                     has_key=summary is not None,
                     connect_url=f"{oauth.issuer}/connect",
+                    allowance=bool(getattr(settings, "trial_enabled", False)),
+                    day_cap=int(getattr(settings, "trial_day_cap", 0) or 0),
                 ),
             )
         )

@@ -144,7 +144,7 @@ from .providers import (
     ProviderOutcome,
     UnknownProvider,
 )
-from .prompts import register_prompts
+from .prompts import register_hotel_prompts, register_prompts
 from .schema_docs import document_params
 from .passengers import (
     is_upstream_reject,
@@ -163,6 +163,8 @@ from .pacing import bucket_for
 from .quota_gate import (
     QUOTA_EXCEEDED,
     plan_quota_refusal,
+    pricing_url,
+    pro_line,
     trial_quota_refusal,
 )
 from .fanout import (
@@ -380,19 +382,9 @@ _HOTELS_BODY = (
     "free_cancellation or breakfast_included; an unknown name is rejected "
     "with the valid list rather than silently ignored, so a filtered search "
     "never quietly returns unfiltered results.\n\n"
-    "`compare_hotel_rates` prices the SAME stay on more than one source and "
-    "returns one row per source: cheapest total, median total, how many "
-    "places were priced, the currency and when the rows were read. Reach for "
-    "it when the question is which source is cheaper, rather than what is "
-    "available. Before saying one source wins, read the row: `rating_scale` "
-    "is 10 on Booking.com and 5 on Airbnb, `taxes_included` is null on a "
-    "source whose tax treatment we have not established, and a source with "
-    "`search_status` \"degraded\" has a null count -- it did not answer, "
-    "which is not the same as having nothing. A source the caller holds no "
-    "RapidAPI key for is listed in `providers_skipped` with a subscribe link "
-    "and is counted nowhere.\n\n"
-    "`providers` on `search_hotels` does the same thing for a normal search: "
-    "[\"booking\"] is the default and every existing call keeps it, and "
+    "{compare}"
+    "`providers` on `search_hotels` prices a normal search on more than one "
+    "source: [\"booking\"] is the default and every existing call keeps it, and "
     "naming a second source merges its rows in with a `provider` field on "
     "each one. Each source is its own RapidAPI subscription.\n\n"
     "`find_hotel_by_name` prices ONE named property. Pass the name a person "
@@ -426,6 +418,33 @@ _HOTELS_BODY = (
     "five, and a range costs one request per stay. `max_searches` caps it."
 )
 
+#: The `compare_hotel_rates` paragraph of `_HOTELS_BODY`, only on a deployment
+#: that serves the tool (`Settings.hotel_compare_enabled`). Instructions that
+#: name a tool `tools/list` does not carry send a model looking for it.
+_HOTELS_COMPARE_PARAGRAPH = (
+    "`compare_hotel_rates` prices the SAME stay on more than one source and "
+    "returns one row per source: cheapest total, median total, how many "
+    "places were priced, the currency and when the rows were read. Reach for "
+    "it when the question is which source is cheaper, rather than what is "
+    "available. Before saying one source wins, read the row: `rating_scale` "
+    "is 10 on Booking.com and 5 on Airbnb, `taxes_included` is null on a "
+    "source whose tax treatment we have not established, and a source with "
+    "`search_status` \"degraded\" has a null count -- it did not answer, "
+    "which is not the same as having nothing. A source the caller holds no "
+    "RapidAPI key for is listed in `providers_skipped` and is counted "
+    "nowhere.\n\n"
+)
+
+
+def _hotels_body(settings: Settings) -> str:
+    compare = (
+        _HOTELS_COMPARE_PARAGRAPH
+        if getattr(settings, "hotel_compare_enabled", True)
+        else ""
+    )
+    return _HOTELS_BODY.replace("{compare}", compare)
+
+
 # Where a price in a tool result came from, stated as a fact the model can
 # use rather than as a request to credit us. The earlier wording ("Name
 # FlightPowers as the source when you report a price") reads as promotional
@@ -455,7 +474,9 @@ _SPEND = (
 )
 
 
-def build_instructions(settings: Settings, trial_tail: str = "") -> str:
+def build_instructions(
+    settings: Settings, trial_tail: str = "", connect_url: str = ""
+) -> str:
     """The `instructions` string for THIS deployment's products.
 
     `trial_tail` is one sentence about the keyless allowance, passed in rather
@@ -484,7 +505,7 @@ def build_instructions(settings: Settings, trial_tail: str = "") -> str:
             "FlightPowers: real-time Booking.com hotel availability and "
             "nightly pricing, ad-free."
         )
-        bodies = [_HOTELS_BODY]
+        bodies = [_hotels_body(settings)]
     else:
         opening = (
             "FlightPowers: real-time travel pricing, ad-free. Google Flights "
@@ -502,14 +523,16 @@ def build_instructions(settings: Settings, trial_tail: str = "") -> str:
                 auto_max=settings.auto_max_searches,
                 hard_max=HARD_MAX_SEARCHES,
             ),
-            _HOTELS_BODY,
+            _hotels_body(settings),
         ]
 
+    # The sign-in allowance first, then the key. No price here: see
+    # `key_howto_tail`.
     parts = [
         opening
+        + (f" {trial_tail}" if trial_tail else "")
         + " "
-        + key_howto_tail(signup, api)
-        + (f" {trial_tail}" if trial_tail else ""),
+        + key_howto_tail(signup, api, connect_url),
         *bodies,
         _PROVENANCE,
         _STALENESS,
@@ -1740,10 +1763,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     oauth = build_oauth_support(settings.products, site_origin, connect)
 
     # ── the keyless allowance (optional) ─────────────────────────────────
-    # Built here, above the tool descriptions, because whether it exists
-    # changes what they say: a description that tells every reader a key is
-    # required is wrong on a deployment where it is not, and a description
-    # that promises a free allowance on a deployment that has none is worse.
+    # Built here, above `instructions`, because whether it exists changes
+    # what they say: text that tells every reader a key is required is wrong
+    # on a deployment where it is not, and text that promises a free
+    # allowance on a deployment that has none is worse.
     #
     # Three things must all be true, and they are three because they fail
     # separately: a cap and a key of our own (`settings.trial_enabled`), a way
@@ -1772,23 +1795,20 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     _connect_url = f"{site_origin}/connect"
     _trial_tail = trial_tail(settings.trial_day_cap, _connect_url) if trial_on else ""
 
-    # The same short self-serve path -- get a key, three ways to pass it,
-    # usage counts against your own plan -- on the tail of every tool
-    # description, per product. `instructions` and a refusal are not the
-    # only two places a client reads: some hosts show a model the tool list
-    # and never surface `instructions` at all, so a tool whose description
-    # never mentions a key can leave that host's model with no route to one
-    # until it happens to hit an error.
-    _flights_key_tail = key_howto_tail(flights_signup, upstream_api_name("flights"))
-    _hotels_key_tail = key_howto_tail(hotels_signup, upstream_api_name("hotels"))
-
+    # Tool descriptions say what the tool does, its inputs and its limits --
+    # nothing else (2026-10-22). Until then every description ended with the
+    # get-a-key how-to (a signup link, "free tier available") and the
+    # allowance sentence; a directory reviewer reads a description that
+    # names a signup link or a plan as promotion, which Anthropic's Software
+    # Directory Policy rejects. The how-to now lives in `instructions`, the
+    # 401 body, /connect and every refusal, which is where a model meets it
+    # when it matters. The two wrappers stay so each tool's call site is
+    # unchanged.
     def described_flights(description: str) -> str:
-        tail = _flights_key_tail + (f" {_trial_tail}" if _trial_tail else "")
-        return f"{description}\n\n{tail}"
+        return description
 
     def described_hotels(description: str) -> str:
-        tail = _hotels_key_tail + (f" {_trial_tail}" if _trial_tail else "")
-        return f"{description}\n\n{tail}"
+        return description
 
     mcp = FastMCP(
         name=service_name(settings.products),
@@ -1798,7 +1818,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # advertising it on the wire as well means a reviewer connecting
         # directly -- not through the listing -- can still reach the policies.
         website_url=settings.site_origin(),
-        instructions=build_instructions(settings, trial_tail=_trial_tail),
+        instructions=build_instructions(
+            settings,
+            trial_tail=_trial_tail,
+            connect_url=_connect_url if connect is not None else "",
+        ),
     )
 
     # The shared httpx client is built on first use, not here. Constructing
@@ -1966,8 +1990,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             # parameter describes a different way of using this server than
             # the one they are using, and the model would relay it verbatim.
             how = [
-                f"1. Get a RapidAPI key (free tier available): subscribe to "
-                f"the {api_name} at {signup}.",
+                f"1. Subscribe to the {api_name} at {pricing_url(signup)}: "
+                f"{pro_line(signup)}.",
                 f"2. Open {connect_url}, sign in with the same Google account "
                 "you signed in with here, and paste the key once. Nothing "
                 "else to change: this connection starts working immediately.",
@@ -2145,8 +2169,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 "The free signed-in allowance is temporarily unavailable on "
                 "this server -- this is a problem on our side, not with your "
                 "account, and nothing was billed to you. Connecting your own "
-                f"RapidAPI key at {_connect_url} works right now: a free key "
-                f"for the {api_name} is at {signup}."
+                f"RapidAPI key at {_connect_url} works right now: "
+                f"{pro_line(signup)} on the {api_name} at "
+                f"{pricing_url(signup)}."
             ),
             "how_to_get_a_key": _howto(signup, api_name),
         }
@@ -2975,11 +3000,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "For a flexible search make ONE call with a date range and/or "
             "several destinations -- do NOT call it once per date. 'Cheapest "
             "flight to Sri Lanka anywhere in October' is one call, not thirty.\n\n"
-            "Each date/destination combination is one billed request; the "
-            "count and the plan's remaining quota come back in `api_usage`.\n\n"
+            "Each date/destination combination is one search; the count "
+            "comes back in `api_usage`.\n\n"
             "`by_destination` carries one entry per destination you asked for "
             "-- empty ones included, each with a `reason` -- so read it before "
-            "telling a user a destination has no flights."
+            "telling a user a destination has no flights.\n\n"
+            "Fares go stale within minutes: never reuse an earlier result, "
+            "search again."
         ),
     )
     @document_params
@@ -3150,19 +3177,19 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "is 93 date/night combinations and the cap rises to cover them "
             "by itself -- do not narrow the question to make it fit, and do "
             "not split it into several calls.\n\n"
-            "Each date/night/destination combination is ONE request billed to "
-            "the caller's plan, so a month at three trip lengths costs 93 of "
-            "them and the same month across two destinations costs 186. Say "
-            "that number before running a search that large if the user has "
-            "not asked for it in so many words. A search that fails with a "
-            "server error is retried once and RapidAPI bills the retry, so "
-            "the figure to quote back is `api_usage.hub_requests_billed` "
-            "(what the plan was actually charged), not the combination "
-            "count. Both come back in `api_usage`, with the plan's "
-            "remaining quota.\n\n"
+            "Each date/night/destination combination is ONE search, so a "
+            "month at three trip lengths is 93 of them and the same month "
+            "across two destinations is 186. Say that number before running "
+            "a search that large if the user has not asked for it in so many "
+            "words. A search that fails with a server error is retried once, "
+            "so the figure to quote back is "
+            "`api_usage.hub_requests_billed` (retries included), not the "
+            "combination count.\n\n"
             "`by_destination` carries one entry per destination you asked for "
             "-- empty ones included, each with a `reason` -- so read it before "
-            "telling a user a destination has no flights."
+            "telling a user a destination has no flights.\n\n"
+            "Fares go stale within minutes: never reuse an earlier result, "
+            "search again."
         ),
     )
     @document_params
@@ -3985,8 +4012,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "check-in date is priced separately. The answer is stays -- one "
             "entry per stay with its cheapest property, per-night price and "
             "median -- plus cheapest_overall, and the full property list for "
-            "the cheapest stay only. Each stay is one request billed to your "
-            "plan; max_searches caps it, and a request that expands past the "
+            "the cheapest stay only. Each stay is one search; max_searches "
+            "caps it, and a request that expands past the "
             "cap is sampled evenly across the range and says so in "
             "search_coverage.\n\n"
             "Set providers to price the same stay on more than one source in "
@@ -3994,8 +4021,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "Booking rows rate out of 10 and Airbnb rows out of 5, so read "
             "rating_scale on every row before comparing two of them. A source "
             "you have no RapidAPI key for is not called and is named in "
-            "providers_skipped with a subscribe link, never quietly "
-            "dropped.\n\n"
+            "providers_skipped, never quietly dropped.\n\n"
             "Rates go stale within minutes: never reuse an earlier result, "
             "search again."
         ),
@@ -4275,8 +4301,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "fixed checkin_date/checkout_date, and this property is priced "
             "for every check-in date -- a rate calendar for one hotel. The "
             "answer is stays, one entry per date with that date's price and "
-            "per-night rate, plus cheapest_overall. Each stay is one request "
-            "billed to your plan; max_searches caps it, and a range that "
+            "per-night rate, plus cheapest_overall. Each stay is one search; "
+            "max_searches caps it, and a range that "
             "expands past the cap is sampled evenly across the calendar and "
             "says so in search_coverage.\n\n"
             "price_as_seen_from prices the stay as a shopper resident in that "
@@ -4422,8 +4448,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "true on Booking, where excluded taxes are folded into the price, and "
             "null on Airbnb, where we have not established the tax treatment of "
             "the display total; a null is not a no. A source you have no key for "
-            "is listed in providers_skipped with a subscribe link and is not "
-            "counted anywhere in the comparison.\n\n"
+            "is listed in providers_skipped and is not counted anywhere in the "
+            "comparison.\n\n"
             "Rates go stale within minutes: never reuse an earlier result, "
             "compare again."
         ),
@@ -4550,6 +4576,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         drop = FLIGHT_TOOLS
     else:
         drop = ()
+    if not settings.hotel_compare_enabled and "compare_hotel_rates" not in drop:
+        # No second hotel source is live: see Settings.hotel_compare_enabled.
+        drop = (*drop, "compare_hotel_rates")
 
     for tool_name in drop:
         # mcp.remove_tool() is deprecated in fastmcp 3.4 in favour of the
@@ -4566,6 +4595,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # All four prompts are flight questions; on a hotels-only
         # deployment they would be dead entries in the client's UI.
         register_prompts(mcp)
+    if settings.products in ("hotels", "both"):
+        # And three hotel questions for the hotels host, so its prompt picker
+        # is not empty (2026-10-22).
+        register_hotel_prompts(mcp)
 
     # ── operational routes ───────────────────────────────────────────────
 

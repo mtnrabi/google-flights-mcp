@@ -45,10 +45,42 @@ from typing import Any
 #: is a decision this server took, not something the backend reported.
 QUOTA_EXCEEDED = "quota_exceeded"
 
-#: The listed entry plan on BOTH listings (google-flights-live-api and
-#: booking-live-api sell PRO at $10 for 2,500 requests; BASIC is $0 for 10).
-#: Written down once, here, rather than in three message strings.
-PRO_PLAN_LINE = "PRO ($10/month, 2,500 requests)"
+#: The listed entry plan, per listing, as sold on the RapidAPI pricing tabs:
+#: google-flights-live-api PRO is $10 a month for 2,500 requests,
+#: booking-live-api PRO is $10 a month for 2,000. BASIC is $0 for 10 a month
+#: on both, which is why it is a footnote and never the lead: one month-wide
+#: scan is 93 searches. Written down once, here, rather than in every
+#: message string.
+PRO_PRICE_USD = 10
+PRO_SEARCHES = {"flights": 2500, "hotels": 2000}
+BASIC_SEARCHES = 10
+#: A whole month of dates at three trip lengths (31 x 3), the same figure the
+#: tool descriptions use. No longer quoted in a tool result (2026-10-22: "PRO
+#: covers about 26 of those a month" read as a value pitch to a zero-context
+#: directory review); kept as the one place the figure is written down.
+MONTH_SCAN_SEARCHES = 93
+
+
+def _plan_product(signup_url: str) -> str:
+    """Which listing a signup URL is, so the quota quoted is that listing's."""
+    return "hotels" if "booking-live-api" in (signup_url or "") else "flights"
+
+
+def pricing_url(signup_url: str) -> str:
+    """The listing's pricing tab: where the plans and the Subscribe buttons are."""
+    return f"{(signup_url or '').rstrip('/')}/pricing"
+
+
+def pro_line(signup_url: str) -> str:
+    """'PRO is $10 a month for 2,500 searches', for this listing."""
+    searches = PRO_SEARCHES[_plan_product(signup_url)]
+    return f"PRO is ${PRO_PRICE_USD} a month for {searches:,} searches"
+
+
+BASIC_FOOTNOTE = (
+    f"(RapidAPI's BASIC plan is free but has only {BASIC_SEARCHES} searches "
+    "a month.)"
+)
 
 
 def _shrink_hint(requested: int, allowed: int) -> str:
@@ -89,15 +121,16 @@ def trial_quota_refusal(
         "combos_allowed_now": remaining_today,
         "remaining_today": remaining_today,
         "message": (
-            f"This search needs {requested:,} requests but your free "
+            f"This search needs {requested:,} searches but your free "
             f"allowance has {remaining_today:,} left today "
             f"({day_cap:,} a day, renewing at 00:00 UTC). Nothing was "
-            f"searched and nothing was spent. Ask for "
-            f"{_shrink_hint(requested, remaining_today)}, or subscribe to "
-            f"{PRO_PLAN_LINE} at {signup_url} and connect your key at "
-            f"{connect_url} -- searches then bill your own plan and this "
-            "allowance stops applying. Tell the user this rather than "
-            "reporting a plain failure, and do not retry the same search."
+            f"searched and nothing was spent. {pro_line(signup_url)} "
+            f"({pricing_url(signup_url)}); subscribe there and connect your "
+            f"key once at {connect_url}, and this allowance stops applying. "
+            "Or ask for "
+            f"{_shrink_hint(requested, remaining_today)}. Tell the user this "
+            "rather than reporting a plain failure, and do not retry the same "
+            "search."
         ),
         "trial": {
             "day_cap": day_cap,
@@ -105,6 +138,7 @@ def trial_quota_refusal(
             "key_connected": False,
         },
         "signup_url": signup_url,
+        "pricing_url": pricing_url(signup_url),
         "connect_url": connect_url,
     }
 
@@ -164,7 +198,7 @@ def plan_quota_refusal(
             "the remaining quota, so the rest of the plan's balance is "
             f"untouched.{kept} Ask for "
             f"{_shrink_hint(requested, remaining_month)}, "
-            f"or move to {PRO_PLAN_LINE} or a larger plan at {signup_url}. "
+            f"or move to a larger plan at {pricing_url(signup_url)}. "
             "Tell the user this rather than reporting a plain failure, and "
             "do not retry the same search."
         ),

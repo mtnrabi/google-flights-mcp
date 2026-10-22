@@ -44,8 +44,9 @@ What it is NOT
   so the allowance is the only free thing here.
 * Not a way around the paid product. Ten searches a day is a taste; the
   message on every result says what removes the cap, and the cap message says
-  it again. RapidAPI PRO is $10 for 2,500 requests -- roughly eight times the
-  allowance's monthly total -- so the allowance can never be the better deal.
+  it again. RapidAPI PRO is $10 for 2,500 requests (flights; 2,000 on
+  hotels) -- roughly seven to eight times the allowance's monthly total at
+  10 a day -- so the allowance can never be the better deal.
 * Not a refusal. Over the cap the tools answer with a normal result envelope
   and `search_status: "trial_exhausted"`, never a 401 and never an exception:
   a model handed an HTTP error retries it, and there is nothing to retry.
@@ -56,6 +57,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Any
+
+from .quota_gate import pricing_url, pro_line
 
 #: `Credential.source` for a request served from the allowance. A distinct
 #: value, not an empty key and not `env:RAPIDAPI_KEY`: the call sites branch on
@@ -223,11 +226,15 @@ def trial_note(state: TrialState, connect_url: str, signup_url: str) -> dict[str
             f"{state.used_today:,} of {state.day_cap:,} free searches used "
             f"today{_who(state)}. The allowance renews at 00:00 UTC."
         ),
+        # The counter and where to connect a key: nothing else (2026-10-22).
+        # This rides on EVERY allowance result, which a directory reviewer
+        # reads as a tool result, so it carries no price and no plan pitch;
+        # the price is said where the user hits a wall (the cap, a quota
+        # refusal, the 401, /connect).
         "note": (
-            "These searches ran on FlightPowers' own RapidAPI key, not yours. "
-            f"Connect your own key once at {connect_url} and the cap goes "
-            f"away -- a free RapidAPI key from {signup_url} is enough to "
-            "start, and usage is then billed to your own plan."
+            "These searches ran on FlightPowers' own key, not yours. To "
+            f"search past the daily limit, connect your own RapidAPI key once "
+            f"at {connect_url}."
         ),
     }
 
@@ -276,10 +283,12 @@ def trial_exhausted_result(
         "search_status": TRIAL_EXHAUSTED,
         "retry": False,
         "message": (
-            f"{opening} Connect your own RapidAPI key once at {connect_url} "
-            "-- nothing to change in this client, searches start working "
-            "immediately and are billed to your own plan. A free key for the "
-            f"{api_name} is at {signup_url}. Tell the user this rather than "
+            f"{opening} {pro_line(signup_url)} on the {api_name} "
+            f"({pricing_url(signup_url)}). Subscribe there and connect your "
+            f"key once at "
+            f"{connect_url} -- nothing to change in this client, searches "
+            "start working immediately and are billed to your own plan. "
+            "Tell the user this rather than "
             "reporting a plain failure."
         ),
         "trial": {
@@ -294,9 +303,10 @@ def trial_exhausted_result(
         "how_to_get_a_key": {
             "connect_url": connect_url,
             "signup_url": signup_url,
+            "pricing_url": pricing_url(signup_url),
             "how": [
-                f"1. Get a RapidAPI key (free tier available): subscribe to "
-                f"the {api_name} at {signup_url}.",
+                f"1. Subscribe to the {api_name} at "
+                f"{pricing_url(signup_url)}: {pro_line(signup_url)}.",
                 f"2. Open {connect_url}, sign in with the same Google account "
                 "you signed in with here, and paste the key once. Nothing else "
                 "to change: this connection starts working immediately.",
@@ -330,22 +340,24 @@ def compare_needs_own_key_message(connect_url: str, signup_url: str) -> str:
     return (
         "Comparing several sources in one call needs your own RapidAPI key: "
         "the free signed-in allowance covers single-source searches only. "
-        f"Paste a key once at {connect_url} (a free one from {signup_url} is "
-        "enough to start) and this call works. Nothing was searched and "
-        "nothing was billed."
+        f"{pro_line(signup_url)} ({pricing_url(signup_url)}); subscribe there, "
+        f"paste your key once at {connect_url} and this call works. Nothing "
+        "was searched and nothing was billed."
     )
 
 
 def trial_tail(day_cap: int, connect_url: str) -> str:
-    """One sentence for the server `instructions` and every tool description.
+    """One sentence for the server `instructions`.
 
     A model that only learns the allowance exists from inside a refusal has
-    already told the user this server needs a key it does not need.
+    already told the user this server needs a key it does not need. No price
+    and no plan name (2026-10-22): `instructions` is served at `initialize` to
+    every client and every directory reviewer, before anyone has hit a limit.
     """
     return (
-        f"No key? Sign in with Google and the first {day_cap} searches each "
-        f"day are free on this server -- ad-free, nothing to paste. Connect "
-        f"your own RapidAPI key at {connect_url} to remove the cap."
+        f"{day_cap} free searches a day after sign-in with Google, shared by "
+        "FlightPowers' flights and hotels servers, nothing to paste; connect "
+        f"a key at {connect_url} for more."
     )
 
 

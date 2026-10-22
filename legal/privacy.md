@@ -2,7 +2,7 @@
 
 **Service:** `https://{{HOST}}/mcp`
 **Registry name:** `{{REGISTRY_NAME}}`
-**Effective date:** 2026-08-17
+**Effective date:** 2026-10-22
 **Contact:** matan@flightpowers.com
 
 This policy describes exactly what the hosted MCP server at
@@ -130,6 +130,27 @@ your key. What is additionally written down is only what makes the sign-in work:
 
 ---
 
+## 2c. The daily sign-in allowance
+
+Where `/health` reports `trial_enabled: true`, a person who signs in with
+Google (section 2a or 2b) and has connected no RapidAPI key can still run a
+small number of searches each UTC day (`trial_day_cap` on `/health`). Those
+searches run on FlightPowers' own RapidAPI key, not yours. To count them, this
+is written down:
+
+- **One row per Google account per UTC day:** your Google account identifier
+  (`sub`), your email address, the date, how many searches you ran that day,
+  and when the row was first and last updated.
+- **What it is used for.** Enforcing the daily limit, and answering a support
+  question about your account. Nothing else: it is not a mailing list and it
+  is not shared outside FlightPowers.{{TRIAL_SHARED}}
+- **How long it is kept.** These rows have no automatic expiry today, and
+  "Disconnect" on `/connect` does **not** delete them (Disconnect deletes your
+  stored key and your tokens, sections 2a and 2b). To have them deleted, write
+  to the contact address below.
+
+---
+
 ## 3. What is logged
 
 One JSON line per **tool call** (never one per upstream request) is written to
@@ -152,6 +173,14 @@ fields and nothing else:
 If the deployment is configured with a writable log path, the same line is also
 appended to a local file. On the current hosting platform that path is not
 writable, so standard output is the record.
+
+If you signed in (sections 2a-2c), a few further lines carry your **Google
+account identifier** (`sub`), never your email address and never a key: one
+when a client is approved for your account, one when a key is stored or your
+tokens are revoked, and, on the daily allowance, a `[paid_trial]` line per
+search call with the tool name and your day's counters.
+
+{{BACKEND_LOGS}}
 
 ---
 
@@ -182,15 +211,21 @@ The server does not collect, log, store, or transmit any of the following:
   see section 6.)
 - **Any user identity**, unless you signed in on `/connect` or through
   `/mcp/oauth`: the tool path itself has no account, no user ID, no session
-  ID, no name, no email address and no device or client identifier. What
-  sections 2a and 2b describe is the only identity this service ever holds,
-  it exists only because you chose to create it, and Disconnect deletes it.
-- **Your search parameters.** {{SEARCH_PARAM_NOUNS}} are used to perform the
-  search and are then discarded. Only the *count* of requested combinations is
-  recorded, not the values, with one exception: when a request is rejected as
-  invalid before any search runs, the validation message goes into the `error`
-  field described in section 3, and that message quotes the single value that
-  failed (a malformed date or trip length, for example).
+  ID, no name, no email address and no device or client identifier (our
+  search backend's own logs, section 3, do see the RapidAPI username of the
+  key that paid for a search). If you
+  did sign in, sections 2a-2c and section 3 describe every place your Google
+  account identifier or email address is kept. It exists only because you
+  chose to sign in; Disconnect deletes your key and tokens, and the daily
+  counts in section 2c are deleted on request.
+- **Your search parameters, on this server.** {{SEARCH_PARAM_NOUNS}} are used
+  to perform the search and are then discarded by this server. Only the
+  *count* of requested combinations is recorded here, not the values, with one
+  exception: when a request is rejected as invalid before any search runs, the
+  validation message goes into the `error` field described in section 3, and
+  that message quotes the single value that failed (a malformed date or trip
+  length, for example). Our search backend's own short-lived logs are
+  described in section 3.
 - **{{RESULT_NOUN}}.** {{RESULT_SENTENCE}}
 - **Tracking cookies, trackers, analytics SDKs, fingerprinting, advertising.**
   This server serves no ads and embeds no third-party tracking of any kind. The
@@ -199,19 +234,25 @@ The server does not collect, log, store, or transmit any of the following:
   in section 2a, and they only exist if you use `/connect`.
 
 There is no profiling, no automated decision-making, and no sale or sharing of
-data. There is no personal data to sell.
+personal data.
 
 ---
 
 ## 6. Third parties
 
-- **RapidAPI / {{UPSTREAM_API}}.** Each search is forwarded to RapidAPI
-  with your key so that it is billed to your own subscription. RapidAPI and the
-  API provider handle that request under their own terms and privacy policies.
-- **Google**, only if you use `/connect` (section 2a). Signing in sends you to
+- **RapidAPI / {{UPSTREAM_API}}.** Each search is forwarded through RapidAPI:
+  with your key, billed to your own subscription, or, on the daily allowance
+  (section 2c), with FlightPowers' own key. RapidAPI and the API provider
+  handle that request under their own terms and privacy policies.
+- **Our own search backend (Amazon Web Services).** Each search is run by a
+  backend we operate, reached through RapidAPI; its logs are described in
+  section 3. Amazon Web Services hosts it as our processor.
+- **Neon (Postgres).** If you sign in, the records in sections 2a-2c are kept
+  in a Neon Postgres database.
+- **Google**, only if you sign in (sections 2a-2c). Signing in sends you to
   Google's own consent screen; Google handles that under its own privacy
   policy. The service asks for `openid` and `email` and receives nothing else.
-  If you never use `/connect`, this service never contacts Google about you.
+  If you never sign in, this service never contacts Google about you.
 - **Upstash Redis (optional).** If configured, it holds only the aggregate
   integer counters described in section 4.
 - **Hosting platform (Vercel).** The server runs on Vercel, which captures the
@@ -228,8 +269,9 @@ No other processor receives anything.
 ## 7. Operational endpoints
 
 - `GET /health`: public and unauthenticated. Returns service status, the
-  public MCP URL, the signup URL, whether ads are served (always `false`), and
-  whether a server-side fallback key is configured. It contains no caller data.
+  public MCP URL, the signup URL, whether ads are served (always `false`),
+  whether a server-side fallback key is configured, and whether the daily
+  sign-in allowance is on and its size (`trial_enabled`, `trial_day_cap`). It contains no caller data.
 - `GET /metrics` and `GET /metrics/calls`: the aggregate counters from
   section 4, protected by a `x-metrics-token` header when a token is
   configured. They contain no caller data.
@@ -247,17 +289,25 @@ No other processor receives anything.
   it to and no longer.
 - The Google account identifier and email address behind a connected key: the
   same lifetime as the key, and deleted with it.
+- Daily allowance counts (section 2c): no automatic expiry today; not deleted
+  by Disconnect; deleted on request to the contact address below.
+- Our search backend's operational logs (section 3): about one day. The daily
+  counts rolled up from them have no automatic expiry today; write to the
+  contact address below to have the counts under your account deleted.
 - `MCP_CALL` log lines: retained by the hosting platform under its runtime log
-  retention. They contain no personal data, so there is nothing in them to
-  attribute to, or delete for, an individual.
+  retention. They contain no personal data. The sign-in and allowance lines
+  in section 3 carry a Google account identifier and are kept under the same
+  platform retention.
 - Counters: hourly buckets expire after 35 days; lifetime totals are aggregate
   integers with no personal dimension.
 
-If you have not used `/connect`, no personal data is collected, so there is no
-account to close and no per-user deletion or access request that can be
-meaningfully fulfilled: there is no record keyed to you to find. If you have,
-"Disconnect" on that page is the deletion, it is immediate, and it needs no
-request to anybody. Either way, if you believe a record about you exists that
+If you have never signed in, this server keeps no record keyed to you; the
+only trace is the RapidAPI username of your key in our search backend's
+one-day logs, and in the daily counts rolled up from them where section 3
+says those counts are kept per account. If you have,
+"Disconnect" on `/connect` deletes your stored key and tokens at once, and a
+request to the contact address below deletes the daily allowance counts in
+section 2c. Either way, if you believe a record about you exists that
 this policy does not describe, write to the contact address below and we will
 investigate.
 

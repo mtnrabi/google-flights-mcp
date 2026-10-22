@@ -177,3 +177,130 @@ def register_prompts(mcp: FastMCP) -> None:
             "Do not reuse any earlier result -- fares move, so this must be a "
             "fresh lookup."
         )
+
+
+#: The titles the prompts below are registered with, in order. Quoted on the
+#: sign-in pages so the "what to ask first" line names prompts that exist;
+#: tests/test_server.py checks they match what is registered.
+HOTEL_PROMPT_TITLES = (
+    "Compare a hotel's price on two sets of dates",
+    "Find a hotel by name for my dates",
+    "Compare a hotel's rate as seen from two countries",
+)
+FLIGHT_PROMPT_TITLES = (
+    "Find the cheapest dates to fly",
+    "Compare destinations on price",
+    "Plan a round trip on a budget",
+    "Is this fare a good deal?",
+)
+
+
+def register_hotel_prompts(mcp: FastMCP) -> None:
+    """Attach the hotel prompt templates to `mcp` (hotels deployments only).
+
+    Same idea as the flight four: the shortest path from "installed" to
+    "got a real rate", with the usage rules the tool descriptions carry
+    baked into the text the user picks.
+    """
+
+    @mcp.prompt(
+        name="hotel_price_two_dates",
+        title="Compare a hotel's price on two sets of dates",
+        description=(
+            "Price one named hotel for two different stays and say which is "
+            "cheaper, total and per night."
+        ),
+    )
+    @document_params
+    def hotel_price_two_dates(
+        hotel_name: str,
+        first_stay: str,
+        second_stay: str,
+    ) -> str:
+        """
+        Args:
+            hotel_name: The hotel as a person would type it, with the city,
+                e.g. "Hotel Lisboa Plaza, Lisbon".
+            first_stay: Check-in and check-out, e.g. "2026-03-10 to 2026-03-14".
+            second_stay: Check-in and check-out, e.g. "2026-03-17 to 2026-03-21".
+        """
+        return (
+            f"Price {hotel_name} for two stays: {first_stay}, and "
+            f"{second_stay}.\n\n"
+            "Use find_hotel_by_name once per stay, with the same currency both "
+            "times. Check that both calls matched the same property before "
+            "comparing them.\n\n"
+            "Give me, for each stay: the total, the per-night price, the room "
+            "type and the booking link. Then say which stay is cheaper and by "
+            "how much per night. Rates move between calls, so say when they "
+            "were fetched."
+        )
+
+    @mcp.prompt(
+        name="find_hotel",
+        title="Find a hotel by name for my dates",
+        description=(
+            "Look up one named hotel for given dates: live availability, "
+            "price and a booking link."
+        ),
+    )
+    @document_params
+    def find_hotel(
+        hotel_name: str,
+        checkin_date: str,
+        checkout_date: str,
+        adults: str = "2",
+    ) -> str:
+        """
+        Args:
+            hotel_name: The hotel as a person would type it, with the city,
+                e.g. "The Hoxton, Amsterdam".
+            checkin_date: First night, "YYYY-MM-DD".
+            checkout_date: Departure morning, "YYYY-MM-DD".
+            adults: Number of adults, e.g. "2".
+        """
+        return (
+            f"Find {hotel_name} from {checkin_date} to {checkout_date} for "
+            f"{adults} adult{'' if adults.strip() == '1' else 's'}.\n\n"
+            "Use find_hotel_by_name once. Tell me which property it matched, "
+            "whether it is available, the total and per-night price, the room "
+            "type, the review score and the booking link. If the match looks "
+            "like a different hotel, say so instead of quoting its price."
+        )
+
+    @mcp.prompt(
+        name="hotel_rate_by_country",
+        title="Compare a hotel's rate as seen from two countries",
+        description=(
+            "Price the same stay at one hotel as a shopper in two different "
+            "countries would see it."
+        ),
+    )
+    @document_params
+    def hotel_rate_by_country(
+        hotel_name: str,
+        checkin_date: str,
+        checkout_date: str,
+        countries: str = "DE, JP",
+    ) -> str:
+        """
+        Args:
+            hotel_name: The hotel as a person would type it, with the city,
+                e.g. "Park Hyatt Tokyo".
+            checkin_date: First night, "YYYY-MM-DD".
+            checkout_date: Departure morning, "YYYY-MM-DD".
+            countries: Two two-letter country codes, e.g. "DE, JP".
+        """
+        return (
+            f"Compare the rate for {hotel_name} from {checkin_date} to "
+            f"{checkout_date} as seen from these countries: {countries}.\n\n"
+            "Use find_hotel_by_name with price_as_seen_from set to each "
+            "country, the same dates and the same currency every time. Rates "
+            "move between calls, so call each country two or three times and "
+            "compare the typical price per country, not one call each. For "
+            "two countries that is 4 to 6 searches; say so before you "
+            "start.\n\n"
+            "Give me a small table: country, the prices you got, the typical "
+            "one. Then say whether there is a real gap or just noise between "
+            "calls, and how many searches this used."
+        )

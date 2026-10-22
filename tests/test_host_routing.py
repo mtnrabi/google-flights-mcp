@@ -331,7 +331,9 @@ class TestPerProductEnvOverrides:
 #: How many tools each single-product deployment serves. Written down rather
 #: than derived, so a tool appearing or disappearing fails here with a count
 #: rather than silently agreeing with a regenerated golden.
-GOLDEN_TOOL_COUNTS = {"flights": 2, "hotels": 3}
+# hotels: 2 since 2026-10-22 -- compare_hotel_rates is off until a second
+# hotel source is live (MCP_HOTEL_COMPARE).
+GOLDEN_TOOL_COUNTS = {"flights": 2, "hotels": 2}
 
 
 def test_the_goldens_are_present_and_carry_their_whole_tool_set():

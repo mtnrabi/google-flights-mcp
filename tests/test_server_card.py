@@ -253,16 +253,24 @@ class TestPerHost:
         card = (await get_card(combined, HOTELS_HOST)).json()
         assert card["serverInfo"]["name"] == "booking-hotels-mcp"
         assert card["serverInfo"]["title"] == "Booking.com Hotels MCP"
+        # compare_hotel_rates is off on a deployment built from the
+        # environment until a second hotel source is live (MCP_HOTEL_COMPARE,
+        # 2026-10-22): it compared Booking with an Airbnb that the front
+        # answers provider_unavailable.
         assert [t["name"] for t in card["tools"]] == [
             "search_hotels",
             "find_hotel_by_name",
-            "compare_hotel_rates",
         ]
         assert "hotel" in card["description"]
         assert "Booking Live API" in card["description"]
-        # Hotels register no prompts, and the card must not claim any.
-        assert card["prompts"] == []
-        assert "prompts" not in card["capabilities"]
+        # Hotels register their own three prompts (2026-10-22), and the
+        # card lists exactly those, never the flight four.
+        assert [p["name"] for p in card["prompts"]] == [
+            "hotel_price_two_dates",
+            "find_hotel",
+            "hotel_rate_by_country",
+        ]
+        assert "prompts" in card["capabilities"]
 
     @pytest.mark.parametrize(
         "host, product", [(FLIGHTS_HOST, "flights"), (HOTELS_HOST, "hotels")]

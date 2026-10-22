@@ -233,7 +233,12 @@ class TestOAuthReader:
         assert f"Signed in as <strong>{EMAIL}" in page.text
         assert f"…{USER_KEY[-4:]}" in page.text
         assert "You are set. There is nothing to paste." in page.text
-        assert "Go back to your assistant" in page.text
+        # What to do next, and one question to paste. /connect cannot tell
+        # which client the user came from, so the path is the neutral one,
+        # never claude.ai's "+ -> Connectors" (critic 2026-10-22, finding 9).
+        assert "You&#x27;re connected. In a new chat: make sure" in page.text
+        assert "\u2192 Connectors" not in page.text
+        assert "Lisbon any week in March, 7 or 10 nights" in page.text
         # The whole point: no bearer credential anywhere in the document.
         assert CONNECT_TOKEN_PREFIX not in page.text
         assert "fp_token" not in page.text

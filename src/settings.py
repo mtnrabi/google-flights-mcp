@@ -392,6 +392,21 @@ class Settings:
     # faster rollback than a revert. Never touches the hotels tools.
     flights_widget_enabled: bool = True
 
+    # ── compare_hotel_rates (hotels and combined deployments) ────────────
+    # Whether the cross-source comparison tool is served. It compares Booking
+    # with a second source, and the only second source (Airbnb) is answered
+    # `provider_unavailable` by the api front while its backend address is
+    # not configured there (api_proxy/src/providers.py `target_for`; live
+    # check 2026-10-22 13:19Z). A tool that compares one source with nothing
+    # cannot return a useful answer to valid input, which is a directory
+    # review failure, and the keyless allowance refuses it by design. So the
+    # deployed default is OFF: `load_settings` reads `MCP_HOTEL_COMPARE`
+    # (default off) and the day a second source is live, `=on` plus a
+    # redeploy brings it back with no code change. The dataclass default is
+    # True only so a Settings built by hand (tests, scripts) keeps the tool's
+    # behaviour under test.
+    hotel_compare_enabled: bool = True
+
     #: How many rows a response may carry when `limit` was raised by the
     #: server rather than asked for. See DEFAULT_RESULT_ROWS_MAX; 0 is off.
     #: Defaulted so a Settings built by hand (tests, scripts) gets the
@@ -647,4 +662,5 @@ def load_settings(products: str | None = None) -> Settings:
         # for a different reason.
         trial_rapidapi_key=_env_str("PAID_TRIAL_RAPIDAPI_KEY", ""),
         flights_widget_enabled=_env_flag("MCP_FLIGHTS_WIDGET", True),
+        hotel_compare_enabled=_env_flag("MCP_HOTEL_COMPARE", False),
     )

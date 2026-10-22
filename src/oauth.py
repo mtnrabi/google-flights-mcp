@@ -1615,6 +1615,21 @@ def _query(scope: dict) -> dict[str, str]:
     return dict(parse_qsl(raw.decode("latin-1"), keep_blank_values=True))
 
 
+def _key_plan_line(product: str) -> str:
+    """Where a key comes from and what it costs, for the 401 body."""
+    from .quota_gate import pricing_url, pro_line  # noqa: PLC0415
+    from .settings import DEFAULT_SIGNUP_URLS  # noqa: PLC0415
+
+    if product not in ("flights", "hotels"):
+        f, h = DEFAULT_SIGNUP_URLS["flights"], DEFAULT_SIGNUP_URLS["hotels"]
+        return (
+            f"Keys: for flights, {pro_line(f)} at {pricing_url(f)}; for "
+            f"hotels, {pro_line(h)} at {pricing_url(h)}."
+        )
+    signup = DEFAULT_SIGNUP_URLS[product]
+    return f"Keys: {pro_line(signup)} at {pricing_url(signup)}."
+
+
 async def _send_challenge(send, support, path: str) -> None:
     """401 + the header that makes an MCP client show a Sign in button.
 
@@ -1631,7 +1646,7 @@ async def _send_challenge(send, support, path: str) -> None:
                 "client should offer a Sign in button for this URL, and it "
                 "takes one click -- or send your RapidAPI key in an "
                 "`x-rapidapi-key` header or as `?rapidapi_key=` on this URL. "
-                f"Keys come from {support.issuer}/ and BASIC is free."
+                f"{_key_plan_line(support.product)}"
             ),
         },
         {"WWW-Authenticate": support.challenge_header(path=path)},
@@ -1662,14 +1677,23 @@ def consent_html(
     csrf: str,
     has_key: bool,
     connect_url: str,
+    allowance: bool = False,
+    day_cap: int = 0,
 ) -> str:
     """What the human sees before a client gets a token.
 
     Names the client, the account, and what the grant actually costs -- which
     on this server is real money on the user's own RapidAPI plan, so it is
     said in those words rather than as "access your data".
+
+    `allowance` is whether the daily sign-in allowance is on (`day_cap`
+    searches a day on our key). With it on and no key connected, the page
+    says the user can search right away: the red "connect a key first" line
+    was false for that user from the day the allowance shipped, and it sat
+    two lines above the "go ask" line (critic 2026-10-22, finding 1).
     """
-    from .connect import _EXTRA_STYLE  # local: keeps the import graph flat
+    # local: keeps the import graph flat
+    from .connect import _EXTRA_STYLE, is_claude_ai_client, next_step_text
 
     what = (
         "search live flight fares"
@@ -1678,17 +1702,56 @@ def consent_html(
         if product == "hotels"
         else "search live flight fares and hotel rates"
     )
-    key_block = (
-        '<p class="good">Your RapidAPI key is connected. Searches this client '
-        "runs will be billed to your own plan.</p>"
-        if has_key
-        else (
+    per_day = f"{day_cap} searches a day" if day_cap > 0 else "a few searches a day"
+    on_allowance = allowance and not has_key
+    if has_key:
+        key_block = (
+            '<p class="good">Your RapidAPI key is connected. Searches this '
+            "client runs will be billed to your own plan.</p>"
+        )
+    elif on_allowance:
+        key_block = (
+            f'<p class="good">You can search right away: {per_day} on this '
+            "sign-in, shared by FlightPowers' flights and hotels servers. A key "
+            "is only needed for more.</p>"
+        )
+    else:
+        key_block = (
             '<p class="bad">You have not connected a RapidAPI key yet. You can '
             "approve this client now, but its searches will come back asking "
             f'you to connect one at <a href="{_e(connect_url)}">{_e(connect_url)}</a>.</p>'
         )
+    spend = (
+        f"run up to {per_day} on FlightPowers' key while no key "
+        "is connected, and searches billed to <strong>your own RapidAPI "
+        "plan</strong> once you connect one"
+        if on_allowance
+        else "run searches billed to <strong>your own RapidAPI plan</strong>"
+    )
+    key_note = (
+        "It never sees your RapidAPI key. It gets a token that points at "
+        "the key you stored here"
+        if has_key
+        else "It will never see a RapidAPI key you connect. It gets a token "
+        "that points at your account here"
     )
     host = _e(urlsplit(redirect_uri).netloc or redirect_uri)
+    # What to do after Approve -- only where a search can actually run then:
+    # a stored key, or the daily sign-in allowance.
+    next_step = (
+        '<p class="note">'
+        + _e(
+            next_step_text(
+                product,
+                lead="After you approve, in a new chat:",
+                small=not has_key,
+                claude_ai=is_claude_ai_client(redirect_uri),
+            )
+        )
+        + "</p>"
+        if has_key or allowance
+        else ""
+    )
     return f"""{_EXTRA_STYLE}
 <h1>Connect {_e(client_name)}?</h1>
 <p class="note">Signed in as <strong>{_e(email or "your Google account")}</strong>.</p>
@@ -1696,10 +1759,8 @@ def consent_html(
 <p><strong>{_e(client_name)}</strong> is asking to {_e(what)} on your behalf
 through FlightPowers.</p>
 <ul>
-  <li>It will be able to run searches billed to
-      <strong>your own RapidAPI plan</strong>. Nothing else.</li>
-  <li>It never sees your RapidAPI key. It gets a token that points at the key
-      you stored here, and that token stops working the moment you disconnect.</li>
+  <li>It will be able to {spend}. Nothing else.</li>
+  <li>{key_note}, and that token stops working the moment you disconnect.</li>
   <li>Access lasts one hour at a time and is renewed silently until you
       revoke it.</li>
 </ul>
@@ -1714,6 +1775,7 @@ through FlightPowers.</p>
     <button class="btn danger" type="submit" name="decision" value="deny">Deny</button>
   </p>
 </form>
+{next_step}
 <p class="note">Client id <code>{_e(client_id)}</code>.
 <a href="/connect">Manage your key</a> &middot;
 <a href="/privacy">Privacy</a> &middot; <a href="/terms">Terms</a></p>

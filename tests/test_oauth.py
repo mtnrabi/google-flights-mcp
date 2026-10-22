@@ -640,6 +640,11 @@ class TestPlainMcpServesEveryCredential:
         body = response.json()
         assert "sign in" in body["error_description"].lower()
         assert "x-rapidapi-key" in body["error_description"]
+        # Where a key comes from: PRO and its pricing tab, not "BASIC is
+        # free" (2026-10-22).
+        assert "PRO is $10 a month for 2,500 searches" in body["error_description"]
+        assert "google-flights-live-api/pricing" in body["error_description"]
+        assert "BASIC is free" not in body["error_description"]
 
     async def test_the_challenge_can_be_switched_off_without_a_deploy(
         self, live, monkeypatch
@@ -650,7 +655,7 @@ class TestPlainMcpServesEveryCredential:
         async with Session(live) as session:
             result = await call_tool(session.http, "/mcp", SEARCH_ARGS)
         assert result["needs_api_key"] is True
-        assert "No RapidAPI key was supplied" in result["message"]
+        assert "No RapidAPI key reached this server" in result["message"]
 
     async def test_the_alias_challenges_whatever_the_mode_says(
         self, live, monkeypatch
@@ -1411,3 +1416,148 @@ class TestEntrypointStillExports(object):
 
     def test_the_exported_app_is_still_the_starlette_wrapper(self):
         assert hasattr(entrypoint_module.app, "router")
+
+
+
+CLAUDE_AI_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
+
+
+class TestConsentPageSaysWhatToDoNext:
+    """2026-10-22: the page the human approves on ends with the next step in
+    the client and one question to paste, naming the prompts this host ships
+    -- but only where a search can run right after Approve."""
+
+    @staticmethod
+    def render(
+        product="flights",
+        *,
+        has_key=False,
+        allowance=True,
+        client="Claude",
+        redirect_uri=CLAUDE_AI_REDIRECT,
+        day_cap=10,
+    ):
+        from src.oauth import consent_html
+
+        return html_module.unescape(
+            consent_html(
+                client_name=client,
+                client_id="c1",
+                redirect_uri=redirect_uri,
+                email="a@b.c",
+                product=product,
+                sealed="x",
+                csrf="y",
+                has_key=has_key,
+                connect_url="https://x.test/connect",
+                allowance=allowance,
+                day_cap=day_cap,
+            )
+        )
+
+    @pytest.mark.parametrize("product", ["flights", "hotels"])
+    def test_next_step_is_on_the_consent_page(self, product):
+        from src.prompts import FLIGHT_PROMPT_TITLES, HOTEL_PROMPT_TITLES
+
+        page = self.render(product, has_key=True)
+        assert "After you approve, in a new chat: + \u2192 Connectors" in page
+        titles = HOTEL_PROMPT_TITLES if product == "hotels" else FLIGHT_PROMPT_TITLES
+        for title in titles:
+            assert title in page
+
+    def test_allowance_only_caller_gets_a_one_search_question(self):
+        from src.prompts import FLIGHT_PROMPT_TITLES
+
+        page = self.render(has_key=False, allowance=True)
+        assert "Lisbon, 10 to 17 March" in page
+        assert "any week in March" not in page
+        # The ready-made prompts ask for date ranges, bigger than the
+        # allowance: not offered to a caller on it (review 2026-10-22).
+        for title in FLIGHT_PROMPT_TITLES:
+            assert title not in page
+        keyed = self.render(has_key=True, allowance=False)
+        assert "Lisbon any week in March, 7 or 10 nights" in keyed
+
+    def test_no_key_and_no_allowance_promises_nothing(self):
+        page = self.render(has_key=False, allowance=False)
+        assert "After you approve" not in page
+
+
+class TestConsentPageTellsTheTruthAboutTheAllowance:
+    """Critic 2026-10-22, finding 1: a keyless user with the allowance on can
+    search right after Approve, so the red "you have not connected a key ...
+    its searches will come back asking you to connect one" line was false for
+    them, and it sat two lines above the "go ask" line."""
+
+    render = staticmethod(TestConsentPageSaysWhatToDoNext.render)
+
+    def test_allowance_on_and_no_key_reads_neutral_not_red(self):
+        page = self.render(has_key=False, allowance=True, day_cap=10)
+        assert (
+            '<p class="good">You can search right away: 10 searches a day on '
+            "this sign-in, shared by FlightPowers' flights and hotels servers. "
+            "A key is only needed for more.</p>"
+        ) in page
+        assert 'class="bad"' not in page
+        assert "You have not connected a RapidAPI key yet" not in page
+        assert "come back asking you to connect one" not in page
+        # The grant bullet says whose key the first searches run on.
+        assert "run up to 10 searches a day on FlightPowers' key" in page
+
+    def test_allowance_off_and_no_key_keeps_the_red_line(self):
+        page = self.render(has_key=False, allowance=False)
+        assert '<p class="bad">You have not connected a RapidAPI key yet.' in page
+        assert "You can search right away" not in page
+        # And never claims a stored key it does not have.
+        assert "the key you stored here" not in page
+        assert "It will never see a RapidAPI key you connect" in page
+
+    def test_a_connected_key_reads_as_billed_to_their_plan(self):
+        page = self.render(has_key=True, allowance=True)
+        assert "Your RapidAPI key is connected" in page
+        assert "You can search right away" not in page
+        assert 'class="bad"' not in page
+
+
+class TestOnlyClaudeAiGetsTheConnectorsMenuPath:
+    """Critic 2026-10-22, finding 9: "+ -> Connectors" is claude.ai's menu.
+    It used to go to any client whose NAME contained "claude", which sent
+    Claude Code (which adds servers with /mcp) down the wrong path. Now the
+    client is matched on the redirect URI claude.ai's connector client uses."""
+
+    render = staticmethod(TestConsentPageSaysWhatToDoNext.render)
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://claude.com/api/mcp/auth_callback",
+        ],
+    )
+    def test_claude_ai_gets_the_menu_path(self, redirect_uri):
+        page = self.render(client="Claude", redirect_uri=redirect_uri)
+        assert "+ \u2192 Connectors \u2192 turn FlightPowers on" in page
+
+    @pytest.mark.parametrize(
+        "client, redirect_uri",
+        [
+            ("Claude Code (flightpowers)", "http://localhost:53682/callback"),
+            ("Claude Desktop", "http://127.0.0.1:6274/oauth/callback"),
+            ("Cursor", "cursor://anysphere.cursor-retrieval/oauth/callback"),
+            ("ChatGPT", "https://chatgpt.com/connector_platform_oauth_redirect"),
+            # A look-alike: same host, different path, is not claude.ai's client.
+            ("Claude", "https://claude.ai/some/other/callback"),
+        ],
+    )
+    def test_every_other_client_gets_a_neutral_path(self, client, redirect_uri):
+        page = self.render(client=client, redirect_uri=redirect_uri)
+        assert "Connectors \u2192" not in page
+        assert "+ \u2192" not in page
+        assert "turned on in your assistant's connectors or tools menu" in page
+
+    def test_a_name_that_says_claude_is_not_enough(self):
+        from src.connect import is_claude_ai_client
+
+        assert is_claude_ai_client("https://claude.ai/api/mcp/auth_callback")
+        assert not is_claude_ai_client("http://localhost:1/callback")
+        assert not is_claude_ai_client("")

@@ -247,6 +247,22 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
             "previously fetched fare as current. If you display a fare, "
             "display when it was fetched."
         ),
+        "BACKEND_LOGS": (
+            "**Our search backend keeps its own short-lived logs.** Every "
+            "search is run by a backend we operate on Amazon Web Services, "
+            "behind the Google Flights Live API. Its operational log lines can "
+            "hold the search itself (route, dates, passenger counts and "
+            "filters) and the RapidAPI username of the key that paid for it; "
+            "for a search on the daily allowance (section 2c) that is "
+            "FlightPowers' own account, not yours. These logs are kept for "
+            "about one day and are used to find failures and to count "
+            "traffic. Before they expire, they are rolled up into totals in "
+            "our own metrics database that carry no username."
+        ),
+        "TRIAL_SHARED": (
+            " The daily count is shared with FlightPowers' other paid server, "
+            "so one sign-in has one allowance across both."
+        ),
         "CONFIRMATION_SITES": "the airline or booking site",
         "EMPTY_RESULT_BULLET": (
             "**An empty result set is a valid answer**, meaning no flights "
@@ -269,7 +285,9 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
             "`search_hotels`, `find_hotel_by_name` or `compare_hotel_rates`"
         ),
         "TOOL_BULLETS": (
-            "- `search_hotels`\n- `find_hotel_by_name`\n- `compare_hotel_rates`"
+            "- `search_hotels`\n- `find_hotel_by_name`\n"
+            "- `compare_hotel_rates`, only on a deployment where a second hotel "
+            "source is switched on (`tools/list` shows whether it is)"
         ),
         # Two brands can appear in a result, so disclaiming affiliation with
         # one of them is a disclaimer for half the server. `search_hotels`
@@ -280,8 +298,10 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
         "TOOL_BEHAVIOUR": (
             "Each takes a stay -- a destination or a property name, plus "
             "check-in and check-out dates -- and forwards it to the Booking "
-            "Live API on RapidAPI as a single request. There is no fan-out "
-            "within a source: one tool call is one request per source asked. "
+            "Live API on RapidAPI. One stay is one request. A range of check-in "
+            "dates, or several stay lengths, is expanded into one request per "
+            "stay (30 per call by default, rising to cover a larger request "
+            "by itself, 300 at most), so one tool call can make many requests. "
             "An optional two-letter country code prices the stay through a "
             "residential connection in that country, so the result is what a "
             "shopper resident there would be quoted. `search_hotels` and "
@@ -301,8 +321,9 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
             "within minutes, so nothing is cached or reused."
         ),
         "COST_SENTENCE": (
-            "There is no fan-out here: each tool call is exactly one billed "
-            "upstream request"
+            "Cost of a call is one billed upstream request per stay priced: "
+            "one for fixed dates, one per check-in date and stay length for a "
+            "range"
         ),
         "BRAND_NOUNS": "Property, chain and travel-brand names",
         "STALENESS_BULLET": (
@@ -312,6 +333,25 @@ PRODUCT_CONTEXT: dict[str, dict[str, str]] = {
             "a previously fetched rate as current. If you display a rate, "
             "display when it was fetched, and the country it was priced from "
             "if one was given."
+        ),
+        "BACKEND_LOGS": (
+            "**Our search backend keeps its own short-lived logs.** Every "
+            "search is run by a backend we operate on Amazon Web Services, "
+            "behind the Booking Live API. Its operational log lines can hold "
+            "the search itself (destination or hotel name, dates, guest counts "
+            "and filters) and the RapidAPI username of the key that paid for "
+            "it. A search on the daily allowance (section 2c) sends your "
+            "Google account identifier to that backend instead, so it appears "
+            "on those lines in place of a RapidAPI username. These logs are "
+            "kept for about one day and are used to find failures and to count "
+            "traffic. Before they expire, they are rolled up into daily counts "
+            "in our own metrics database, including calls per account per "
+            "day, which for an allowance search means per Google account "
+            "identifier."
+        ),
+        "TRIAL_SHARED": (
+            " The daily count is shared with FlightPowers' other paid server, "
+            "so one sign-in has one allowance across both."
         ),
         "CONFIRMATION_SITES": "the property or booking site",
         "EMPTY_RESULT_BULLET": (
@@ -345,11 +385,13 @@ PRODUCT_CONTEXT["both"] = dict(
     ),
     TOOL_BULLETS=(
         "- `search_oneway_flights`\n- `search_roundtrip_flights`\n"
-        "- `search_hotels`\n- `find_hotel_by_name`\n- `compare_hotel_rates`"
+        "- `search_hotels`\n- `find_hotel_by_name`\n"
+        "- `compare_hotel_rates`, only on a deployment where a second hotel "
+        "source is switched on (`tools/list` shows whether it is)"
     ),
     # Written out rather than concatenated: the two single-product paragraphs
-    # each open with "Both", which is four tools between them, and one denies
-    # the fan-out the other has just described.
+    # each open with "Both", which is four tools between them, and each
+    # describes its own fan-out.
     TOOL_BEHAVIOUR=(
         "The two flight tools accept a date range and a list of destinations "
         "and expand them internally into individual searches (30 per call by "
@@ -358,11 +400,12 @@ PRODUCT_CONTEXT["both"] = dict(
         "lengths is 93, and the same month across three destinations is 279; "
         "a per-call `max_searches` argument sets the figure "
         "explicitly, up or down, and 300 is the hard ceiling), forwarding "
-        "each search to the Google Flights Live API on RapidAPI. The two hotel "
-        "tools take one stay -- a destination or a property name, plus "
+        "each search to the Google Flights Live API on RapidAPI. The hotel "
+        "tools take a stay -- a destination or a property name, plus "
         "check-in and check-out dates -- and forward it to the Booking Live "
-        "API on RapidAPI as a single request, with no fan-out: one hotel tool "
-        "call is exactly one upstream request. An optional two-letter country "
+        "API on RapidAPI, one request per stay; a range of check-in dates or "
+        "several stay lengths is expanded into one request per stay, under "
+        "the same caps. An optional two-letter country "
         "code prices a stay through a residential connection in that country, "
         "so the result is what a shopper resident there would be quoted."
     ),
@@ -378,8 +421,8 @@ PRODUCT_CONTEXT["both"] = dict(
     ),
     COST_SENTENCE=(
         "Cost of a flight fan-out is roughly one billed upstream request per "
-        "date/destination combination searched, and a hotel call is exactly "
-        "one"
+        "date/destination combination searched, and one per stay priced "
+        "for a hotel call"
     ),
     BRAND_NOUNS="Airline, airport, property and travel-brand names",
     STALENESS_BULLET=(
@@ -389,6 +432,25 @@ PRODUCT_CONTEXT["both"] = dict(
         "present a previously fetched price as current. If you display a "
         "price, display when it was fetched."
     ),
+    BACKEND_LOGS=(
+        "**Our search backends keep their own short-lived logs.** Every "
+        "search is run by a backend we operate on Amazon Web Services: one "
+        "behind the Google Flights Live API, one behind the Booking Live API. "
+        "Their operational log lines can hold the search itself (route or "
+        "destination, hotel name, dates, passenger or guest counts and "
+        "filters) and the RapidAPI username of the key that paid for it. For "
+        "a flight search on the daily allowance (section 2c) that username is "
+        "FlightPowers' own account, not yours; a hotel search on the "
+        "allowance sends your Google account identifier to the hotels backend "
+        "instead, so it appears on those lines in place of a RapidAPI "
+        "username. These logs are kept for about one day and are used to "
+        "find failures and to count traffic. Before they expire, they are "
+        "rolled up into totals in our own metrics database; the flights "
+        "totals carry no username, the hotels rollup keeps calls per account "
+        "per day, which for an allowance search means per Google account "
+        "identifier."
+    ),
+    TRIAL_SHARED=" The daily count covers flights and hotels together.",
     CONFIRMATION_SITES="the airline, property or booking site",
     EMPTY_RESULT_BULLET=(
         "**An empty result set is a valid answer**, meaning nothing matched "
@@ -439,8 +501,10 @@ SUPPORT_MD = """# Support — {{PRODUCT}}
 ## Contact
 
 Email **matan@flightpowers.com**. Include the tool you called, the arguments, and
-the UTC time of the call. There is no account to look up — the server stores no
-user identity — so those three things are what make a report actionable.
+the UTC time of the call. If you signed in with Google, include the email address
+you signed in with too, so we can find your daily search count or your
+connected key. If you did not sign in, there is no account to look up, so those
+three things are what make a report actionable.
 
 ## Before you write
 
@@ -498,7 +562,7 @@ tier available, at `{{SIGNUP_URL}}`.
 
 {{TOOL_BULLETS}}
 
-Both are read-only. They cannot book, hold, pay for or cancel anything.
+All of them are read-only. They cannot book, hold, pay for or cancel anything.
 
 ## Policies and contact
 

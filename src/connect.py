@@ -73,6 +73,7 @@ import httpx
 
 from .keystore import KeySummary
 from .legal import CONTACT_EMAIL, page
+from .quota_gate import BASIC_FOOTNOTE, pricing_url, pro_line
 
 logger = logging.getLogger(__name__)
 
@@ -218,14 +219,95 @@ def _e(value: Any) -> str:
 
 
 def _listings_html() -> str:
+    # PRO leads: one month-wide scan is 93 searches, so the 10-a-month BASIC
+    # plan is a footnote, never the offer (2026-10-22).
     rows = "".join(
-        f'<li><a href="{_e(url)}">{_e(name)}</a></li>' for name, url in LISTINGS
+        f'<li><a href="{_e(pricing_url(url))}">{_e(name)}</a>: '
+        f"<strong>{_e(pro_line(url))}</strong></li>"
+        for name, url in LISTINGS
     )
     return (
-        "<p>Get a key by subscribing to the listing you want to use. "
-        "<strong>BASIC is free</strong> and includes 10 requests a month; "
-        "PRO is $10 a month.</p>"
+        "<p>Get a key by subscribing to the listing you want to use.</p>"
         f"<ul>{rows}</ul>"
+        f'<p class="note">{_e(BASIC_FOOTNOTE)}</p>'
+    )
+
+
+#: What to type first, per product: one real question a new user can paste.
+#: The month-wide flights ask is ~62 searches, so it is offered to a caller
+#: with a key; a caller on the small daily sign-in allowance gets a one-search
+#: question instead, or their first try would be a quota refusal.
+FIRST_ASK = {
+    "flights": (
+        "cheapest round trip from <your city> to Lisbon any week in March, "
+        "7 or 10 nights"
+    ),
+    "flights_small": "cheapest round trip from <your city> to Lisbon, 10 to 17 March",
+    "hotels": "price The Hoxton, Amsterdam for 10 to 14 March for 2 adults",
+}
+
+
+#: The redirect URIs claude.ai's own connector client registers with (the
+#: web app; Claude Desktop's connectors come from the same account and the
+#: same callback). Only a client sent back to one of these gets Claude's menu
+#: path. Matched on the redirect URI, not on the client's NAME: Claude Code
+#: and any other tool can put "Claude" in a client_name, and Claude Code adds
+#: a server with `/mcp`, not "+ -> Connectors". `claude.com` is listed
+#: because Anthropic's connector docs say the callback may move there.
+CLAUDE_AI_REDIRECT_URIS = frozenset(
+    {
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback",
+    }
+)
+
+
+def is_claude_ai_client(redirect_uri: str) -> bool:
+    """Whether this OAuth client is claude.ai's connector client."""
+    return (redirect_uri or "").strip() in CLAUDE_AI_REDIRECT_URIS
+
+
+def next_step_text(
+    product: str,
+    lead: str = "You're connected. In a new chat:",
+    *,
+    small: bool = False,
+    claude_ai: bool = False,
+) -> str:
+    """The one-paragraph "you're connected, now do this" a new user needs.
+
+    Names the client path, one question to paste, and the ready-made prompts
+    this host ships, so the first search is one step away. The "+ ->
+    Connectors" path is Claude's web/desktop menu and is only named when
+    `claude_ai` says the client IS claude.ai (see `is_claude_ai_client`);
+    every other client, and every page that cannot tell which client it is
+    serving (/connect), gets a neutral path. `small` picks a one-search
+    question for a caller on the daily allowance.
+    """
+    from .prompts import FLIGHT_PROMPT_TITLES, HOTEL_PROMPT_TITLES  # noqa: PLC0415
+
+    hotels = product == "hotels"
+    if hotels:
+        ask = FIRST_ASK["hotels"]
+    else:
+        ask = FIRST_ASK["flights_small" if small else "flights"]
+    titles = HOTEL_PROMPT_TITLES if hotels else FLIGHT_PROMPT_TITLES
+    path = (
+        "+ \u2192 Connectors \u2192 turn FlightPowers on"
+        if claude_ai
+        else "make sure FlightPowers is turned on in your assistant's "
+        "connectors or tools menu"
+    )
+    first = f"{lead} {path}, then ask: '{ask}'."
+    if small:
+        # The ready-made prompts ask for date ranges, which need more
+        # searches than the daily allowance has: offering them to a caller
+        # on it sends their first try into a refusal (review 2026-10-22).
+        return first
+    return (
+        f"{first} Or pick one of its ready-made prompts: "
+        + ", ".join(f"'{t}'" for t in titles)
+        + "."
     )
 
 
@@ -357,6 +439,12 @@ def signed_in_html(
         # able to search, and a page that only ever says "paste a key" tells
         # them the opposite of what is true.
         blocks.append(f'<p class="note">{_e(trial_line)}</p>')
+        if flow == FLOW_OAUTH and summary is None:
+            # Signed in through an assistant, no key yet, and the allowance
+            # is on: they can search right now, so say how.
+            blocks.append(
+                f'<p class="good">{_e(next_step_text(product, small=True))}</p>'
+            )
     if error:
         blocks.append(f'<p class="bad">{_e(error)}</p>')
     if notice:
@@ -373,8 +461,8 @@ def signed_in_html(
             # already connected needs one sentence telling them to go back to
             # it, not a URL to paste into a second connector.
             connected += (
-                "<p><strong>You are set. There is nothing to paste.</strong> "
-                "Go back to your assistant and ask it for a fare.</p>"
+                "<p><strong>You are set. There is nothing to paste.</strong></p>"
+                f"<p>{_e(next_step_text(product))}</p>"
                 '<p class="note">Searches it runs are billed to your own '
                 "RapidAPI plan, and stop the moment you disconnect below.</p>"
             )
