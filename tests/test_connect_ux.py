@@ -344,7 +344,7 @@ class TestTokenReader:
             await sign_in(session.http)
             page = await session.http.get("/connect")
         assert "Paste your key" in page.text
-        assert "at most one" in page.text
+        assert "costs <strong>no requests" in page.text
         assert CONNECT_TOKEN_PREFIX not in page.text
 
 

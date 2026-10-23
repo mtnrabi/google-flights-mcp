@@ -16,25 +16,32 @@ Validating the key
 Storing a key that turns out to be wrong just moves the failure to the user's
 first search, in their MCP client, with none of the context they had while
 they were on this page. So the key is checked before it is stored, with ONE
-request to the same RapidAPI listing the tools use:
+unmetered GET to a path that is configured on no listing:
 
-    flights   POST https://google-flights-live-api.p.rapidapi.com
-                   /api/google_flights/oneway/v1
-    hotels    POST https://booking-live-api.p.rapidapi.com/search
+    flights   GET https://google-flights-live-api.p.rapidapi.com/fp-subscription-check
+    hotels    GET https://booking-live-api.p.rapidapi.com/fp-subscription-check
 
-with an empty JSON body. The body is empty deliberately: RapidAPI's gateway
-answers the *authentication* question before our backend ever sees the
-request, so 401 (bad key) and 403 (not subscribed to this API) come back in
-milliseconds and cost the backend nothing. Anything else -- including the
-400/422 our own backend returns for a body with no dates in it -- means the
-gateway accepted the key, which is the whole question being asked.
+RapidAPI checks the key and the subscription BEFORE it routes, so the answer
+comes from the Hub itself and nothing reaches our backend (#523, measured
+2026-09-28 for the api front's `/v1/verify`; the two answers below were
+re-measured 2026-10-23 on both hosts):
 
-Cost, stated plainly on the page: **at most one request against the user's
-own plan.** RapidAPI counts a request once it proxies it, so a key that is
-subscribed and in quota spends one; a key that is rejected at the gateway
-spends none. On the free BASIC tier (10 requests a month) that is 10% of a
-month's allowance, which is exactly why the page says so before the button
-rather than after it.
+    a key subscribed to that listing        404 "Endpoint '/...' does not exist"
+    an unknown key, or one not subscribed   403 "You are not subscribed to this API."
+
+The Hub's 404 is not counted against the plan (#523: three probes between two
+metered calls moved `x-ratelimit-requests-remaining` by the metered call
+only). Until 2026-10-23 this check was a
+POST with an empty body to the real search endpoint: one metered request,
+and our backend's 422 for the missing dates landed in the customer's
+RapidAPI analytics as their first (and failed) call.
+
+The Hub sends the same 403 for a wrong key and for an unsubscribed one, so
+the page's message names both fixes. Fail-open, as before: a network failure,
+or any answer that is neither the Hub's 404 nor a 401/403 (a 429 included),
+stores the key as `unverified` rather than losing it; only 401/403 refuse it. The path must
+never be configured as an endpoint on a listing; if it ever is, a 2xx still
+verifies, it just starts costing a request.
 
 `MCP_CONNECT_VALIDATE=0` turns the check off for a deployment that would
 rather store first and fail later.
@@ -77,17 +84,41 @@ from .quota_gate import BASIC_FOOTNOTE, pricing_url, pro_line
 
 logger = logging.getLogger(__name__)
 
-#: Where the validation request goes, per product, and the listing a caller
-#: has to be subscribed to for it to pass. Mirrors rapidapi_client.ENDPOINT_MAP
-#: and hotels_client.ENDPOINT_MAP rather than re-deriving them, so a path that
-#: moves there moves here in the same edit.
-VALIDATION_TARGETS = {
-    "flights": ("google-flights-live-api.p.rapidapi.com", "/api/google_flights/oneway/v1"),
-    "hotels": ("booking-live-api.p.rapidapi.com", "/search"),
+#: Which listing host the key is checked against, per product. A combined
+#: deployment validates against flights: one key, one check, and the flights
+#: listing is the primary one for `both`.
+VALIDATION_HOSTS = {
+    "flights": "google-flights-live-api.p.rapidapi.com",
+    "hotels": "booking-live-api.p.rapidapi.com",
 }
-#: A combined deployment validates against flights: one key, one check, and
-#: the flights listing is the primary one for `both`.
-VALIDATION_TARGETS["both"] = VALIDATION_TARGETS["flights"]
+VALIDATION_HOSTS["both"] = VALIDATION_HOSTS["flights"]
+#: Same path as the api front's `/v1/verify` (api_proxy SUBSCRIPTION_PROBE_PATH).
+SUBSCRIPTION_PROBE_PATH = "/fp-subscription-check"
+
+
+def is_hub_no_such_endpoint(response: httpx.Response) -> bool:
+    """The Hub's own 404 for an unconfigured path, sent only after it accepted
+    the key for the listing. Matched on the message: a backend's 404 says
+    nothing about whether the Hub looked at the key."""
+    if response.status_code != 404:
+        return False
+    try:
+        message = response.json().get("message")
+    except (ValueError, AttributeError):
+        return False
+    return (
+        isinstance(message, str)
+        and message.startswith("Endpoint ")
+        and message.endswith("does not exist")
+    )
+
+
+_UNVERIFIED = (
+    "We could not reach RapidAPI to check the key just now, so it "
+    "was saved without being verified. If searches come back "
+    "asking for a key, come back here and paste it again."
+)
+
 
 LISTINGS = (
     (
@@ -118,41 +149,30 @@ async def check_rapidapi_key(
     client: httpx.AsyncClient | None = None,
     timeout: float = 15.0,
 ) -> KeyCheck:
-    """One gateway round trip. Never raises: a network failure is reported as
-    `unverified`, which the caller stores anyway rather than losing a key
-    because our own egress hiccuped."""
+    """One unmetered Hub round trip. Never raises: a network failure is
+    reported as `unverified`, which the caller stores anyway rather than
+    losing a key because our own egress hiccuped."""
     from .rapidapi_client import read_quota  # local: keeps the import graph flat
 
-    host, path = VALIDATION_TARGETS.get(product, VALIDATION_TARGETS["flights"])
+    host = VALIDATION_HOSTS.get(product, VALIDATION_HOSTS["flights"])
     own_client = client is None
     client = client or httpx.AsyncClient(timeout=timeout)
     try:
-        response = await client.post(
-            f"https://{host}{path}",
-            json={},
-            headers={
-                "content-type": "application/json",
-                "x-rapidapi-key": key,
-                "x-rapidapi-host": host,
-            },
+        response = await client.get(
+            f"https://{host}{SUBSCRIPTION_PROBE_PATH}",
+            headers={"x-rapidapi-key": key, "x-rapidapi-host": host},
             timeout=timeout,
         )
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         logger.warning("key validation could not reach RapidAPI: %s", type(exc).__name__)
-        return KeyCheck(
-            ok=True,
-            reason="unverified",
-            message=(
-                "We could not reach RapidAPI to check the key just now, so it "
-                "was saved without being verified. If searches come back "
-                "asking for a key, come back here and paste it again."
-            ),
-        )
+        return KeyCheck(ok=True, reason="unverified", message=_UNVERIFIED)
     finally:
         if own_client:
             await client.aclose()
 
     quota = read_quota(response)
+    if is_hub_no_such_endpoint(response) or 200 <= response.status_code < 300:
+        return KeyCheck(ok=True, reason="ok", quota=quota)
     if response.status_code == 401:
         return KeyCheck(
             ok=False,
@@ -164,22 +184,25 @@ async def check_rapidapi_key(
             ok=False,
             reason="not_subscribed",
             message=(
-                "That key is valid but is not subscribed to this API. Open the "
-                "listing below and subscribe -- the BASIC plan is free."
+                "RapidAPI did not accept that key for this API: it is either "
+                "not subscribed to it, or not copied whole. Open the listing "
+                "below and subscribe -- the BASIC plan is free -- then copy "
+                "the key again from that page."
             ),
         )
-    if response.status_code == 429:
-        return KeyCheck(
-            ok=True,
-            reason="out_of_quota",
-            message=(
-                "The key works, but this month's plan quota is already spent. "
-                "It is saved; searches will start working again when the plan "
-                "resets or you upgrade."
-            ),
-            quota=quota,
-        )
-    return KeyCheck(ok=True, reason="ok", quota=quota)
+    # Anything else, 429 included, is not an answer about the key: a 429 on
+    # this unmetered path was never measured as "quota spent" (a random key
+    # got one on the old POST path), so it must not say "the key works".
+    logger.warning("key validation got an unexpected %s from RapidAPI", response.status_code)
+    return KeyCheck(
+        ok=True,
+        reason="unverified",
+        message=(
+            "RapidAPI gave an unexpected answer when we checked the key, so "
+            "it was saved without being verified. If searches come back "
+            "asking for a key, come back here and paste it again."
+        ),
+    )
 
 
 # ── rendering ────────────────────────────────────────────────────────────
@@ -499,9 +522,8 @@ def signed_in_html(
         'placeholder="the 50-character key from your RapidAPI dashboard"></p>'
         '<p><button class="btn" type="submit">Save key</button></p>'
         '<p class="note">Saving runs one check against RapidAPI to make sure '
-        "the key is subscribed. That check costs <strong>at most one "
-        "request</strong> from your own plan -- on the free BASIC plan, one "
-        "of ten for the month.</p>"
+        "the key is subscribed. That check costs <strong>no requests"
+        "</strong> from your plan.</p>"
         "</div></form>"
     )
 

@@ -84,11 +84,12 @@ def make_settings(**overrides) -> Settings:
 class Upstream:
     """Google's token endpoint, RapidAPI's gateway, and our own backend."""
 
-    def __init__(self, sub="sub-1", email="a@example.test", validate_status=200):
+    def __init__(self, sub="sub-1", email="a@example.test", validate_status=404):
         self.sub = sub
         self.email = email
         self.validate_status = validate_status
         self.keys_seen: list[str] = []
+        self.validation_requests: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -114,7 +115,13 @@ class Upstream:
         # listing host, and the tool's own search on the test upstream.
         self.keys_seen.append(request.headers.get("x-rapidapi-key", ""))
         if "google-flights-live-api.p.rapidapi.com" in url:
-            return httpx.Response(self.validate_status, json={"detail": "no dates"})
+            # The Hub's own answers to the unmetered probe (connect.py docstring).
+            self.validation_requests.append(request)
+            message = {
+                404: "Endpoint '/fp-subscription-check' does not exist",
+                403: "You are not subscribed to this API.",
+            }.get(self.validate_status, "Invalid API key.")
+            return httpx.Response(self.validate_status, json={"message": message})
         return httpx.Response(200, json=[ONEWAY_ROW])
 
 
@@ -274,13 +281,18 @@ class TestFullFlow:
 
             page = (await http.get("/connect")).text
             assert "Paste your key" in page
-            assert "at most one" in page  # the validation cost, stated up front
+            assert "costs <strong>no requests" in page  # the validation cost, stated up front
 
             saved = await http.post(
                 "/connect/save",
                 data={"csrf": csrf_of(page), "rapidapi_key": USER_KEY},
             )
             assert saved.status_code == 200
+            # The check was the unmetered Hub probe, never a search.
+            [probe] = upstream.validation_requests
+            assert probe.method == "GET"
+            assert probe.url.path == "/fp-subscription-check"
+            assert probe.content == b""
             # The key is stored, and the page shows only its last four.
             assert USER_KEY not in saved.text
             assert f"…{USER_KEY[-4:]}" in saved.text
@@ -556,3 +568,108 @@ class TestDiscovery:
     async def test_no_connect_url_where_there_is_no_connect_page(self, unconfigured):
         result = await call_with(unconfigured, {}, {})
         assert "connect_url" not in result["how_to_get_a_key"]
+
+
+class TestKeyCheckIsTheUnmeteredHubProbe:
+    """`check_rapidapi_key` against the Hub's real answers (measured 2026-10-23
+    on both listing hosts). The old check POSTed an empty body to the search
+    endpoint: one metered request, and a 422 in the customer's analytics."""
+
+    @staticmethod
+    async def check(status, body=None, product="flights", raise_exc=None):
+        from src.connect import check_rapidapi_key
+
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if raise_exc is not None:
+                raise raise_exc
+            return httpx.Response(status, json=body if body is not None else {})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            result = await check_rapidapi_key(USER_KEY, product, client=c)
+        return result, seen
+
+    HUB_404 = {"message": "Endpoint '/fp-subscription-check' does not exist"}
+
+    @pytest.mark.asyncio
+    async def test_a_subscribed_key_gets_the_hubs_404_and_passes(self):
+        result, [req] = await self.check(404, self.HUB_404)
+        assert (result.ok, result.reason, result.message) == (True, "ok", "")
+        assert req.method == "GET"
+        assert str(req.url) == (
+            "https://google-flights-live-api.p.rapidapi.com/fp-subscription-check"
+        )
+        assert req.headers["x-rapidapi-host"] == "google-flights-live-api.p.rapidapi.com"
+        assert req.headers["x-rapidapi-key"] == USER_KEY
+        assert req.content == b""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "product,host",
+        [
+            ("hotels", "booking-live-api.p.rapidapi.com"),
+            ("both", "google-flights-live-api.p.rapidapi.com"),
+            ("flights", "google-flights-live-api.p.rapidapi.com"),
+        ],
+    )
+    async def test_each_product_asks_its_own_listing(self, product, host):
+        result, [req] = await self.check(404, self.HUB_404, product=product)
+        assert result.ok
+        assert req.url.host == host
+        assert req.headers["x-rapidapi-host"] == host
+
+    @pytest.mark.asyncio
+    async def test_unknown_or_unsubscribed_key_is_refused(self):
+        result, _ = await self.check(
+            403, {"message": "You are not subscribed to this API."}
+        )
+        assert (result.ok, result.reason) == (False, "not_subscribed")
+        assert "not subscribed" in result.message
+
+    @pytest.mark.asyncio
+    async def test_a_401_is_an_invalid_key(self):
+        result, _ = await self.check(401, {"message": "Invalid API key."})
+        assert (result.ok, result.reason) == (False, "invalid")
+
+    @pytest.mark.asyncio
+    async def test_a_2xx_still_verifies_if_the_path_is_ever_configured(self):
+        result, _ = await self.check(200, {})
+        assert (result.ok, result.reason) == (True, "ok")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status,body",
+        [
+            (404, {"detail": "Not Found"}),  # a backend's 404, not the Hub's
+            (404, ["not", "an", "object"]),
+            (429, {"message": "Too many requests"}),  # never says "the key works"
+            (500, {"message": "boom"}),
+            (502, {}),
+        ],
+    )
+    async def test_anything_else_fails_open_as_unverified(self, status, body):
+        result, _ = await self.check(status, body)
+        assert (result.ok, result.reason) == (True, "unverified")
+        assert "unexpected answer" in result.message
+        assert "key works" not in result.message
+
+    @pytest.mark.asyncio
+    async def test_a_404_that_is_not_json_is_not_the_hubs(self):
+        from src.connect import check_rapidapi_key
+
+        def handler(request):
+            return httpx.Response(404, text="Cannot GET /fp-subscription-check")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            result = await check_rapidapi_key(USER_KEY, "flights", client=c)
+        assert (result.ok, result.reason) == (True, "unverified")
+
+    @pytest.mark.asyncio
+    async def test_a_network_failure_fails_open_as_unverified(self):
+        result, _ = await self.check(
+            0, raise_exc=httpx.ConnectError("down")
+        )
+        assert (result.ok, result.reason) == (True, "unverified")
+        assert "could not reach RapidAPI" in result.message
