@@ -113,3 +113,30 @@ def select_rows(rows: list[Any], limit: int) -> list[Any]:
         if cheapest >= limit:
             kept[-1] = rows[cheapest]
     return kept
+
+
+#: The fields a compact `search_airbnb` row keeps, in this order, from the
+#: Airbnb Live API's common-schema row (hotel_agent common/schema.js). The
+#: rest (image URL, coordinates, the Booking-compatible aliases `price`,
+#: `price_string` and `review_score`, `available`, ...) come back with
+#: `verbose: true`.
+AIRBNB_COMPACT_FIELDS: tuple[str, ...] = (
+    "name",
+    "price_total",
+    "price_per_night",
+    "currency",
+    "rating",
+    "rating_scale",
+    "review_count",
+    "room_type",
+    "bedrooms",
+    "beds",
+    "baths",
+    "taxes_included",
+    "link",
+    "retrieved_at",
+)
+
+
+def compact_airbnb_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: row[k] for k in AIRBNB_COMPACT_FIELDS if k in row}

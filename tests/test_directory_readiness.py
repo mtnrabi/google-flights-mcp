@@ -42,15 +42,24 @@ PRODUCTS = ("flights", "hotels", "both")
 
 
 def tools_for(products: str):
-    mcp = build_with_upstream(
-        lambda _r: httpx.Response(200, json=[]), products=products
-    )
+    """Every tool the product can serve: the default build, plus whatever
+    MCP_AIRBNB=on adds (search_airbnb, hotels only), so both are reviewed."""
     import anyio
 
-    async def _list():
-        return await mcp._list_tools()
+    out: dict[str, dict] = {}
+    for airbnb in (False, True):
+        mcp = build_with_upstream(
+            lambda _r: httpx.Response(200, json=[]),
+            products=products,
+            airbnb_enabled=airbnb,
+        )
 
-    return [json.loads(t.to_mcp_tool().model_dump_json()) for t in anyio.run(_list)]
+        async def _list():
+            return await mcp._list_tools()
+
+        for t in anyio.run(_list):
+            out.setdefault(t.name, json.loads(t.to_mcp_tool().model_dump_json()))
+    return list(out.values())
 
 
 class TestToolAnnotations:

@@ -407,6 +407,12 @@ class Settings:
     # behaviour under test.
     hotel_compare_enabled: bool = True
 
+    # Whether the hotels product serves `search_airbnb`. Off unless
+    # MCP_AIRBNB is exactly "on" (and off in a hand-built Settings), so the
+    # deploy that carries the code leaves every tool list as it was; going
+    # live is the env var plus a redeploy. Never served on the flights host.
+    airbnb_enabled: bool = False
+
     #: How many rows a response may carry when `limit` was raised by the
     #: server rather than asked for. See DEFAULT_RESULT_ROWS_MAX; 0 is off.
     #: Defaulted so a Settings built by hand (tests, scripts) gets the
@@ -663,4 +669,8 @@ def load_settings(products: str | None = None) -> Settings:
         trial_rapidapi_key=_env_str("PAID_TRIAL_RAPIDAPI_KEY", ""),
         flights_widget_enabled=_env_flag("MCP_FLIGHTS_WIDGET", True),
         hotel_compare_enabled=_env_flag("MCP_HOTEL_COMPARE", False),
+        airbnb_enabled=_strip_quotes(os.environ.get("MCP_AIRBNB", ""))
+        .strip()
+        .lower()
+        == "on",
     )

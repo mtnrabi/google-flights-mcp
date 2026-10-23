@@ -157,6 +157,7 @@ async def _plain_surface(products: str) -> list[tuple[str, str]]:
         lambda _r: httpx.Response(200, json=[]),
         products=products,
         hotel_compare_enabled=True,
+        airbnb_enabled=True,
     )
     async with Client(mcp) as client:
         init = client.initialize_result.model_dump(mode="json")
@@ -167,6 +168,7 @@ async def _plain_surface(products: str) -> list[tuple[str, str]]:
 
 
 async def _trial_surface(monkeypatch, products: str) -> list[tuple[str, str]]:
+    monkeypatch.setenv("MCP_AIRBNB", "on")
     deployment = _build_trial(monkeypatch, cap=10, products=products, compare=True)
     async with Session(deployment) as session:
         token = await _bearer(session.http)

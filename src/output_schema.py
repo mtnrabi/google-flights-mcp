@@ -839,6 +839,73 @@ HOTELS_OUTPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": True,
 }
 
+#: `search_airbnb`'s own `api_usage`: always the caller's key, one request,
+#: no retry, so none of _API_USAGE's trial or retry fields can appear.
+_AIRBNB_API_USAGE: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "What this call cost the caller's RapidAPI plan (one request), and "
+        "what remains on it."
+    ),
+    "properties": {
+        "requests_used_by_this_call": {"type": "integer", "minimum": 0},
+        "hub_requests_billed": {"type": "integer", "minimum": 0},
+        "plan_requests_remaining": {"type": "integer"},
+        "plan_requests_limit": {"type": "integer"},
+        "note": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+AIRBNB_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "title": "Airbnb search result",
+    "description": (
+        "Stays for one destination and one pair of dates. A refusal (no "
+        "usable key, no Airbnb Live API subscription) carries needs_api_key, "
+        "signup_url and message, and an empty results."
+    ),
+    "properties": {
+        "results": {
+            "type": "array",
+            "description": (
+                "The stays: at most `limit` (default 10), compact rows unless "
+                "`verbose: true`. taxes_included is null: the page does not "
+                "state whether its totals include taxes."
+            ),
+            "items": {"type": "object", "additionalProperties": True},
+        },
+        "result_count": {"type": "integer", "minimum": 0},
+        "results_total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Stays the source returned, before `limit`.",
+        },
+        "results_note": {
+            "type": "string",
+            "description": "Present when `limit` left stays out.",
+        },
+        "search_status": {
+            "type": "string",
+            "description": (
+                "'ok': stays listed. 'empty': the page listed none for these "
+                "dates, a real answer."
+            ),
+        },
+        "filters_applied": {
+            "description": (
+                "Each filter applied, and whether Airbnb or FlightPowers "
+                "(post_filter) applied it."
+            )
+        },
+        "api_usage": _AIRBNB_API_USAGE,
+        "message": {"type": "string"},
+        **_ACCOUNT_PROPERTIES,
+    },
+    "required": ["results"],
+    "additionalProperties": True,
+}
+
 COMPARE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "title": "Cross-source hotel rate comparison",

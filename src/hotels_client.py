@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 import httpx
@@ -49,6 +51,10 @@ ENDPOINT_MAP = {
 # them again for a request that cannot succeed.
 _RETRYABLE_STATUS = {500, 502, 503, 504}
 _MAX_ATTEMPTS = 2
+_TIMEOUT_MESSAGE = (
+    "The hotels API did not respond in time. Retrying usually "
+    "succeeds; nothing was booked or charged."
+)
 
 # The 24 filters the API accepts, matching the Booking.com UI. Kept here so an
 # invalid value can be rejected before it costs the caller a request.
@@ -169,7 +175,15 @@ class HotelsClient:
         # function was raised to 60.
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: httpx.AsyncClient | None = None,
+        # 1 = no retry (search_airbnb: the listing bills every request, and
+        # its Lambda already retries a blocked page through the proxy).
+        max_attempts: int = _MAX_ATTEMPTS,
+        # What a timeout says. The default promises a free retry, which holds
+        # for the Booking listing only; a listing called once says its own.
+        timeout_message: str = _TIMEOUT_MESSAGE,
     ) -> None:
+        self._max_attempts = max_attempts
+        self._timeout_message = timeout_message
         self._base_url = base_url.rstrip("/")
         self._host = rapidapi_host
         self._timeout = timeout_seconds
@@ -214,7 +228,7 @@ class HotelsClient:
         }
 
         last_error: Exception | None = None
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
+        for attempt in range(1, self._max_attempts + 1):
             if attempt_sink is not None:
                 attempt_sink.append(1)
             try:
@@ -222,11 +236,8 @@ class HotelsClient:
                     url, json=payload, headers=headers, timeout=self._timeout
                 )
             except httpx.TimeoutException as exc:
-                last_error = RapidAPIError(
-                    "The hotels API did not respond in time. Retrying usually "
-                    "succeeds; nothing was booked or charged."
-                )
-                if attempt == _MAX_ATTEMPTS:
+                last_error = RapidAPIError(self._timeout_message)
+                if attempt == self._max_attempts:
                     raise last_error from exc
             else:
                 if quota_sink is not None:
@@ -247,7 +258,7 @@ class HotelsClient:
                 )
                 if (
                     response.status_code not in _RETRYABLE_STATUS
-                    or attempt == _MAX_ATTEMPTS
+                    or attempt == self._max_attempts
                 ):
                     raise last_error
 
@@ -255,3 +266,137 @@ class HotelsClient:
 
         assert last_error is not None
         raise last_error
+
+
+# ── Airbnb Live API (search_airbnb, behind MCP_AIRBNB) ──────────────────────
+# A separate RapidAPI listing with its own subscription, called on the
+# caller's own key exactly like the Booking listing above, through the same
+# HotelsClient (only the host differs). The Lambda behind it is otaLiteAgent;
+# its POST /search vocabulary is hotel_agent nodejs_mvp/providers/airbnb.js
+# (SEARCH_PARAMS, SORT_VALUES, ROOM_TYPES), which the listing forwards
+# unchanged.
+
+AIRBNB_HOST = "airbnb-live-api.p.rapidapi.com"
+AIRBNB_SIGNUP_URL = "https://rapidapi.com/mtnrabi/api/airbnb-live-api"
+AIRBNB_API_NAME = "Airbnb Live API"
+
+#: airbnb.js SORT_VALUES. Airbnb has no ordering control; the Lambda sorts the
+#: page it read and refuses any other value with a 400 (a billed request), so
+#: the tool schema carries the enum and a bad value costs nothing.
+AIRBNB_SORT_VALUES = ("price_asc", "price_desc", "rating_desc")
+
+#: airbnb.js ROOM_TYPES, spelled as Airbnb's search UI spells them. The Lambda
+#: drops an unknown value silently (a wider result), so the schema refuses it.
+AIRBNB_ROOM_TYPES = ("Entire home/apt", "Private room", "Shared room", "Hotel room")
+
+#: The Airbnb listing is called once (no retry) and RapidAPI meters every
+#: request that reaches it, so a timeout promises neither a free retry nor
+#: "not charged".
+AIRBNB_TIMEOUT_MESSAGE = (
+    "The Airbnb Live API did not respond in time, so nothing is known about "
+    "these dates. Nothing was booked; RapidAPI may still count the request "
+    "against your plan."
+)
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _strict_date(value: Any) -> date | None:
+    """`YYYY-MM-DD` and a real calendar day, or None (hotel_agent
+    date_fields.js parseISODate: `date.fromisoformat` alone also takes
+    `20270305` and week dates)."""
+    if not isinstance(value, str) or not _ISO_DATE.match(value.strip()):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def airbnb_input_problem(
+    *,
+    checkin_date: str,
+    checkout_date: str,
+    counts: dict[str, int | None],
+    min_rating: float | None,
+    price_min: float | None,
+    price_max: float | None,
+    today: date | None = None,
+) -> str | None:
+    """Why this search would be refused, before it is sent; None if usable.
+
+    Every request that reaches the listing is billed, refusals included, so
+    what the Lambda would refuse (hotel_agent date_fields.js: a bad date, a
+    check-in before today UTC, a checkout not after the check-in) is refused
+    here for free. Only lower bounds on the counts: nothing in hotel_agent
+    records Airbnb's ceilings, and a guessed one would refuse real searches.
+    """
+    checkin = _strict_date(checkin_date)
+    checkout = _strict_date(checkout_date)
+    bad = [
+        name
+        for name, parsed in (("checkin_date", checkin), ("checkout_date", checkout))
+        if parsed is None
+    ]
+    if bad:
+        return f"{' and '.join(bad)} must be a calendar date written YYYY-MM-DD."
+    today = today or datetime.now(timezone.utc).date()
+    if checkin < today:
+        return f"checkin_date {checkin_date} is in the past (today is {today.isoformat()}, UTC)."
+    if checkout <= checkin:
+        return "checkout_date must be after checkin_date: a stay is at least one night."
+    for name, value in counts.items():
+        floor = 1 if name == "adults" else 0
+        if value is not None and value < floor:
+            return f"{name} must be {floor} or more."
+    if min_rating is not None and not 0 <= min_rating <= 5:
+        return "min_rating is out of 5: a number from 0 to 5."
+    for name, value in (("price_min", price_min), ("price_max", price_max)):
+        if value is not None and value < 0:
+            return f"{name} must be 0 or more."
+    if price_min is not None and price_max is not None and price_min > price_max:
+        return "price_min must not be higher than price_max."
+    return None
+
+
+def build_airbnb_payload(
+    *,
+    destination: str,
+    checkin_date: str,
+    checkout_date: str,
+    adults: int | None = None,
+    children: int | None = None,
+    infants: int | None = None,
+    pets: int | None = None,
+    currency: str | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    min_rating: float | None = None,
+    sort: str | None = None,
+    min_bedrooms: int | None = None,
+    min_beds: int | None = None,
+    min_bathrooms: int | None = None,
+    room_types: list[str] | None = None,
+) -> dict[str, Any]:
+    """Body for the Airbnb listing's `POST /search`. None values are dropped."""
+    return _compact(
+        {
+            "provider": "airbnb",
+            "destination": destination,
+            "checkin_date": checkin_date,
+            "checkout_date": checkout_date,
+            "adults": adults,
+            "children": children,
+            "infants": infants,
+            "pets": pets,
+            "currency": currency,
+            "price_min": price_min,
+            "price_max": price_max,
+            "min_rating": min_rating,
+            "sort": sort,
+            "min_bedrooms": min_bedrooms,
+            "min_beds": min_beds,
+            "min_bathrooms": min_bathrooms,
+            "room_types": room_types or None,
+        }
+    )

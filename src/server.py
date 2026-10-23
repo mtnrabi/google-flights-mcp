@@ -47,7 +47,7 @@ import os
 import statistics
 import time
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Callable
+from typing import Annotated, Any, Callable, Literal
 
 import httpx
 from fastmcp import FastMCP
@@ -119,17 +119,27 @@ from .legal import (
 from .hotel_compact import (
     HOTEL_DEFAULT_LIMIT,
     IMAGE_FIELDS,
+    compact_airbnb_row,
     compact_hotel_row,
     select_rows,
 )
 from .hotels_client import (
+    AIRBNB_API_NAME,
+    AIRBNB_HOST,
+    AIRBNB_ROOM_TYPES,
+    AIRBNB_SIGNUP_URL,
+    AIRBNB_SORT_VALUES,
+    AIRBNB_TIMEOUT_MESSAGE,
     VALID_FILTERS,
     HotelsClient,
+    airbnb_input_problem,
+    build_airbnb_payload,
     build_hotel_by_name_payload,
     build_search_payload,
     unknown_filters,
 )
 from .output_schema import (
+    AIRBNB_OUTPUT_SCHEMA,
     COMPARE_OUTPUT_SCHEMA,
     FLIGHTS_OUTPUT_SCHEMA,
     HOTELS_OUTPUT_SCHEMA,
@@ -312,6 +322,10 @@ BILLING_UNIT_NOTES = {
     "hotels_multi": (
         "Each source searched is one billed request against that source's own "
         "RapidAPI subscription; there is no fan-out within a source."
+    ),
+    "airbnb": (
+        "Each Airbnb search is one billed request on the caller's Airbnb Live "
+        "API subscription; there is no fan-out."
     ),
 }
 
@@ -1807,6 +1821,29 @@ VERBOSE_DESCRIPTION = (
     "all. When true, it adds the arrival times, the per-leg stop counts, the raw "
     "stop details and every row past results_returned; results_total "
     "always says how many there were."
+)
+
+#: `search_airbnb` `limit`. Its own text: the `search_hotels` one names
+#: Booking.com as the order.
+AIRBNB_LIMIT_DESCRIPTION = (
+    "Stays returned (default 10), in search order (after `sort`), with the "
+    "cheapest always included."
+)
+
+#: What Airbnb's price filter bounds, in one place: `price_min` and
+#: `price_max` both read it. Measured on the live listing 2026-10-23
+#: (api-growth multi-ota launch/03-verify.md (g)): the band holds per night
+#: when a stay goes from 3 to 7 nights, and tracks Airbnb's nightly rate
+#: before fees; the fee-inclusive stay total can run past price_max x nights.
+AIRBNB_PRICE_BASIS = "per night"
+AIRBNB_PRICE_MIN_DESCRIPTION = (
+    f"Lowest price {AIRBNB_PRICE_BASIS}, in `currency` (Airbnb's nightly "
+    "rate, before fees)."
+)
+AIRBNB_PRICE_MAX_DESCRIPTION = (
+    f"Highest price {AIRBNB_PRICE_BASIS}, in `currency` (Airbnb's nightly "
+    "rate, before fees; price_total includes fees and can exceed "
+    "price_max x nights)."
 )
 
 USE_FALLBACK_DESCRIPTION = (
@@ -4617,6 +4654,249 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                 result["message"] = message
         return result
 
+    # ── search_airbnb (hotels product, behind MCP_AIRBNB) ───────────────
+    # Its own listing (Airbnb Live API), its own subscription, called on the
+    # caller's own key straight at the RapidAPI edge like Booking. Shares no
+    # code path with `search_hotels` beyond the HTTP client, so that tool's
+    # schema, text and answers are untouched. The keyless allowance is
+    # refused: its key is not subscribed to the Airbnb listing.
+
+    _AIRBNB_SUBSCRIBE = (
+        f"search_airbnb needs a subscription to the {AIRBNB_API_NAME} on "
+        f"RapidAPI, on the same RapidAPI key: {AIRBNB_SIGNUP_URL}. A Booking "
+        "Live API or Google Flights Live API subscription does not cover it."
+    )
+
+    def _airbnb_refusal(lead: str) -> dict[str, Any]:
+        tail = "" if "Nothing was searched" in lead else " Nothing was searched."
+        return {
+            "needs_api_key": True,
+            "results": [],
+            "result_count": 0,
+            "signup_url": AIRBNB_SIGNUP_URL,
+            "message": f"{lead} {_AIRBNB_SUBSCRIBE}{tail}",
+        }
+
+    @mcp.tool(
+        name="search_airbnb",
+        # Declared, not inferred: see src/output_schema.py.
+        output_schema=AIRBNB_OUTPUT_SCHEMA,
+        title="FlightPowers: search Airbnb stays",
+        annotations=ToolAnnotations(
+            title="FlightPowers: search Airbnb stays",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+        description=described_hotels(
+            "FlightPowers Airbnb search: live Airbnb stays and prices for a "
+            "destination and dates, read from Airbnb's public search page at "
+            "request time. Returns each stay's name, stay total, per-night "
+            "price, currency, rating out of 5, review count, room type, "
+            "bedrooms, beds, baths and Airbnb link: 10 stays by default, the "
+            "cheapest always among them.\n\n"
+            "The guest counts, price, bedroom, bed, bathroom and room-type "
+            "filters are Airbnb's own; min_rating and sort are applied by "
+            "FlightPowers to the one page of stays the search returned. "
+            "Prices are Airbnb's displayed totals for the dates; whether they "
+            "include taxes is not stated by the page, so taxes_included is "
+            "null. Rates go stale within minutes: a current price comes from "
+            "a new search. Data read from Airbnb's public pages; FlightPowers "
+            "is not affiliated with Airbnb."
+        ),
+    )
+    @document_params
+    async def search_airbnb(
+        destination: str,
+        checkin_date: str,
+        checkout_date: str,
+        adults: int | None = None,
+        children: int | None = None,
+        infants: int | None = None,
+        pets: int | None = None,
+        currency: str | None = None,
+        price_min: Annotated[
+            float | None, Field(description=AIRBNB_PRICE_MIN_DESCRIPTION)
+        ] = None,
+        price_max: Annotated[
+            float | None, Field(description=AIRBNB_PRICE_MAX_DESCRIPTION)
+        ] = None,
+        min_rating: float | None = None,
+        sort: Literal[AIRBNB_SORT_VALUES] | None = None,
+        min_bedrooms: int | None = None,
+        min_beds: int | None = None,
+        min_bathrooms: int | None = None,
+        room_types: list[Literal[AIRBNB_ROOM_TYPES]] | None = None,
+        limit: Annotated[
+            int | None, Field(ge=1, description=AIRBNB_LIMIT_DESCRIPTION)
+        ] = None,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Args:
+            destination: Free-text place, e.g. "Lisbon" or "Tokyo Shibuya".
+            checkin_date: First night, "YYYY-MM-DD".
+            checkout_date: Departure day, "YYYY-MM-DD", after checkin_date.
+            adults: Adult guests.
+            children: Children aged 2 to 12.
+            infants: Infants under 2.
+            pets: Pets travelling.
+            currency: ISO currency code, e.g. "eur"; USD when omitted.
+            min_rating: Lowest rating kept, out of 5; unrated stays are left
+                out.
+            sort: price_asc or price_desc by per-night price, rating_desc by
+                rating; unset keeps Airbnb's order.
+            min_bedrooms: Fewest bedrooms.
+            min_beds: Fewest beds.
+            min_bathrooms: Fewest bathrooms.
+            room_types: Room types to keep, e.g. ["Entire home/apt"].
+            verbose: Returns the source's full rows (image, coordinates and
+                more), every stay unless limit is set.
+        """
+        started = time.perf_counter()
+        # Refused here for free: the listing bills a request it refuses too.
+        problem = airbnb_input_problem(
+            checkin_date=checkin_date,
+            checkout_date=checkout_date,
+            counts={
+                "adults": adults,
+                "children": children,
+                "infants": infants,
+                "pets": pets,
+                "min_bedrooms": min_bedrooms,
+                "min_beds": min_beds,
+                "min_bathrooms": min_bathrooms,
+            },
+            min_rating=min_rating,
+            price_min=price_min,
+            price_max=price_max,
+        )
+        if problem is not None:
+            raise ToolError(f"{problem} Nothing was searched or billed.")
+        headers, params = _request_context()
+        credential: Credential = await _resolve(headers, params)
+        if credential.source in STORE_MISS_SOURCES:
+            # An identified caller whose stored key is gone: the reconnect
+            # reply, not "get a key". Only its message is reused: its `how`
+            # steps quote the Booking/flights PRO line, not this listing's.
+            reconnect = _reconnect_message(
+                AIRBNB_SIGNUP_URL,
+                AIRBNB_API_NAME,
+                credential.source,
+                email=(headers.get(EMAIL_HEADER) or "").strip(),
+            )
+            refusal = _airbnb_refusal(reconnect["message"])
+            refusal["how_to_get_a_key"] = {
+                "connect_url": reconnect["how_to_get_a_key"]["connect_url"],
+                "signup_url": AIRBNB_SIGNUP_URL,
+            }
+            return refusal
+        if credential.source == TRIAL_SOURCE:
+            return _airbnb_refusal(
+                "The free sign-in allowance on this server does not include "
+                "Airbnb search, and nothing was counted against it."
+            )
+        # The caller's key only: the deployment's own RAPIDAPI_KEY fallback
+        # is not spent on this listing either.
+        if not credential.present or credential.source == "env:RAPIDAPI_KEY":
+            connect_line = (
+                f" A RapidAPI key connected once at {_connect_url} is used on "
+                "every call."
+                if connect is not None
+                else ""
+            )
+            return _airbnb_refusal(
+                "This call carried no usable RapidAPI key." + connect_line
+            )
+
+        payload = {
+            **build_airbnb_payload(
+                destination=destination,
+                checkin_date=checkin_date,
+                checkout_date=checkout_date,
+                adults=adults,
+                children=children,
+                infants=infants,
+                pets=pets,
+                currency=currency,
+                price_min=price_min,
+                price_max=price_max,
+                min_rating=min_rating,
+                sort=sort,
+                min_bedrooms=min_bedrooms,
+                min_beds=min_beds,
+                min_bathrooms=min_bathrooms,
+                room_types=list(room_types) if room_types else None,
+            ),
+            # Rule 11, the Booking path's mechanism: the lite Lambda's
+            # attribution middleware reads and strips these before any
+            # handler sees the body.
+            **keyed_body_tags("hotels", "search_airbnb"),
+        }
+
+        quota: dict[str, int] = {}
+        async with HotelsClient(
+            base_url=f"https://{AIRBNB_HOST}",
+            rapidapi_host=AIRBNB_HOST,
+            timeout_seconds=settings.request_timeout_seconds,
+            client=get_shared_client(settings),
+            max_attempts=1,
+            timeout_message=AIRBNB_TIMEOUT_MESSAGE,
+        ) as client:
+            try:
+                body = await client.call(
+                    "search", payload, api_key=credential.key, quota_sink=quota
+                )
+            except AuthError as exc:
+                return _airbnb_refusal(str(exc))
+            except (QuotaError, RapidAPIError) as exc:
+                raise ToolError(str(exc)) from exc
+
+        # Only the source's two honest answers carry rows; anything else is
+        # an error, never an empty list that reads as "no stays".
+        rows = body.get("properties") if isinstance(body, dict) else None
+        status = body.get("search_status") if isinstance(body, dict) else None
+        if not isinstance(rows, list) or status not in ("ok", "empty"):
+            raise ToolError(
+                "The Airbnb Live API answered without a readable result "
+                f"(search_status {status!r}); nothing is known about these dates."
+            )
+
+        logger.info(
+            "tool=%s duration_ms=%d results=%d key_source=%s",
+            "search_airbnb",
+            int((time.perf_counter() - started) * 1000),
+            len(rows),
+            credential.source,
+        )
+
+        result: dict[str, Any] = {
+            "results": rows,
+            "result_count": len(rows),
+            "api_usage": _usage_block(1, quota, BILLING_UNIT_NOTES["airbnb"]),
+        }
+        result["search_status"] = status
+        if body.get("filters_applied") is not None:
+            result["filters_applied"] = body["filters_applied"]
+        # The #536 shape: bounded, compact rows unless verbose with no limit,
+        # or RESULT_ROWS_MAX=0.
+        if settings.result_rows_max > 0 and not (verbose and limit is None):
+            kept = select_rows(rows, HOTEL_DEFAULT_LIMIT if limit is None else limit)
+            if not verbose:
+                kept = [compact_airbnb_row(r) if isinstance(r, dict) else r for r in kept]
+            result["results"] = kept
+            result["result_count"] = len(kept)
+            result["results_total"] = len(rows)
+            if len(kept) < len(rows):
+                result["results_note"] = (
+                    f"{len(rows)} stays were found; `results` holds "
+                    f"{len(kept)}: the first in the order the search returned "
+                    "them, with the cheapest always included. A `limit` up to "
+                    f"{len(rows)} returns more."
+                )
+        return result
+
     # ── product selection ────────────────────────────────────────────────
     # Everything above registers unconditionally; this prunes down to what
     # this deployment sells. Registering-then-removing rather than wrapping
@@ -4634,6 +4914,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     if not settings.hotel_compare_enabled and "compare_hotel_rates" not in drop:
         # No second hotel source is live: see Settings.hotel_compare_enabled.
         drop = (*drop, "compare_hotel_rates")
+    if settings.products != "hotels" or not settings.airbnb_enabled:
+        # The hotels product only, and only with MCP_AIRBNB=on.
+        drop = (*drop, "search_airbnb")
 
     for tool_name in drop:
         # mcp.remove_tool() is deprecated in fastmcp 3.4 in favour of the
