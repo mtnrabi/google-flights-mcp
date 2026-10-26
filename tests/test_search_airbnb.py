@@ -581,7 +581,8 @@ class TestNotSubscribed:
         assert "You are not subscribed to this API." in out["message"]
         assert "Google Flights Live API subscription does not cover it" in out["message"]
         assert "https://rapidapi.com/mtnrabi/api/airbnb-live-api" in out["message"]
-        assert "BASIC" not in out["message"]  # not on the live listing yet (rule 1)
+        assert "BASIC plan is free with 100 searches a month" in out["message"]
+        assert "PRO is $10 a month for 10,000 searches" in out["message"]
         assert len(recorder.requests) == 1  # not retried: a 403 is not a fault
 
     @pytest.mark.parametrize("fallback", ["", KEY])
@@ -597,7 +598,8 @@ class TestNotSubscribed:
         assert out["needs_api_key"] is True
         assert out["signup_url"] == AIRBNB_SIGNUP_URL
         assert "airbnb-live-api" in out["message"]
-        assert "BASIC" not in out["message"]  # not on the live listing yet (rule 1)
+        assert "BASIC plan is free with 100 searches a month" in out["message"]
+        assert "PRO is $10 a month for 10,000 searches" in out["message"]
         assert recorder.requests == []
 
 
@@ -626,7 +628,8 @@ class TestTrialRefused:
         assert reply["needs_api_key"] is True
         assert reply["results"] == []
         assert reply["signup_url"] == AIRBNB_SIGNUP_URL
-        assert "BASIC" not in reply["message"]
+        assert "BASIC plan is free with 100 searches a month" in reply["message"]
+        assert "PRO is $10 a month for 10,000 searches" in reply["message"]
         # Never sent, never counted: our trial key is not subscribed to it.
         assert upstream.airbnb_keys == []
         assert await deployment.trial_store.usage(SUB, utc_day()) == 0
@@ -671,9 +674,10 @@ class TestStoreMissGetsTheReconnectReply:
         assert reply["signup_url"] == AIRBNB_SIGNUP_URL
         assert reply["how_to_get_a_key"]["connect_url"].endswith("/connect")
         # Not the Booking / flights PRO line, which _reconnect_message's
-        # `how` steps quote.
+        # `how` steps quote: this listing's own plan line instead.
         assert "how" not in reply["how_to_get_a_key"]
-        assert "PRO" not in json.dumps(reply)
+        assert "2,500" not in json.dumps(reply) and "2,000" not in json.dumps(reply)
+        assert "PRO is $10 a month for 10,000 searches" in reply["message"]
         assert reply["message"].count("Nothing was searched") == 1
         assert upstream.airbnb_keys == []
 

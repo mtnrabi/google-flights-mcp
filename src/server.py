@@ -4664,7 +4664,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     _AIRBNB_SUBSCRIBE = (
         f"search_airbnb needs a subscription to the {AIRBNB_API_NAME} on "
         f"RapidAPI, on the same RapidAPI key: {AIRBNB_SIGNUP_URL}. A Booking "
-        "Live API or Google Flights Live API subscription does not cover it."
+        "Live API or Google Flights Live API subscription does not cover it. "
+        f"The {AIRBNB_API_NAME}'s BASIC plan is free with 100 searches a "
+        "month; PRO is $10 a month for 10,000 searches."
     )
 
     def _airbnb_refusal(lead: str) -> dict[str, Any]:
