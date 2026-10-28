@@ -1211,6 +1211,48 @@ class TestCapPathLeadsWithPro:
         assert "https://x.test/connect" in note["note"]
         self._no_stale_offer(note["note"])
 
+    @pytest.mark.parametrize(
+        "signup, shape",
+        [
+            (FLIGHTS, "a whole month of departure dates at three trip lengths"),
+            (HOTELS, "a whole month of check-in dates at three stay lengths"),
+        ],
+    )
+    def test_cap_hit_is_the_offer(self, signup, shape):
+        """2026-10-28: the cap hit is where the keyless user is told what a
+        key changes. In order: what they used, the month scan one call covers
+        with a key, the price, then the next step with both links."""
+        from src.trial import REASON_UNAVAILABLE, trial_exhausted_result
+
+        connect = "https://x.test/connect"
+        for reason in ("spent", REASON_UNAVAILABLE):
+            message = trial_exhausted_result(
+                self._state(), connect, signup, "Some API", reason=reason
+            )["message"]
+            assert "10 of 10 searches used today on a@b.c" in message or (
+                reason == REASON_UNAVAILABLE
+            )
+            assert f"one call can cover {shape} (93 searches)" in message
+            assert "count against that plan instead of this daily allowance" in message
+            used = message.find("today")
+            scan = message.find("one call can cover")
+            price = message.find("PRO is $10 a month")
+            step = message.find("To keep searching today: subscribe at")
+            assert -1 < used < scan < price < step, message
+            assert message.find(f"{signup}/pricing") < message.find(connect)
+            assert "same Google account" in message
+            assert "With a paid RapidAPI plan" in message
+            overage = "0.006" if signup == self.HOTELS else "0.003"
+            assert f"searches, then ${overage} each, on the" in message
+            assert "--" not in message
+            self._no_stale_offer(message)
+
+    def test_ordinary_results_still_carry_no_scan_offer(self):
+        from src.trial import trial_note
+
+        note = trial_note(self._state(), "https://x.test/connect", self.FLIGHTS)
+        assert "one call can cover" not in json.dumps(note)
+
     def test_quota_refusal(self):
         from src.quota_gate import trial_quota_refusal
 

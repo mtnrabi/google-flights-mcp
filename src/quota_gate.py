@@ -53,12 +53,22 @@ QUOTA_EXCEEDED = "quota_exceeded"
 #: message string.
 PRO_PRICE_USD = 10
 PRO_SEARCHES = {"flights": 2500, "hotels": 2000}
+#: PRO's price per request past its monthly quota, as the listings say it
+#: ("then $0.003 each" / "then $0.006 each"; read 2026-10-28). Quoted at the
+#: cap hit next to "billed to that RapidAPI plan".
+PRO_OVERAGE_USD = {"flights": "0.003", "hotels": "0.006"}
 BASIC_SEARCHES = 10
 #: A whole month of dates at three trip lengths (31 x 3), the same figure the
-#: tool descriptions use. No longer quoted in a tool result (2026-10-22: "PRO
-#: covers about 26 of those a month" read as a value pitch to a zero-context
-#: directory review); kept as the one place the figure is written down.
+#: tool descriptions use. Quoted once, at the cap hit, as what one call can
+#: cover with a key (`key_scan_line`). Still never multiplied into "PRO
+#: covers about 26 of those a month" (2026-10-22: that read as a value pitch
+#: to a zero-context directory review).
 MONTH_SCAN_SEARCHES = 93
+#: What that month looks like per product, in the tool descriptions' words.
+MONTH_SCAN_SHAPE = {
+    "flights": "a whole month of departure dates at three trip lengths",
+    "hotels": "a whole month of check-in dates at three stay lengths",
+}
 
 
 def _plan_product(signup_url: str) -> str:
@@ -75,6 +85,23 @@ def pro_line(signup_url: str) -> str:
     """'PRO is $10 a month for 2,500 searches', for this listing."""
     searches = PRO_SEARCHES[_plan_product(signup_url)]
     return f"PRO is ${PRO_PRICE_USD} a month for {searches:,} searches"
+
+
+def pro_overage_line(signup_url: str) -> str:
+    """'PRO is $10 a month for 2,500 searches, then $0.003 each'."""
+    return f"{pro_line(signup_url)}, then ${PRO_OVERAGE_USD[_plan_product(signup_url)]} each"
+
+
+def key_scan_line(signup_url: str) -> str:
+    """What a key changes, as a fact about the tool: where searches are
+    counted, and the month scan one call covers (the tool descriptions say the
+    same). Said at the cap hit only, never on an ordinary result."""
+    shape = MONTH_SCAN_SHAPE[_plan_product(signup_url)]
+    return (
+        "With a paid RapidAPI plan, searches count against that plan instead of "
+        f"this daily allowance, and one call can cover {shape} "
+        f"({MONTH_SCAN_SEARCHES} searches)."
+    )
 
 
 BASIC_FOOTNOTE = (

@@ -58,7 +58,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Any
 
-from .quota_gate import pricing_url, pro_line
+from .quota_gate import key_scan_line, pricing_url, pro_line, pro_overage_line
 
 #: `Credential.source` for a request served from the allowance. A distinct
 #: value, not an empty key and not `env:RAPIDAPI_KEY`: the call sites branch on
@@ -304,20 +304,25 @@ def trial_exhausted_result(
     else:
         opening = (
             "This search was not run: the free allowance for this account is "
-            f"spent ({state.used_today:,}/{state.day_cap:,} today{_who(state)}) "
-            "and it renews at 00:00 UTC. Retrying will not help."
+            f"spent ({state.used_today:,} of {state.day_cap:,} searches used "
+            f"today{_who(state)}). It renews at 00:00 UTC. Retrying will not "
+            "help."
         )
     return {
         "results": [],
         "result_count": 0,
         "search_status": TRIAL_EXHAUSTED,
         "retry": False,
+        # The cap hit is the one place the offer is made (2026-10-28): what a
+        # key changes, the price, and the next step with both links. Facts
+        # only; the scan figure is the tool descriptions' own.
         "message": (
-            f"{opening} {pro_line(signup_url)} on the {api_name} "
-            f"({pricing_url(signup_url)}). Subscribe there and connect your "
-            f"key once at "
-            f"{connect_url} -- nothing to change in this client, searches "
-            "start working immediately and are billed to your own plan."
+            f"{opening} {key_scan_line(signup_url)} "
+            f"{pro_overage_line(signup_url)}, on the {api_name}. To keep "
+            f"searching today: subscribe at {pricing_url(signup_url)}, then "
+            f"paste the key once at {connect_url}, signed in with the same "
+            "Google account. No change is needed in this app; searches start "
+            "working at once and are billed to that RapidAPI plan."
         ),
         "trial": {
             "used_today": state.used_today,
