@@ -12,6 +12,7 @@ import pytest
 
 from src.rapidapi_client import (
     AuthError,
+    DegradedSearchError,
     QuotaError,
     RapidAPIClient,
     RapidAPIError,
@@ -255,6 +256,78 @@ class TestErrorMapping:
                 await client.search("oneway", {}, api_key=KEY)
 
         assert "not subscribed" in str(excinfo.value)
+
+
+def _degraded(status: int, body: dict) -> httpx.Response:
+    return httpx.Response(
+        status,
+        json=body,
+        headers={
+            "X-Search-Status": "degraded",
+            "X-Search-Reason": "upstream_no_render",
+        },
+    )
+
+
+class TestDegradedIsNeverResent:
+    """A degraded 5xx is a search the backend ran and judged. Resending it
+    billed a `retry: false` long stay twice on the caller's key; the api
+    front never resends one (degraded_search_error) and neither does this."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("retry", [False, True])
+    @pytest.mark.parametrize("status", [500, 502, 503, 504])
+    async def test_sent_once_billed_once_verdict_kept(self, status, retry):
+        calls = {"n": 0}
+
+        def handler(_request):
+            calls["n"] += 1
+            return _degraded(status, {
+                "error": "search_incomplete",
+                "search_status": "degraded",
+                "search_reason": "upstream_no_render",
+                "message": "The flight search did not complete.",
+                "hint": "Price the two one-way legs instead.",
+                "retry": retry,
+            })
+
+        attempts: list[int] = []
+        async with make_client(handler) as client:
+            with pytest.raises(DegradedSearchError) as excinfo:
+                await client.search(
+                    "roundtrip", {}, api_key=KEY, attempt_sink=attempts
+                )
+
+        assert calls["n"] == 1
+        assert attempts == [1]
+        assert excinfo.value.retry is retry
+        assert excinfo.value.hint == "Price the two one-way legs instead."
+        assert isinstance(excinfo.value, RapidAPIError)
+        assert "The flight search did not complete." in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("body", [{"error": "search_incomplete"}, {"retry": 1}])
+    async def test_absent_or_non_boolean_retry_is_none(self, body):
+        async with make_client(lambda _r: _degraded(503, body)) as client:
+            with pytest.raises(DegradedSearchError) as excinfo:
+                await client.search("oneway", {}, api_key=KEY)
+
+        assert excinfo.value.retry is None
+
+    @pytest.mark.asyncio
+    async def test_a_plain_503_without_the_header_is_still_retried(self):
+        calls = {"n": 0}
+
+        def handler(_request):
+            calls["n"] += 1
+            return httpx.Response(503, json={"retry": False})
+
+        async with make_client(handler) as client:
+            with pytest.raises(RapidAPIError) as excinfo:
+                await client.search("oneway", {}, api_key=KEY)
+
+        assert not isinstance(excinfo.value, DegradedSearchError)
+        assert calls["n"] == 2
 
 
 class TestResponseParsing:

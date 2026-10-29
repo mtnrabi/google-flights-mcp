@@ -197,6 +197,7 @@ from .rapidapi_client import (
     SEARCH_REASON_HEADER,
     SEARCH_STATUS_HEADER,
     AuthError,
+    DegradedSearchError,
     QuotaError,
     RapidAPIClient,
     RapidAPIError,
@@ -701,6 +702,68 @@ def _degraded_message(incomplete: int, reported: int, reason: str | None) -> str
     )
 
 
+#: How many combinations a mixed-verdict degraded error names before "and N
+#: more"; a month-wide scan can carry dozens.
+MAX_NAMED_DEGRADED = 5
+
+
+def _degraded_tool_error(errors: list[Any], *, trial: bool = False) -> str:
+    """The tool error when every combination came back as a degraded 5xx.
+
+    None of them was resent: the backend already said whether one can help,
+    and on the caller's own key a resend is a billed request on their plan.
+    A keyless trial call runs on OUR key, so it is not told about a bill it
+    does not have. Its verdict leads, then its hint, then the first error
+    (which carries its own sentence).
+
+    When the combinations disagree (some `retry: true`, the rest not), the
+    lead names the ones that may get through instead of telling the model the
+    whole search may: resending all of it repeats the ones the backend
+    already said will not help.
+    """
+    why = "" if trial else (
+        " because each resend is a billed request on your plan"
+    )
+    verdicts = [e.retry for e in errors]
+    if True in verdicts and not all(v is True for v in verdicts):
+        may = [e for e in errors if e.retry is True]
+        named = [describe_combination(e.combo) for e in may if e.combo]
+        named = [n for n in named if n]
+        if named and len(named) == len(may):
+            which = ", ".join(named[:MAX_NAMED_DEGRADED])
+            if len(named) > MAX_NAMED_DEGRADED:
+                which += f" and {len(named) - MAX_NAMED_DEGRADED} more"
+        else:
+            which = f"{len(may)} of the {len(errors)} searches"
+        lead = (
+            "The flight search did not complete. The backend says only "
+            f"{which} may get through if sent once more (retry: true); for "
+            "the rest it did not say a resend would help, so do not repeat "
+            "the whole search unchanged. Nothing was resent automatically"
+            f"{why}."
+        )
+    elif verdicts and all(v is False for v in verdicts):
+        lead = (
+            "The flight search did not complete, and the backend says sending "
+            "the same search again will not help (retry: false), so do not "
+            "repeat it unchanged."
+        )
+    elif verdicts and all(v is True for v in verdicts):
+        lead = (
+            "The flight search did not complete. The backend says the same "
+            "search may get through if sent once more (retry: true); it was "
+            f"not resent automatically{why}."
+        )
+    else:
+        lead = (
+            "The flight search did not complete and was not resent "
+            f"automatically{why}."
+        )
+    hint = next((e.hint for e in errors if e.hint), None)
+    tail = f" {hint}" if hint else ""
+    return f"{lead}{tail} ({errors[0]})"
+
+
 def _incomplete_note(incomplete: int, reported: int) -> str:
     """What to say when some results arrived but the search was not complete."""
     return (
@@ -732,6 +795,10 @@ class _UpstreamState:
     #: flights. The combo is carried so the coverage line can NAME the dates a
     #: caller asked for and did not get; nothing here reaches the wire.
     search_outcomes: list[dict[str, str]] = field(default_factory=list)
+    #: One entry per combination answered with a degraded 5xx
+    #: (`DegradedSearchError`, never resent by the client): the backend's own
+    #: `retry` verdict and hint for the tool error.
+    degraded: list[DegradedSearchError] = field(default_factory=list)
     #: One entry per HTTP request SENT to the Hub, retries included. A
     #: retried 5xx is billed twice and the combination count says once, so
     #: this is the figure the caller's invoice will agree with. Appended to
@@ -2616,6 +2683,13 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             except QuotaError as exc:
                 state.quota_error = str(exc)
                 raise
+            except DegradedSearchError as exc:
+                exc.combo = {
+                    "departure_date": str(payload.get("departure_date") or ""),
+                    "to_airport": str(payload.get("to_airport") or ""),
+                }
+                state.degraded.append(exc)
+                raise
             finally:
                 for entry in sink:
                     state.search_outcomes.append({**entry, **_combo_of(payload)})
@@ -2810,6 +2884,16 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             # same request against "temporarily unavailable".
             if is_upstream_reject(outcome.first_error):
                 raise ToolError(refusal_message(outcome.first_error))
+            # Every combination ran and the backend said it did not complete:
+            # pass on its verdict on a resend instead of "temporarily
+            # unavailable", which reads as "try again" even when it is false.
+            if state.degraded and len(state.degraded) == outcome.backend_failures:
+                raise ToolError(
+                    _degraded_tool_error(
+                        state.degraded,
+                        trial=credential.source == TRIAL_SOURCE,
+                    )
+                )
             raise ToolError(
                 f"Flight search is temporarily unavailable ({outcome.first_error})"
             )

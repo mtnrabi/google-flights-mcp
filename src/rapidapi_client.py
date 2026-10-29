@@ -64,6 +64,29 @@ class QuotaError(RapidAPIError):
     """The caller's plan quota or rate limit is exhausted."""
 
 
+class DegradedSearchError(RapidAPIError):
+    """A 5xx with `X-Search-Status: degraded`: the backend ran the search and
+    says it did not complete. Never resent here: the backend already judged
+    whether a resend can help (`retry` in its body, None when absent), and a
+    resend is another billed request on the caller's key."""
+
+    def __init__(
+        self,
+        message: str,
+        retry: bool | None,
+        backend_message: str | None = None,
+        hint: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry = retry
+        self.backend_message = backend_message
+        self.hint = hint
+        #: The date/destination this search was for; set by the server, which
+        #: knows the payload, so a mixed verdict can name the combinations a
+        #: resend may help.
+        self.combo: dict[str, str] | None = None
+
+
 def _compact(payload: dict[str, Any]) -> dict[str, Any]:
     """Drop None values so we never send an explicit null.
 
@@ -284,6 +307,27 @@ def read_quota(response: httpx.Response) -> dict[str, int]:
     return quota
 
 
+def degraded_error(endpoint: str, last_error: str, response: httpx.Response):
+    """The `DegradedSearchError` for a degraded 5xx, carrying the backend
+    body's `retry`, `message` and `hint` (each None when absent or not the
+    right type; `retry` is never guessed)."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        body = {}
+    retry = body.get("retry")
+    message = body.get("message")
+    hint = body.get("hint")
+    return DegradedSearchError(
+        f"{endpoint} search did not complete -- {last_error}",
+        retry if isinstance(retry, bool) else None,
+        message.strip() if isinstance(message, str) and message.strip() else None,
+        hint.strip() if isinstance(hint, str) and hint.strip() else None,
+    )
+
+
 def _upstream_message(response: httpx.Response) -> str:
     """RapidAPI's own explanation, which is usually the useful one.
 
@@ -354,7 +398,8 @@ class RapidAPIClient:
     ) -> list[dict[str, Any]]:
         """POST one search. Returns the (possibly empty) result list.
 
-        Raises AuthError, QuotaError, or RapidAPIError. Never returns None --
+        Raises AuthError, QuotaError, DegradedSearchError, or RapidAPIError.
+        Never returns None --
         an empty search is `[]`, which is a valid answer *only when the backend
         says the search completed*; see `outcome_sink`.
 
@@ -364,12 +409,14 @@ class RapidAPIClient:
         want: the final value is the most recent view of that plan's usage.
 
         `attempt_sink`, when given, gets one appended entry per HTTP request
-        actually SENT -- which is not the same as one per call. A 5xx is
-        retried once (see `_RETRYABLE_STATUS`), and RapidAPI bills the retry:
-        a fan-out of 93 over a flaky window can cost 130 requests, and
-        reporting 93 as the bill is a number the invoice contradicts. The
-        retry policy is deliberate and unchanged; what changes is that the
-        cost is now counted rather than assumed.
+        actually SENT -- which is not the same as one per call. A 5xx WITHOUT
+        `X-Search-Status: degraded` (a gateway fault, a timeout) is retried
+        once (see `_RETRYABLE_STATUS`), and RapidAPI bills the retry: a
+        fan-out of 93 over a flaky window can cost 130 requests, and
+        reporting 93 as the bill is a number the invoice contradicts. A
+        degraded 5xx is never retried: it raises DegradedSearchError on the
+        first answer, because the backend ran the search and its `retry`
+        verdict, not this client, decides whether a resend can help.
 
         `outcome_sink`, when given, gets one appended entry per answered
         request: that response's `X-Search-*` headers. A list rather than a
@@ -420,6 +467,13 @@ class RapidAPIClient:
                 raise QuotaError(detail)
 
             last_error = f"HTTP {response.status_code}: {detail}"
+            if read_search_status(response).get(
+                SEARCH_STATUS_HEADER
+            ) == SEARCH_STATUS_DEGRADED:
+                # Same rule as the api front's degraded_search_error: the
+                # search ran and did not complete, so a resend is the caller's
+                # call (on `retry`), never this client's.
+                raise degraded_error(endpoint, last_error, response)
             if response.status_code not in _RETRYABLE_STATUS:
                 raise RapidAPIError(f"{endpoint} search failed -- {last_error}")
             if attempt == _MAX_ATTEMPTS:
