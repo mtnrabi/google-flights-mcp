@@ -2,7 +2,7 @@
 
 **Service:** `https://{{HOST}}/mcp`
 **Registry name:** `{{REGISTRY_NAME}}`
-**Effective date:** 2026-10-22
+**Effective date:** 2026-11-11
 **Contact:** app@flightpowers.com
 
 This policy describes exactly what the hosted MCP server at
@@ -142,8 +142,10 @@ is written down:
   (`sub`), your email address, the date, how many searches you ran that day,
   and when the row was first and last updated.
 - **What it is used for.** Enforcing the daily limit, and answering a support
-  question about your account. Nothing else: it is not a mailing list and it
-  is not shared outside FlightPowers.{{TRIAL_SHARED}}
+  question about your account. We do not add your address to a mailing list,
+  and it is not shared outside FlightPowers; the founder may write to you
+  personally once about your trial (reply STOP and he won't write
+  again).{{TRIAL_SHARED}}
 - **How long it is kept.** These rows have no automatic expiry today, and
   "Disconnect" on `/connect` does **not** delete them (Disconnect deletes your
   stored key and your tokens, sections 2a and 2b). To have them deleted, write

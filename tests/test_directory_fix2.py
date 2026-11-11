@@ -93,7 +93,11 @@ class TestPolicyPagesSayWhatIsKept:
         assert "One row per Google account per UTC day" in doc
         assert "does <strong>not</strong> delete them" in doc
         assert "only identity this service ever holds" not in doc
-        assert "Effective date:</strong> 2026-10-22" in doc
+        assert "Effective date:</strong> 2026-11-11" in doc
+        # 2026-11-11: the trial address may get ONE personal note from the founder;
+        # the page says so instead of a flat "not a mailing list ... nothing else".
+        assert "We do not add your address to a mailing list" in doc
+        assert "may write to you" in doc and "personally once about your trial" in doc
 
     @pytest.mark.parametrize("products", ["flights", "hotels", "both"])
     def test_the_backend_logs_are_disclosed(self, products):
