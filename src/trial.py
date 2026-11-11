@@ -208,15 +208,68 @@ def _who(state: TrialState) -> str:
     return f" on {state.email}" if state.email else ""
 
 
-def trial_note(state: TrialState, connect_url: str, signup_url: str) -> dict[str, Any]:
+#: From this share of the day's allowance on, a result carries `upgrade_hint`.
+NEAR_CAP_AT = 0.8
+
+
+def upgrade_hint(
+    state: TrialState,
+    connect_url: str,
+    signup_url: str,
+    *,
+    requested: int = 0,
+    searched: int = 0,
+) -> str | None:
+    """One sentence at the moment of need, or None (2026-11-11).
+
+    Two moments, and only these two: the allowance is 80% spent (the next
+    search or two hits the wall), or this very call was a wide scan the
+    allowance had to SAMPLE (`requested` searches asked, `searched` run because
+    that is what was left). Everywhere else the result keeps the 2026-10-22
+    rule: counter and /connect, no price. Only ever built for a keyless
+    allowance caller -- a caller with their own key (paying or not) never
+    reaches `trial_note`, so a paying user never sees this.
+    """
+    sampled = searched > 0 and requested > searched
+    near = state.day_cap > 0 and state.used_today >= state.day_cap * NEAR_CAP_AT
+    if not (sampled or near):
+        return None
+    offer = (
+        f"With your own RapidAPI key, searches count against your plan instead: "
+        f"{pro_line(signup_url)} ({pricing_url(signup_url)}). Connect it once "
+        f"at {connect_url}."
+    )
+    if sampled:
+        return (
+            f"This question expanded to {requested:,} searches; the free "
+            f"allowance ran {searched:,} of them, spread across the range. "
+            f"With a key the whole question runs in one call. {offer}"
+        )
+    return (
+        f"{state.remaining:,} of {state.day_cap:,} free searches left today. "
+        f"{offer}"
+    )
+
+
+def trial_note(
+    state: TrialState,
+    connect_url: str,
+    signup_url: str,
+    *,
+    requested: int = 0,
+    searched: int = 0,
+) -> dict[str, Any]:
     """The `trial` block carried on EVERY result served from the allowance.
 
     Small and boring on purpose: the two counters, and one sentence a model can
     read out loud. A caller who only learns the number when it runs out has no
     chance to do anything about it, which is the mistake the free server fixed
     on 2026-09-09 by showing usage from the first call rather than from 80%.
+
+    `upgrade_hint` is added only at the moment of need (see `upgrade_hint`);
+    the rest of the block is unchanged on every result.
     """
-    return {
+    note = {
         "used_today": state.used_today,
         "day_cap": state.day_cap,
         "remaining_today": state.remaining,
@@ -237,6 +290,12 @@ def trial_note(state: TrialState, connect_url: str, signup_url: str) -> dict[str
             f"at {connect_url}."
         ),
     }
+    hint = upgrade_hint(
+        state, connect_url, signup_url, requested=requested, searched=searched
+    )
+    if hint:
+        note["upgrade_hint"] = hint
+    return note
 
 
 def allowance_usage(state: TrialState, searches: int) -> dict[str, Any]:

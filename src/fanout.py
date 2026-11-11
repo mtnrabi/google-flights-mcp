@@ -361,6 +361,17 @@ class SearchPlan:
                 "range. A request for the dates that are missing, or a "
                 "narrower range, fits in one call."
             )
+        elif self.truncated and self.cap_source == "trial":
+            # The keyless allowance sampled this, not the caller's plan: nothing
+            # was billed to them and a higher max_searches would not help
+            # (2026-11-11; the generic note below said both).
+            summary["note"] = (
+                f"This request expanded to {self.requested_combinations} searches; "
+                f"today's free allowance had room for {self.executed_combinations}, "
+                "so those were run, spread evenly across the requested range. "
+                "They ran on FlightPowers' key and nothing was billed to you. "
+                "`trial.upgrade_hint` says how to run the whole request in one call."
+            )
         elif self.truncated:
             # Wording differs from the free server's planner on purpose: there
             # the cap is a free-tier limit, here it is a spend ceiling on the
@@ -413,6 +424,14 @@ class SearchPlan:
                 "never sent and nothing was billed for them. A request for "
                 "the check-in dates that are missing, or a narrower range, "
                 "covers the rest."
+            )
+        elif self.truncated and self.cap_source == "trial":
+            summary["note"] = (
+                f"This request expanded to {self.requested_combinations} stays; "
+                f"today's free allowance had room for {self.executed_combinations}, "
+                "so those were priced, spread evenly across the check-in range. "
+                "They ran on FlightPowers' key and nothing was billed to you. "
+                "`trial.upgrade_hint` says how to price every stay in one call."
             )
         elif self.truncated:
             summary["note"] = (

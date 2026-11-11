@@ -1155,6 +1155,21 @@ def _quota_gate(
     return gate
 
 
+def _trial_sampling(plan) -> dict[str, int]:
+    """`requested` / `searched` for `trial_note`, when the ALLOWANCE sampled.
+
+    Only a plan whose cap came from the allowance (`cap_source == "trial"`)
+    counts: a caller who set `max_searches: 5` chose the sample themselves and
+    is not told the allowance did it.
+    """
+    if getattr(plan, "cap_source", None) != "trial" or not plan.truncated:
+        return {}
+    return {
+        "requested": plan.requested_combinations,
+        "searched": plan.executed_combinations,
+    }
+
+
 def _planning_ceiling(settings, max_searches: int | None, trial) -> int:
     """The largest cap this caller could possibly end up with.
 
@@ -2948,7 +2963,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         if trial is not None:
             # On every result, not only near the cap: a caller who first hears
             # the number when it runs out never had a chance to act on it.
-            response["trial"] = trial_note(trial, _connect_url, flights_signup)
+            response["trial"] = trial_note(
+                trial,
+                _connect_url,
+                flights_signup,
+                **_trial_sampling(plan),
+            )
             # Our key's quota headers never reach a free caller: see
             # trial.allowance_usage. `hub_requests_billed` goes too -- the
             # requests were billed to FlightPowers, not to this user.
@@ -4048,7 +4068,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             plan, outcome, quota, billed=len(state.attempts)
         )
         if trial is not None:
-            response["trial"] = trial_note(trial, _connect_url, hotels_signup)
+            response["trial"] = trial_note(
+                trial,
+                _connect_url,
+                hotels_signup,
+                **_trial_sampling(plan),
+            )
             response["api_usage"] = allowance_usage(
                 trial, outcome.backend_calls_made
             )
