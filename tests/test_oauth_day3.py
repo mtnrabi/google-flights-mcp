@@ -1099,6 +1099,46 @@ class TestClientIdMetadataDocuments:
         # to sweep.
         assert await live.oauth_store.count_clients_since(0) == 0
 
+    async def test_a_loopback_redirect_uri_matches_on_any_port(
+        self, live, monkeypatch
+    ):
+        """RFC 8252 §7.3, the Claude Code shape: the document lists the
+        loopback URI with no port, sign-in happens on an ephemeral one, and
+        the code goes back to that port."""
+        _cimd_transport(
+            monkeypatch, _document(redirect_uris=["http://localhost/callback"])
+        )
+        ephemeral = "http://localhost:53682/callback"
+        async with Session(live) as session:
+            http = session.http
+            await sign_in(http)
+            consent = await http.get(
+                "/connect/authorize?"
+                + authorize_query(CIMD_ID, redirect_uri=ephemeral)
+            )
+            assert consent.status_code == 200, consent.text[:400]
+            approved = await http.post(
+                "/connect/authorize",
+                data={
+                    "csrf": field(consent.text, "csrf"),
+                    "request": field(consent.text, "request"),
+                    "decision": "approve",
+                },
+            )
+            location = approved.headers["location"]
+            assert location.startswith(ephemeral + "?"), location
+            tokens = await http.post(
+                "/oauth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": query_of(location)["code"],
+                    "redirect_uri": ephemeral,
+                    "client_id": CIMD_ID,
+                    "code_verifier": VERIFIER,
+                },
+            )
+        assert tokens.status_code == 200, tokens.text
+
     async def test_an_unlisted_redirect_uri_is_refused(self, live, monkeypatch):
         _cimd_transport(monkeypatch, _document())
         async with Session(live) as session:

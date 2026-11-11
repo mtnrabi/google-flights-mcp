@@ -604,7 +604,7 @@ class OAuthSupport:
                 "the client metadata document lists no usable redirect_uris",
                 redirectable=False,
             )
-        if redirect_uri and redirect_uri not in allowed:
+        if redirect_uri and not _redirect_uri_registered(redirect_uri, allowed):
             raise OAuthError(
                 "invalid_request",
                 "that redirect_uri is not listed in the client metadata document",
@@ -847,10 +847,9 @@ class OAuthSupport:
                     redirectable=False,
                 )
             redirect_uri = client.redirect_uris[0]
-        elif redirect_uri not in client.redirect_uris:
-            # Exact string match, not a prefix or a host match: a loose
-            # comparison here is how authorization codes get delivered to
-            # somebody else's URL.
+        elif not _redirect_uri_registered(redirect_uri, client.redirect_uris):
+            # Exact match, except the loopback port (RFC 8252 §7.3): see
+            # `_redirect_uri_registered`.
             raise OAuthError(
                 "invalid_request",
                 "That redirect_uri is not registered for this client.",
@@ -1383,6 +1382,48 @@ def _redirect_uri_allowed(uri: str) -> bool:
         return host in ("127.0.0.1", "::1", "localhost")
     # A private-use scheme must be a real scheme, not a bare path.
     return bool(parts.scheme) and ":" in uri and not uri.startswith(("javascript:", "data:"))
+
+
+def _redirect_uri_registered(requested: str, registered: "tuple[str, ...] | list[str]") -> bool:
+    """Is `requested` one of the `registered` redirect_uris?
+
+    An exact string match, with the one exception RFC 8252 §7.3 makes: a
+    native client (Claude Code, MCP Inspector) opens its callback listener
+    on an ephemeral port and registers the loopback URI without one -- Claude
+    Code's metadata document lists `http://localhost/callback` and then signs
+    in on `http://localhost:53682/callback`. So for a loopback http URI the
+    PORT is ignored; scheme, host, path and query must still match exactly,
+    and userinfo or a fragment is refused. Never a prefix or a host-only
+    match: a loose comparison here is how codes get delivered to somebody
+    else's URL.
+    """
+    if requested in registered:
+        return True
+    try:
+        got = urlsplit(requested)
+        got.port  # a non-numeric or out-of-range port raises ValueError
+    except ValueError:
+        return False
+    host = (got.hostname or "").lower()
+    if (
+        got.scheme != "http"
+        or host not in ("127.0.0.1", "::1", "localhost")
+        or got.username is not None
+        or got.password is not None
+        or got.fragment
+    ):
+        return False
+    for uri in registered:
+        reg = urlsplit(uri)
+        if (
+            reg.scheme == "http"
+            and (reg.hostname or "").lower() == host
+            and reg.username is None
+            and reg.path == got.path
+            and reg.query == got.query
+        ):
+            return True
+    return False
 
 
 def build_oauth_support(
