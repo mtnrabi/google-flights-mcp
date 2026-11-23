@@ -787,6 +787,9 @@ class _UpstreamState:
     auth_error: str | None = None
     quota_error: str | None = None
     quota: dict[str, int] = field(default_factory=dict)
+    #: The RapidAPI username the backend echoed (`X-FP-User`) on answered
+    #: requests. Only ever recorded next to a stored key; never on the wire.
+    rapidapi_users: list[str] = field(default_factory=list)
     #: One entry per answered request: that response's `X-Search-*` headers,
     #: plus the `departure_date` / `to_airport` the request was for under the
     #: private keys in COMBO_KEYS. Empty header sets are kept, because "the
@@ -2167,6 +2170,43 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             )
         return NO_CREDENTIAL
 
+    # (provider, sub, rapidapi_user) already written by this process: one row
+    # write per account per warm instance, not one per search.
+    _noted_users: set[tuple[str, str, str]] = set()
+
+    async def _note_rapidapi_user(
+        headers: dict[str, str],
+        params: dict[str, str],
+        credential: Credential,
+        rapidapi_user: str,
+    ) -> None:
+        """Record which RapidAPI account owns a STORED key (migrations/005).
+
+        Only for a key we hold for a signed-in account (`store:oauth`,
+        `store:google`): a header or query key has no account here to attach
+        it to, and the allowance runs on our own key. Best-effort: a failure is
+        logged and the answer goes out unchanged.
+        """
+        if connect is None or credential.source not in ("store:oauth", "store:google"):
+            return
+        sub, provider = "", PROVIDER_GOOGLE
+        if credential.source == "store:oauth":
+            sub = (headers.get(SUBJECT_HEADER) or "").strip()
+            provider = (headers.get(PROVIDER_HEADER) or "").strip() or PROVIDER_GOOGLE
+        else:
+            token = find_connect_token(headers, params)
+            sub = connect.auth.read_connect_token(token) if token else ""
+        if not sub:
+            return
+        mark = (provider, sub, rapidapi_user)
+        if mark in _noted_users:
+            return
+        try:
+            await connect.store.note_rapidapi_user(sub, rapidapi_user, provider)
+            _noted_users.add(mark)
+        except Exception as exc:  # noqa: BLE001 -- never fail a search over this
+            logger.warning("could not record the RapidAPI user of a stored key: %s", type(exc).__name__)
+
     def _howto(signup: str, api_name: str) -> dict[str, Any]:
         """`how_to_get_a_key`, plus the sign-in route when there is one.
 
@@ -2691,6 +2731,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                     quota_sink=state.quota,
                     outcome_sink=sink,
                     attempt_sink=state.attempts,
+                    user_sink=state.rapidapi_users,
                 )
             except AuthError as exc:
                 state.auth_error = str(exc)
@@ -2742,6 +2783,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
                         > settings.max_searches_per_tool_call
                     ),
                 ),
+            )
+
+        if state.rapidapi_users:
+            await _note_rapidapi_user(
+                headers, params, credential, state.rapidapi_users[-1]
             )
 
         # Settled before any of the branches below, because every one of them

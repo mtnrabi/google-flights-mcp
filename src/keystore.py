@@ -214,6 +214,10 @@ class KeyStore(Protocol):
 
     async def revoke(self, user_sub: str, provider: str = PROVIDER_GOOGLE) -> bool: ...
 
+    async def note_rapidapi_user(
+        self, user_sub: str, rapidapi_user: str, provider: str = PROVIDER_GOOGLE
+    ) -> None: ...
+
 
 class NullKeyStore:
     """The store a deployment gets when nothing is configured.
@@ -244,6 +248,11 @@ class NullKeyStore:
 
     async def revoke(self, user_sub: str, provider: str = PROVIDER_GOOGLE) -> bool:
         return False
+
+    async def note_rapidapi_user(
+        self, user_sub: str, rapidapi_user: str, provider: str = PROVIDER_GOOGLE
+    ) -> None:
+        return None
 
 
 class MemoryKeyStore:
@@ -308,6 +317,13 @@ class MemoryKeyStore:
         # sentence false.
         return self._rows.pop((provider, user_sub), None) is not None
 
+    async def note_rapidapi_user(
+        self, user_sub: str, rapidapi_user: str, provider: str = PROVIDER_GOOGLE
+    ) -> None:
+        row = self._rows.get((provider, user_sub))
+        if row is not None and row.get("revoked_at") is None:
+            row["rapidapi_user"] = rapidapi_user
+
 
 _SELECT = """
     SELECT email, key_ciphertext, key_nonce, key_last4, key_version, updated_at
@@ -332,6 +348,15 @@ _UPSERT = """
 """
 
 _DELETE = "DELETE FROM mcp_user_keys WHERE provider = $1 AND user_sub = $2"
+
+# Only writes when the value changes, so a busy account costs one round trip
+# and no row churn. Migration 005 adds the columns.
+_NOTE_USER = """
+    UPDATE mcp_user_keys
+       SET rapidapi_user = $3, rapidapi_user_seen_at = now()
+     WHERE provider = $1 AND user_sub = $2 AND revoked_at IS NULL
+       AND rapidapi_user IS DISTINCT FROM $3
+"""
 
 
 class PostgresKeyStore:
@@ -422,6 +447,15 @@ class PostgresKeyStore:
             await conn.close()
         # asyncpg returns the command tag, e.g. "DELETE 1".
         return status.rsplit(" ", 1)[-1].strip() not in ("", "0")
+
+    async def note_rapidapi_user(
+        self, user_sub: str, rapidapi_user: str, provider: str = PROVIDER_GOOGLE
+    ) -> None:
+        conn = await self._connect()
+        try:
+            await conn.execute(_NOTE_USER, provider, user_sub, rapidapi_user)
+        finally:
+            await conn.close()
 
 
 def build_key_store(

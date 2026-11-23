@@ -251,6 +251,11 @@ QUOTA_HEADERS = {
 }
 
 
+#: The flights backend echoes the Hub's `X-RapidAPI-User` (the RapidAPI account
+#: that owns the key) under this header, on our own keyed calls only. Read into
+#: `user_sink`; never shown to the caller. See migrations/005.
+USER_ECHO_HEADER = "x-fp-user"
+
 # The backend reports the outcome of a search in headers under this prefix.
 # `X-Search-Status: degraded` means the search did not complete, so the `[]` it
 # came with says nothing about flight availability. Matched by prefix so a
@@ -395,6 +400,7 @@ class RapidAPIClient:
         quota_sink: dict[str, int] | None = None,
         outcome_sink: list[dict[str, str]] | None = None,
         attempt_sink: list[int] | None = None,
+        user_sink: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """POST one search. Returns the (possibly empty) result list.
 
@@ -457,6 +463,10 @@ class RapidAPIClient:
             if response.status_code == 200:
                 if outcome_sink is not None:
                     outcome_sink.append(read_search_status(response))
+                if user_sink is not None:
+                    user = (response.headers.get(USER_ECHO_HEADER) or "").strip()
+                    if user:
+                        user_sink.append(user)
                 return self._parse(response)
 
             detail = _upstream_message(response)
